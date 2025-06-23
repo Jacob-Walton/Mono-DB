@@ -1,7 +1,7 @@
 use super::error::{ParseError, ParseResult};
 use super::lexer::{Lexer, Token};
 use crate::nsql::ast::*;
-use crate::nsql::interner::{InternerId, StringInterner};
+use crate::nsql::interner::{StringInterner};
 
 pub struct Parser<'a> {
     lexer: Lexer<'a>,

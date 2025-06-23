@@ -27,19 +27,6 @@ pub enum PageType {
     Free = 4,
 }
 
-impl PageType {
-    fn from_u8(value: u8) -> Option<Self> {
-        match value {
-            0 => Some(PageType::Invalid),
-            1 => Some(PageType::Meta),
-            2 => Some(PageType::Table),
-            3 => Some(PageType::Index),
-            4 => Some(PageType::Free),
-            _ => None,
-        }
-    }
-}
-
 /// Page header structure
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]

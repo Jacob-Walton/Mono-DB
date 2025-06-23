@@ -192,7 +192,7 @@ impl ProtocolHandler {
         }
     }
 
-    fn handle_list_tables(&self, ctx: &ExecutionContext) -> ServerMessage {
+    fn handle_list_tables(&self, _ctx: &ExecutionContext) -> ServerMessage {
         // TODO: Use catalog to get actual table information
         ServerMessage::TableList { tables: Vec::new() }
     }
@@ -201,6 +201,7 @@ impl ProtocolHandler {
         &self,
         result: &QueryResult,
         statement: Option<&Statement>,
+        #[allow(unused)]
         ctx: &ExecutionContext,
     ) -> ExecutionResultData {
         match result {
@@ -483,7 +484,7 @@ mod tests {
 
     #[test]
     fn test_protocol_handler_creation() {
-        let handler = ProtocolHandler::new();
+        let _handler = ProtocolHandler::new();
         // Just test that it creates without panic
         assert!(true);
     }

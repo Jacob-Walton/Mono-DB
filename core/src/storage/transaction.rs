@@ -1,7 +1,7 @@
 //! Transaction management
 
 use crate::error::{MonoError, MonoResult};
-use crate::storage::{Lsn, TxnId, WalManager, WalRecord};
+use crate::storage::{TxnId, WalManager, WalRecord};
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::sync::{

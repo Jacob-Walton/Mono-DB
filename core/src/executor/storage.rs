@@ -2,11 +2,11 @@ use super::*;
 use crate::nsql::ast::DataType;
 use crate::storage::{
     Column as StorageColumn, DataType as StorageDataType, Engine as StorageEngineImpl,
-    IsolationLevel, Lsn, TableCatalog, TxnId,
+    IsolationLevel, TxnId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc};
 
 #[derive(Debug, Clone)]
 pub struct ColumnInfo {
@@ -40,6 +40,7 @@ pub struct MemoryStorage {
 }
 
 struct Table {
+    #[allow(unused)]
     schema: Vec<ColumnInfo>,
     rows: Vec<HashMap<String, Value>>,
 }

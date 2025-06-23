@@ -197,12 +197,12 @@ impl Allocation {
 
     /// Get a slice view of the allocated memory
     pub unsafe fn as_slice(&self) -> &[u8] {
-        std::slice::from_raw_parts(self.ptr.as_ptr(), self.size)
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.size) }
     }
 
     /// Get a mutable slice view of the allocated memory
     pub unsafe fn as_mut_slice(&mut self) -> &mut [u8] {
-        std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.size)
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.size) }
     }
 }
 

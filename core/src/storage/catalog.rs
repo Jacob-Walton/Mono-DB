@@ -1,7 +1,7 @@
 //! Persistent table catalog
 
 use crate::error::{MonoError, MonoResult};
-use crate::storage::{Column, TableId, TableSchema};
+use crate::storage::{TableSchema};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};

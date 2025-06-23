@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
-use tokio::time::{Duration, Instant, interval};
+use tokio::time::{Duration, interval};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -50,6 +50,7 @@ impl ConnectionManager {
 pub struct Connection {
     id: Uuid,
     network_conn: NetworkConnection,
+    #[allow(unused)]
     engine: Arc<RwLock<Engine>>,
     protocol_handler: ProtocolHandler,
     execution_context: ExecutionContext,
@@ -64,7 +65,7 @@ impl Connection {
         let protocol_handler = ProtocolHandler::new();
 
         // Create execution context
-        let interner = {
+        let _interner = {
             let interner_ref = protocol_handler.interner.read();
             (*interner_ref).clone()
         };
@@ -89,7 +90,7 @@ impl Connection {
 
         // Start heartbeat monitor
         let shutdown_token = self.shutdown_token.clone();
-        let connection_timeout = self.connection_timeout;
+        let _connection_timeout = self.connection_timeout;
         let connection_id = self.id;
 
         tokio::spawn(async move {

@@ -5,7 +5,7 @@ use mono_core::network::protocol::{
 use mono_core::{MonoError, MonoResult};
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio::time::{Instant, interval, timeout};
+use tokio::time::{Instant, timeout};
 
 #[derive(Debug, Clone)]
 pub struct ExecutionResult {
@@ -277,6 +277,7 @@ impl DatabaseDriver {
             ServerMessage::ExecuteResult {
                 results,
                 rows_affected,
+                #[allow(unused)]
                 execution_time_ms,
             } => {
                 if results.is_empty() {
