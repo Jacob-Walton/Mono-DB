@@ -1,0 +1,7 @@
+/target
+node_modules/
+monodb_data/
+.nsql_history
+*.zip
+.vscode/
+.idea/
