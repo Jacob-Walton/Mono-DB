@@ -81,6 +81,7 @@ export const QueryEditor: React.FC<QueryEditorProps> = ({ onQueryResult, onError
             wordWrap: "on",
             automaticLayout: true,
             scrollBeyondLastLine: false,
+            cursorSmoothCaretAnimation: "on",
           }}
         />
       </div>

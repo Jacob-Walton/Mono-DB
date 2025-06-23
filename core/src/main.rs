@@ -19,7 +19,7 @@ async fn main() -> MonoResult<()> {
 
     // Create server configuration
     let mut config = Config::default();
-    config.port = 3282; // Set the port to 3282 as requested
+    config.port = 3282; // Set the port to default 3282
     config.data_dir = "./monodb_data".to_string();
 
     println!("{}", "Starting MonoDB Server...".bright_green());
