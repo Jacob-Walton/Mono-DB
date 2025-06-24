@@ -5,3 +5,4 @@ monodb_data/
 *.zip
 .vscode/
 .idea/
+.DS_Store
