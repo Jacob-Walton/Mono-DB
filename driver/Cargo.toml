@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 tokio = { workspace = true }
 mono_core = { path = "../core" }
+prettytable = "0.10.0"

@@ -453,9 +453,49 @@ impl BlockingDatabaseDriver {
         self.runtime.block_on(self.driver.list_tables())
     }
 
-    pub fn get_table_schema(&mut self, table_name: &str) -> Result<String, String> {
-        self.runtime
-            .block_on(self.driver.get_table_schema(table_name))
+    pub fn get_table_schema(&mut self, table: &str) -> Result<String, String> {
+        let sql = format!("DESCRIBE {}", table);
+        let result = self.execute(&sql)?;
+        if let Some(table_output) = &result.table_output {
+            if !table_output.trim().is_empty() {
+                return Ok(table_output.clone());
+            }
+        }
+        // Try to parse "Columns: id: INTEGER, username: VARCHAR(255), ..." style message
+        if result.message.starts_with("Columns: ") {
+            let columns_str = result.message.trim_start_matches("Columns: ").trim();
+            let mut rows = Vec::new();
+            for coldef in columns_str.split(',') {
+                let coldef = coldef.trim();
+                // Split "name: TYPE" or "name: TYPE(ARGS)"
+                if let Some((name, dtype)) = coldef.split_once(':') {
+                    rows.push((name.trim(), dtype.trim()));
+                }
+            }
+            if !rows.is_empty() {
+                use prettytable::{Table, Row, Cell};
+                let mut table = Table::new();
+                table.set_format(*prettytable::format::consts::FORMAT_NO_LINESEP_WITH_TITLE);
+                table.set_titles(Row::new(vec![
+                    Cell::new("Column"),
+                    Cell::new("Type"),
+                ]));
+                for (name, dtype) in rows {
+                    table.add_row(Row::new(vec![
+                        Cell::new(name),
+                        Cell::new(dtype),
+                    ]));
+                }
+                return Ok(table.to_string());
+            }
+        }
+        if result.message.contains("No columns found") || result.message.contains("No schema information available") {
+            Ok("No schema information available".to_string())
+        } else if result.success && !result.message.trim().is_empty() {
+            Ok(result.message.clone())
+        } else {
+            Ok("No schema information available".to_string())
+        }
     }
 
     pub fn is_connected(&self) -> bool {
