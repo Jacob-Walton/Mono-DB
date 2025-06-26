@@ -32,6 +32,7 @@ pub trait StorageEngine: Send + Sync {
     fn insert_row(&mut self, table: &str, row: HashMap<String, Value>) -> ExecutionResult<()>;
     fn scan_table(&self, table: &str) -> ExecutionResult<Vec<HashMap<String, Value>>>;
     fn get_table_schema(&self, table: &str) -> ExecutionResult<Vec<ColumnInfo>>;
+    fn get_tables(&self, _database: &str) -> Vec<String>;
 }
 
 pub struct MemoryStorage {
@@ -99,6 +100,16 @@ impl StorageEngine for MemoryStorage {
             .get(table)
             .cloned()
             .ok_or_else(|| ExecutionError::TableNotFound(table.to_string()))
+    }
+
+    fn get_tables(&self, _database: &str) -> Vec<String> {
+        let mut tables: Vec<String> = vec![];
+        
+        for (name, _) in self.tables.iter() {
+            tables.push(name.to_string());
+        }
+
+        tables
     }
 }
 
@@ -304,6 +315,12 @@ impl StorageEngine for PersistentStorage {
             Ok(_) => Ok(rows),
             Err(e) => Err(ExecutionError::StorageError(format!("Scan failed: {}", e))),
         }
+    }
+
+    fn get_tables(&self, _database: &str) -> Vec<String> {
+        let engine = self.engine.read().unwrap();
+
+        engine.list_tables()
     }
 }
 

@@ -30,6 +30,7 @@ pub enum Statement {
     Delete(DeleteStmt),
     CreateTable(CreateTableStmt),
     DropTable(DropTableStmt),
+    DescribeTable(DescribeTableStmt),
 }
 
 #[derive(Debug, Clone)]
@@ -126,6 +127,28 @@ pub enum DataType {
     Decimal(Option<(u8, u8)>),
 }
 
+impl DataType {
+    pub fn to_string(&self) -> String {
+        match self {
+            DataType::Integer => "INTEGER".to_string(),
+            DataType::Text => "TEXT".to_string(),
+            DataType::Boolean => "BOOLEAN".to_string(),
+            DataType::Varchar(size) => match size {
+                Some(n) => format!("VARCHAR({})", n),
+                None => "VARCHAR".to_string(),
+            },
+            DataType::Char(size) => match size {
+                Some(n) => format!("CHAR({})", n),
+                None => "CHAR".to_string(),
+            },
+            DataType::Decimal(size) => match size {
+                Some((p, s)) => format!("DECIMAL({}, {})", p, s),
+                None => "DECIMAL".to_string(),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ColumnConstraint {
     NotNull,
@@ -134,5 +157,10 @@ pub enum ColumnConstraint {
 
 #[derive(Debug, Clone)]
 pub struct DropTableStmt {
+    pub name: QualifiedName,
+}
+
+#[derive(Debug, Clone)]
+pub struct DescribeTableStmt {
     pub name: QualifiedName,
 }

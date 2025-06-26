@@ -41,6 +41,7 @@ impl<'a> Parser<'a> {
             Token::Delete => Ok(Statement::Delete(self.parse_delete()?)),
             Token::Create => Ok(Statement::CreateTable(self.parse_create_table()?)),
             Token::Drop => Ok(Statement::DropTable(self.parse_drop_table()?)),
+            Token::Describe => Ok(Statement::DescribeTable(self.parse_describe_table()?)),
             _ => Err(self.unexpected_token("statement")),
         }
     }
@@ -447,6 +448,14 @@ impl<'a> Parser<'a> {
         let name = self.parse_qualified_name()?;
 
         Ok(DropTableStmt { name })
+    }
+
+    fn parse_describe_table(&mut self) -> ParseResult<DescribeTableStmt> {
+        self.expect(Token::Describe)?;
+
+        let name = self.parse_qualified_name()?;
+
+        Ok(DescribeTableStmt { name })
     }
 
     fn parse_qualified_name(&mut self) -> ParseResult<QualifiedName> {

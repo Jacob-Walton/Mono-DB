@@ -1,3 +1,5 @@
+use crate::executor::ColumnInfo;
+
 use super::Value;
 use std::collections::HashMap;
 
@@ -27,6 +29,7 @@ pub enum QueryResult {
     Rows(Vec<Row>),
     RowsAffected(usize),
     Created,
+    Columns(Vec<ColumnInfo>),
 }
 
 impl QueryResult {
@@ -40,5 +43,9 @@ impl QueryResult {
 
     pub fn created() -> Self {
         Self::Created
+    }
+
+    pub fn columns(columns: Vec<ColumnInfo>) -> Self {
+        Self::Columns(columns)
     }
 }

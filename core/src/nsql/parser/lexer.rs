@@ -18,6 +18,7 @@ pub enum Token {
     Drop,
     Table,
     Set,
+    Describe,
 
     // Data types
     Integer,
@@ -246,6 +247,7 @@ impl<'a> Lexer<'a> {
             "DROP" => Token::Drop,
             "TABLE" => Token::Table,
             "SET" => Token::Set,
+            "DESCRIBE" => Token::Describe,
             "INTEGER" | "INT" => Token::Integer,
             "TEXT" => Token::Text,
             "BOOLEAN" | "BOOL" => Token::Boolean,

@@ -138,7 +138,7 @@ impl DatabaseDriver {
 
         match connection.read_response().await {
             Ok(Some(ServerMessage::TableList { tables })) => {
-                Ok(tables.into_iter().map(|t| t.name).collect())
+                Ok(tables)
             }
             Ok(Some(ServerMessage::Error { message, .. })) => {
                 Err(format!("Server error: {}", message))
@@ -160,9 +160,7 @@ impl DatabaseDriver {
         match self.execute(&describe_sql).await {
             Ok(result) => {
                 if result.success {
-                    Ok(result
-                        .table_output
-                        .unwrap_or("No schema information available".to_string()))
+                    Ok(result.table_output.unwrap_or_else(|| "No schema information available".to_string()))
                 } else {
                     Err(result.message)
                 }
@@ -396,14 +394,9 @@ impl DatabaseDriver {
                     let mut output = String::from("Available tables:\n");
                     for table in &tables {
                         output.push_str(&format!(
-                            "  {} ({} columns",
-                            table.name,
-                            table.columns.len()
+                            "  {}\n",
+                            table
                         ));
-                        if let Some(rows) = table.row_count {
-                            output.push_str(&format!(", {} rows", rows));
-                        }
-                        output.push_str(")\n");
                     }
                     output
                 };
