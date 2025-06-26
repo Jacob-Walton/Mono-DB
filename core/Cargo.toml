@@ -40,6 +40,7 @@ signal-hook = "0.3"
 signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
 futures = "0.3.31"
 tokio-util = "0.7.15"
+comfy-table = "7.1.1"
 
 [features]
 default = []
