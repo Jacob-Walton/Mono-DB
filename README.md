@@ -1,64 +1,38 @@
 # MonoDB
 
-> [!NOTE]
-> This is a work in progress. Features are being actively developed and may not be fully implemented yet.
+A modern, multi-paradigm database engine written in Rust.
 
-## Overview
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Rust](https://img.shields.io/badge/rust-1.80+-orange.svg)](https://www.rust-lang.org)
 
-MonoDB is a modern, multi-paradigm database engine written in Rust that combines the best of SQL, NoSQL, and key-value storage patterns. It's designed to be flexible, performant, and easy to use while maintaining ACID compliance and data safety.
-
-## Key Features
-
-- **🚀 High Performance**: Written in Rust for memory safety and speed
-- **🔄 Multi-Paradigm**: Support for SQL, NoSQL, and key-value operations
-- **🛡️ ACID Compliant**: Full transaction support with configurable isolation levels
-- **💾 Persistent Storage**: Write-ahead logging and crash recovery
-- **🌐 Network Ready**: Built-in TCP server with JSON protocol
-- **⚡ Concurrent**: Multi-threaded query processing and transaction handling
+> [!WARNING]
+> **Early Development**: MonoDB is in active development. Features may change significantly.
 
 ## Quick Start
 
-### Prerequisites
-
-- Rust 1.70+ (install from [rustup.rs](https://rustup.rs/))
-- Git
-
-### Installation
-
 ```bash
-# Clone the repository
+# Clone and build
 git clone https://github.com/Jacob-Walton/Mono-DB.git
 cd Mono-DB
-
-# Build the project
 cargo build --release
 
-# Run the server
-cargo run --bin mono-core
+# Start server
+cargo run --bin monod --release
+
+# In another terminal, start REPL
+cargo run --bin repl --release
 ```
 
-### Basic Usage
+## Documentation
 
-```sql
--- Create a table
-CREATE TABLE users (
-    id INTEGER PRIMARY KEY,
-    name VARCHAR(100) NOT NULL,
-    email VARCHAR(255) NOT NULL
-);
+📖 **[Complete Documentation](https://jacob-walton.github.io/Mono-DB/docs/intro)**
 
--- Insert data
-INSERT INTO users (id, name, email) VALUES 
-    (1, 'Alice', 'alice@example.com'),
-    (2, 'Bob', 'bob@example.com');
+- [Getting Started Guide](https://jacob-walton.github.io/Mono-DB/docs/getting-started) - Installation and first queries
+- [Architecture Overview](https://jacob-walton.github.io/Mono-DB/docs/architecture/overview) - How MonoDB works
+- [Network Protocol](https://jacob-walton.github.io/Mono-DB/docs/api/network-protocol) - Client development
 
--- Query data
-SELECT * FROM users WHERE name = 'Alice';
+## License
 
--- Update data
-UPDATE users SET email = 'alice.new@example.com' WHERE id = 1;
-```
+MIT License
 
-## Architecture
-
-MonoDB is built with a modular architecture:
+⭐ **Star this repo** to follow MonoDB's development!
