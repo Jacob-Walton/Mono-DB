@@ -26,10 +26,10 @@ impl Row {
 
 #[derive(Debug)]
 pub enum QueryResult {
-    Rows(Vec<Row>),
-    RowsAffected(usize),
-    Created,
-    Columns(Vec<ColumnInfo>),
+	Rows(Vec<Row>),
+	RowsAffected(usize),
+	Created,
+	Columns(Vec<ColumnInfo>),
 }
 
 impl QueryResult {
@@ -41,11 +41,11 @@ impl QueryResult {
 		Self::RowsAffected(count)
 	}
 
-    pub fn created() -> Self {
-        Self::Created
-    }
+	pub fn created() -> Self {
+		Self::Created
+	}
 
-    pub fn columns(columns: Vec<ColumnInfo>) -> Self {
-        Self::Columns(columns)
-    }
+	pub fn columns(columns: Vec<ColumnInfo>) -> Self {
+		Self::Columns(columns)
+	}
 }
