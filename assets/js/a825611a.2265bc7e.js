@@ -1,0 +1,1 @@
+"use strict";(self.webpackChunkmonodb_docs=self.webpackChunkmonodb_docs||[]).push([[338],{6806:o=>{o.exports=JSON.parse('{"authors":[{"name":"Jacob Walton","title":"Creator of MonoDB","url":"https://github.com/Jacob-Walton","imageURL":"https://github.com/Jacob-Walton.png","key":"jacob","page":null,"count":1}]}')}}]);

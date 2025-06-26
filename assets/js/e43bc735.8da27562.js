@@ -1,0 +1,1 @@
+"use strict";(self.webpackChunkmonodb_docs=self.webpackChunkmonodb_docs||[]).push([[329],{3978:o=>{o.exports=JSON.parse('{"metadata":{"permalink":"/Mono-DB/blog","page":1,"postsPerPage":10,"totalPages":1,"totalCount":1,"blogDescription":"Blog","blogTitle":"Blog"}}')}}]);

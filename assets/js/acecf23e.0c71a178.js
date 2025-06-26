@@ -1,0 +1,1 @@
+"use strict";(self.webpackChunkmonodb_docs=self.webpackChunkmonodb_docs||[]).push([[903],{1912:o=>{o.exports=JSON.parse('{"blogBasePath":"/Mono-DB/blog","blogTitle":"Blog","authorsListPath":"/Mono-DB/blog/authors"}')}}]);

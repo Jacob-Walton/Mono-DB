@@ -1,0 +1,1 @@
+"use strict";(self.webpackChunkmonodb_docs=self.webpackChunkmonodb_docs||[]).push([[583],{6866:(t,e,n)=>{n.r(e),n.d(e,{default:()=>o});var i=n(4586),a=n(1656),s=n(4848);function o(){const{siteConfig:t}=(0,i.A)();return(0,s.jsx)(a.A,{title:`${t.title} - Multi-paradigm Database Engine`,description:"MonoDB is a modern, multi-paradigm database engine written in Rust."})}}}]);

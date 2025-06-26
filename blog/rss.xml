@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?><?xml-stylesheet type="text/xsl" href="rss.xsl"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+    <channel>
+        <title>MonoDB Blog</title>
+        <link>https://jacob-walton.github.io/Mono-DB/blog</link>
+        <description>MonoDB Blog</description>
+        <lastBuildDate>Thu, 26 Jun 2025 18:25:43 GMT</lastBuildDate>
+        <docs>https://validator.w3.org/feed/docs/rss2.html</docs>
+        <generator>https://github.com/jpmonette/feed</generator>
+        <language>en</language>
+        <item>
+            <title><![CDATA[Welcome to MonoDB]]></title>
+            <link>https://jacob-walton.github.io/Mono-DB/blog/welcome</link>
+            <guid>https://jacob-walton.github.io/Mono-DB/blog/welcome</guid>
+            <pubDate>Thu, 26 Jun 2025 18:25:43 GMT</pubDate>
+            <description><![CDATA[MonoDB aims to combine the best features of relational, document, and graph databases into a single, unified system. While we're still in early development, we're making steady progress on building a solid foundation.]]></description>
+            <content:encoded><![CDATA[<p>MonoDB aims to combine the best features of relational, document, and graph databases into a single, unified system. While we're still in early development, we're making steady progress on building a solid foundation.</p>
+<h2 class="anchor anchorWithStickyNavbar_LWe7" id="whats-working-today">What's Working Today<a href="https://jacob-walton.github.io/Mono-DB/blog/welcome#whats-working-today" class="hash-link" aria-label="Direct link to What's Working Today" title="Direct link to What's Working Today">​</a></h2>
+<ul>
+<li>ACID-compliant storage engine</li>
+<li>Basic SQL support</li>
+<li>Client-server architecture</li>
+<li>Interactive REPL</li>
+</ul>
+<h2 class="anchor anchorWithStickyNavbar_LWe7" id="whats-coming">What's Coming<a href="https://jacob-walton.github.io/Mono-DB/blog/welcome#whats-coming" class="hash-link" aria-label="Direct link to What's Coming" title="Direct link to What's Coming">​</a></h2>
+<ul>
+<li>Advanced query optimization</li>
+<li>Multi-model data support</li>
+<li>Distributed features</li>
+<li>Natural language queries</li>
+</ul>
+<p>Stay tuned for more updates as development continues!</p>]]></content:encoded>
+            <category>announcement</category>
+            <category>monodb</category>
+        </item>
+    </channel>
+</rss>

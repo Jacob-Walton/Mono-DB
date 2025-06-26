@@ -1,0 +1,1 @@
+"use strict";(self.webpackChunkmonodb_docs=self.webpackChunkmonodb_docs||[]).push([[472],{5513:e=>{e.exports=JSON.parse('{"title":"Recent posts","items":[{"title":"Welcome to MonoDB","permalink":"/Mono-DB/blog/welcome","unlisted":false,"date":"2025-06-26T18:25:43.000Z"}]}')}}]);

@@ -1,0 +1,1 @@
+"use strict";(self.webpackChunkmonodb_docs=self.webpackChunkmonodb_docs||[]).push([[354],{9155:o=>{o.exports=JSON.parse('{"tags":[{"label":"announcement","permalink":"/Mono-DB/blog/tags/announcement","count":1},{"label":"monodb","permalink":"/Mono-DB/blog/tags/monodb","count":1}]}')}}]);
