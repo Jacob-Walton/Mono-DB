@@ -183,7 +183,7 @@ Configuration file support is planned but not yet implemented. Currently, all se
 
 - Explore the [NSQL Reference](nsql-reference) to learn about the query language
 - Read about the [Architecture](architecture/overview) to learn about how MonoDB works
-- Check the [API Reference](api-reference) if you want to build a client
+- Check the [API Reference](api/network-protocol) if you want to build a client
 
 ## Troubleshooting
 
