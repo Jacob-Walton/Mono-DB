@@ -27,11 +27,12 @@ pub enum Value {
 }
 
 pub trait StorageEngine: Send + Sync {
-	fn create_table(&mut self, name: &str, columns: &[ColumnInfo]) -> ExecutionResult<()>;
-	fn drop_table(&mut self, name: &str) -> ExecutionResult<()>;
-	fn insert_row(&mut self, table: &str, row: HashMap<String, Value>) -> ExecutionResult<()>;
-	fn scan_table(&self, table: &str) -> ExecutionResult<Vec<HashMap<String, Value>>>;
-	fn get_table_schema(&self, table: &str) -> ExecutionResult<Vec<ColumnInfo>>;
+    fn create_table(&mut self, name: &str, columns: &[ColumnInfo]) -> ExecutionResult<()>;
+    fn drop_table(&mut self, name: &str) -> ExecutionResult<()>;
+    fn insert_row(&mut self, table: &str, row: HashMap<String, Value>) -> ExecutionResult<()>;
+    fn scan_table(&self, table: &str) -> ExecutionResult<Vec<HashMap<String, Value>>>;
+    fn get_table_schema(&self, table: &str) -> ExecutionResult<Vec<ColumnInfo>>;
+    fn get_tables(&self, _database: &str) -> Vec<String>;
 }
 
 pub struct MemoryStorage {
@@ -94,12 +95,22 @@ impl StorageEngine for MemoryStorage {
 		Ok(table.rows.clone())
 	}
 
-	fn get_table_schema(&self, table: &str) -> ExecutionResult<Vec<ColumnInfo>> {
-		self.schemas
-			.get(table)
-			.cloned()
-			.ok_or_else(|| ExecutionError::TableNotFound(table.to_string()))
-	}
+    fn get_table_schema(&self, table: &str) -> ExecutionResult<Vec<ColumnInfo>> {
+        self.schemas
+            .get(table)
+            .cloned()
+            .ok_or_else(|| ExecutionError::TableNotFound(table.to_string()))
+    }
+
+    fn get_tables(&self, _database: &str) -> Vec<String> {
+        let mut tables: Vec<String> = vec![];
+        
+        for (name, _) in self.tables.iter() {
+            tables.push(name.to_string());
+        }
+
+        tables
+    }
 }
 
 /// Persistent storage engine implementation
@@ -299,12 +310,18 @@ impl StorageEngine for PersistentStorage {
 		// Always commit the transaction
 		let _ = engine.commit_transaction(txn.id);
 
-		// Handle scan result
-		match scan_result {
-			Ok(_) => Ok(rows),
-			Err(e) => Err(ExecutionError::StorageError(format!("Scan failed: {}", e))),
-		}
-	}
+        // Handle scan result
+        match scan_result {
+            Ok(_) => Ok(rows),
+            Err(e) => Err(ExecutionError::StorageError(format!("Scan failed: {}", e))),
+        }
+    }
+
+    fn get_tables(&self, _database: &str) -> Vec<String> {
+        let engine = self.engine.read().unwrap();
+
+        engine.list_tables()
+    }
 }
 
 fn convert_data_type(data_type: &crate::nsql::ast::DataType) -> StorageDataType {

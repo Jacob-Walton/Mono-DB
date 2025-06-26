@@ -25,20 +25,21 @@ impl Executor {
 		Ok(results)
 	}
 
-	pub fn execute_statement(
-		&self,
-		statement: &Statement,
-		ctx: &mut ExecutionContext,
-	) -> ExecutionResult<QueryResult> {
-		match statement {
-			Statement::Query(query) => self.execute_query(query, ctx),
-			Statement::Insert(insert) => self.execute_insert(insert, ctx),
-			Statement::CreateTable(create) => self.execute_create_table(create, ctx),
-			Statement::DropTable(drop) => self.execute_drop_table(drop, ctx),
-			Statement::Update(update) => self.execute_update(update, ctx),
-			Statement::Delete(delete) => self.execute_delete(delete, ctx),
-		}
-	}
+    pub fn execute_statement(
+        &self,
+        statement: &Statement,
+        ctx: &mut ExecutionContext,
+    ) -> ExecutionResult<QueryResult> {
+        match statement {
+            Statement::Query(query) => self.execute_query(query, ctx),
+            Statement::Insert(insert) => self.execute_insert(insert, ctx),
+            Statement::CreateTable(create) => self.execute_create_table(create, ctx),
+            Statement::DropTable(drop) => self.execute_drop_table(drop, ctx),
+            Statement::Update(update) => self.execute_update(update, ctx),
+            Statement::Delete(delete) => self.execute_delete(delete, ctx),
+            Statement::DescribeTable(describe) => self.execute_describe_table(describe, ctx),
+        }
+    }
 
 	fn execute_query(
 		&self,
@@ -226,15 +227,27 @@ impl Executor {
 		Ok(QueryResult::affected(1))
 	}
 
-	fn execute_update(
-		&self,
-		update: &UpdateStmt,
-		ctx: &mut ExecutionContext,
-	) -> ExecutionResult<QueryResult> {
-		let table_name = self.qualified_name_to_string(&update.table, &ctx.interner);
-		let rows_data = ctx.storage.scan_table(&table_name)?;
-		let schema = ctx.storage.get_table_schema(&table_name)?;
-		let mut rows_affected = 0;
+    fn execute_describe_table(
+        &self,
+        describe: &DescribeTableStmt,
+        ctx: &mut ExecutionContext,
+    ) -> ExecutionResult<QueryResult> {
+        let table_name = self.qualified_name_to_string(&describe.name, &ctx.interner);
+
+        let schema = ctx.storage.get_table_schema(&table_name)?;
+
+        Ok(QueryResult::columns(schema))
+    }
+
+    fn execute_update(
+        &self,
+        update: &UpdateStmt,
+        ctx: &mut ExecutionContext,
+    ) -> ExecutionResult<QueryResult> {
+        let table_name = self.qualified_name_to_string(&update.table, &ctx.interner);
+        let rows_data = ctx.storage.scan_table(&table_name)?;
+        let schema = ctx.storage.get_table_schema(&table_name)?;
+        let mut rows_affected = 0;
 
 		// Clear and recreate table
 		ctx.storage.drop_table(&table_name)?;

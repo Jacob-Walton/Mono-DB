@@ -136,40 +136,38 @@ impl DatabaseDriver {
 			return Err(format!("Failed to send request: {}", e));
 		}
 
-		match connection.read_response().await {
-			Ok(Some(ServerMessage::TableList { tables })) => {
-				Ok(tables.into_iter().map(|t| t.name).collect())
-			}
-			Ok(Some(ServerMessage::Error { message, .. })) => {
-				Err(format!("Server error: {}", message))
-			}
-			Ok(Some(_)) => Err("Unexpected response from server".to_string()),
-			Ok(None) => {
-				self.connection = None;
-				Err("Connection closed by server".to_string())
-			}
-			Err(e) => {
-				self.connection = None;
-				Err(format!("Failed to read response: {}", e))
-			}
-		}
-	}
+        match connection.read_response().await {
+            Ok(Some(ServerMessage::TableList { tables })) => {
+                Ok(tables)
+            }
+            Ok(Some(ServerMessage::Error { message, .. })) => {
+                Err(format!("Server error: {}", message))
+            }
+            Ok(Some(_)) => Err("Unexpected response from server".to_string()),
+            Ok(None) => {
+                self.connection = None;
+                Err("Connection closed by server".to_string())
+            }
+            Err(e) => {
+                self.connection = None;
+                Err(format!("Failed to read response: {}", e))
+            }
+        }
+    }
 
-	pub async fn get_table_schema(&mut self, table_name: &str) -> Result<String, String> {
-		let describe_sql = format!("DESCRIBE {}", table_name);
-		match self.execute(&describe_sql).await {
-			Ok(result) => {
-				if result.success {
-					Ok(result
-						.table_output
-						.unwrap_or("No schema information available".to_string()))
-				} else {
-					Err(result.message)
-				}
-			}
-			Err(e) => Err(e),
-		}
-	}
+    pub async fn get_table_schema(&mut self, table_name: &str) -> Result<String, String> {
+        let describe_sql = format!("DESCRIBE {}", table_name);
+        match self.execute(&describe_sql).await {
+            Ok(result) => {
+                if result.success {
+                    Ok(result.table_output.unwrap_or_else(|| "No schema information available".to_string()))
+                } else {
+                    Err(result.message)
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
 
 	pub fn is_connected(&self) -> bool {
 		self.connection.is_some()
@@ -389,24 +387,19 @@ impl DatabaseDriver {
 				})
 			}
 
-			ServerMessage::TableList { tables } => {
-				let table_output = if tables.is_empty() {
-					"No tables found".to_string()
-				} else {
-					let mut output = String::from("Available tables:\n");
-					for table in &tables {
-						output.push_str(&format!(
-							"  {} ({} columns",
-							table.name,
-							table.columns.len()
-						));
-						if let Some(rows) = table.row_count {
-							output.push_str(&format!(", {} rows", rows));
-						}
-						output.push_str(")\n");
-					}
-					output
-				};
+            ServerMessage::TableList { tables } => {
+                let table_output = if tables.is_empty() {
+                    "No tables found".to_string()
+                } else {
+                    let mut output = String::from("Available tables:\n");
+                    for table in &tables {
+                        output.push_str(&format!(
+                            "  {}\n",
+                            table
+                        ));
+                    }
+                    output
+                };
 
 				Ok(ExecutionResult {
 					success: true,
@@ -460,10 +453,50 @@ impl BlockingDatabaseDriver {
 		self.runtime.block_on(self.driver.list_tables())
 	}
 
-	pub fn get_table_schema(&mut self, table_name: &str) -> Result<String, String> {
-		self.runtime
-			.block_on(self.driver.get_table_schema(table_name))
-	}
+    pub fn get_table_schema(&mut self, table: &str) -> Result<String, String> {
+        let sql = format!("DESCRIBE {}", table);
+        let result = self.execute(&sql)?;
+        if let Some(table_output) = &result.table_output {
+            if !table_output.trim().is_empty() {
+                return Ok(table_output.clone());
+            }
+        }
+        // Try to parse "Columns: id: INTEGER, username: VARCHAR(255), ..." style message
+        if result.message.starts_with("Columns: ") {
+            let columns_str = result.message.trim_start_matches("Columns: ").trim();
+            let mut rows = Vec::new();
+            for coldef in columns_str.split(',') {
+                let coldef = coldef.trim();
+                // Split "name: TYPE" or "name: TYPE(ARGS)"
+                if let Some((name, dtype)) = coldef.split_once(':') {
+                    rows.push((name.trim(), dtype.trim()));
+                }
+            }
+            if !rows.is_empty() {
+                use prettytable::{Table, Row, Cell};
+                let mut table = Table::new();
+                table.set_format(*prettytable::format::consts::FORMAT_NO_LINESEP_WITH_TITLE);
+                table.set_titles(Row::new(vec![
+                    Cell::new("Column"),
+                    Cell::new("Type"),
+                ]));
+                for (name, dtype) in rows {
+                    table.add_row(Row::new(vec![
+                        Cell::new(name),
+                        Cell::new(dtype),
+                    ]));
+                }
+                return Ok(table.to_string());
+            }
+        }
+        if result.message.contains("No columns found") || result.message.contains("No schema information available") {
+            Ok("No schema information available".to_string())
+        } else if result.success && !result.message.trim().is_empty() {
+            Ok(result.message.clone())
+        } else {
+            Ok("No schema information available".to_string())
+        }
+    }
 
 	pub fn is_connected(&self) -> bool {
 		self.driver.is_connected()

@@ -5,19 +5,20 @@ use crate::nsql::{
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
-	// Basic SQL Keywords
-	Select,
-	From,
-	Where,
-	Insert,
-	Into,
-	Values,
-	Update,
-	Delete,
-	Create,
-	Drop,
-	Table,
-	Set,
+    // Basic SQL Keywords
+    Select,
+    From,
+    Where,
+    Insert,
+    Into,
+    Values,
+    Update,
+    Delete,
+    Create,
+    Drop,
+    Table,
+    Set,
+    Describe,
 
 	// Data types
 	Integer,
@@ -231,39 +232,40 @@ impl<'a> Lexer<'a> {
 		Ok(token)
 	}
 
-	fn classify_identifier(&mut self, text: &str) -> Token {
-		let upper = text.to_uppercase();
-		match upper.as_str() {
-			"SELECT" => Token::Select,
-			"FROM" => Token::From,
-			"WHERE" => Token::Where,
-			"INSERT" => Token::Insert,
-			"INTO" => Token::Into,
-			"VALUES" => Token::Values,
-			"UPDATE" => Token::Update,
-			"DELETE" => Token::Delete,
-			"CREATE" => Token::Create,
-			"DROP" => Token::Drop,
-			"TABLE" => Token::Table,
-			"SET" => Token::Set,
-			"INTEGER" | "INT" => Token::Integer,
-			"TEXT" => Token::Text,
-			"BOOLEAN" | "BOOL" => Token::Boolean,
-			"VARCHAR" => Token::Varchar,
-			"CHAR" => Token::Char,
-			"DECIMAL" => Token::Decimal,
-			"PRIMARY" => Token::Primary,
-			"KEY" => Token::Key,
-			"NOT" => Token::Not,
-			"NULL" => Token::Null,
-			"AND" => Token::And,
-			"OR" => Token::Or,
-			"TRUE" => Token::True,
-			"FALSE" => Token::False,
-			_ => {
-				let id = text.intern(self.interner);
-				Token::Identifier(id)
-			}
-		}
-	}
+    fn classify_identifier(&mut self, text: &str) -> Token {
+        let upper = text.to_uppercase();
+        match upper.as_str() {
+            "SELECT" => Token::Select,
+            "FROM" => Token::From,
+            "WHERE" => Token::Where,
+            "INSERT" => Token::Insert,
+            "INTO" => Token::Into,
+            "VALUES" => Token::Values,
+            "UPDATE" => Token::Update,
+            "DELETE" => Token::Delete,
+            "CREATE" => Token::Create,
+            "DROP" => Token::Drop,
+            "TABLE" => Token::Table,
+            "SET" => Token::Set,
+            "DESCRIBE" => Token::Describe,
+            "INTEGER" | "INT" => Token::Integer,
+            "TEXT" => Token::Text,
+            "BOOLEAN" | "BOOL" => Token::Boolean,
+            "VARCHAR" => Token::Varchar,
+            "CHAR" => Token::Char,
+            "DECIMAL" => Token::Decimal,
+            "PRIMARY" => Token::Primary,
+            "KEY" => Token::Key,
+            "NOT" => Token::Not,
+            "NULL" => Token::Null,
+            "AND" => Token::And,
+            "OR" => Token::Or,
+            "TRUE" => Token::True,
+            "FALSE" => Token::False,
+            _ => {
+                let id = text.intern(self.interner);
+                Token::Identifier(id)
+            }
+        }
+    }
 }

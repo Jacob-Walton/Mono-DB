@@ -36,7 +36,8 @@ pub enum ServerMessage {
 		databases: Vec<String>,
 	},
 	TableList {
-		tables: Vec<TableInfo>,
+		// tables: Vec<TableInfo>,
+		tables: Vec<String>,
 	},
 	Error {
 		code: ErrorCode,
@@ -62,6 +63,7 @@ pub enum ResultType {
 	CreateTable,
 	DropTable,
 	Other,
+	Describe,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,9 +195,9 @@ impl ProtocolHandler {
 		}
 	}
 
-	fn handle_list_tables(&self, _ctx: &ExecutionContext) -> ServerMessage {
-		// TODO: Use catalog to get actual table information
-		ServerMessage::TableList { tables: Vec::new() }
+	fn handle_list_tables(&self, ctx: &ExecutionContext) -> ServerMessage {
+		let tables = ctx.storage.get_tables("");
+		ServerMessage::TableList { tables }
 	}
 
 	fn convert_query_result(
@@ -264,6 +266,26 @@ impl ProtocolHandler {
 					columns: Vec::new(),
 					rows: Vec::new(),
 					rows_affected: Some(1),
+				}
+			}
+			QueryResult::Columns(column_info) => {
+				let result_type = ResultType::Describe;
+
+				let mut columns: Vec<ColumnMetadata> = vec![];
+
+				for column in column_info {
+					columns.push(ColumnMetadata {
+						name: column.name.clone(),
+						data_type: column.data_type.to_string(),
+						nullable: column.nullable,
+					})
+				}
+
+				ExecutionResultData {
+					result_type,
+					columns: columns,
+					rows: Vec::new(),
+					rows_affected: None,
 				}
 			}
 		}
@@ -654,32 +676,33 @@ pub fn format_execution_result(result: &ExecutionResultData) -> String {
 			if result.rows.is_empty() {
 				"Empty result set".to_string()
 			} else {
-				format!(
-					"{} row{} returned",
-					result.rows.len(),
-					if result.rows.len() == 1 { "" } else { "s" }
-				)
+				format!("{} rows returned", result.rows.len())
 			}
 		}
 		ResultType::Insert => {
-			let count = result.rows_affected.unwrap_or(0);
-			format!(
-				"{} row{} inserted",
-				count,
-				if count == 1 { "" } else { "s" }
-			)
+			format!("{} rows inserted", result.rows_affected.unwrap_or(0))
 		}
 		ResultType::Update => {
-			let count = result.rows_affected.unwrap_or(0);
-			format!("{} row{} updated", count, if count == 1 { "" } else { "s" })
+			format!("{} rows updated", result.rows_affected.unwrap_or(0))
 		}
 		ResultType::Delete => {
-			let count = result.rows_affected.unwrap_or(0);
-			format!("{} row{} deleted", count, if count == 1 { "" } else { "s" })
+			format!("{} rows deleted", result.rows_affected.unwrap_or(0))
 		}
-		ResultType::CreateTable => "Table created successfully".to_string(),
-		ResultType::DropTable => "Table dropped successfully".to_string(),
-		ResultType::Other => "Command executed successfully".to_string(),
+		ResultType::CreateTable => "Table created".to_string(),
+		ResultType::DropTable => "Table dropped".to_string(),
+		ResultType::Other => "Command executed".to_string(),
+		ResultType::Describe => {
+			if result.columns.is_empty() {
+				"No columns found".to_string()
+			} else {
+				let column_info: Vec<String> = result
+					.columns
+					.iter()
+					.map(|col| format!("{}: {}", col.name, col.data_type))
+					.collect();
+				format!("Columns: {}", column_info.join(", "))
+			}
+		}
 	}
 }
 
