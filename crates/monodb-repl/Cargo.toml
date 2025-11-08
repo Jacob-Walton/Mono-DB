@@ -1,0 +1,20 @@
+[package]
+name = "monodb-repl"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "mdb"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+monodb-common = { path = "../monodb-common" }
+monodb-client = { path = "../monodb-client" }
+anyhow.workspace = true
+colored = "3.0.0"
+hex = "0.4"
+indexmap = "2.0"

@@ -1,0 +1,102 @@
+# MonoDB Server Configuration
+#
+# How to use this file
+# - Change values on the right-hand side of each setting.
+# - Save and restart the server to apply changes.
+
+# Server Configuration
+
+[server]
+# Host address to bind the server to.
+# Set to "0.0.0.0" to accept connections from any interface.
+# Env: MONODB_HOST
+host = "127.0.0.1"
+
+# TCP port for the server.
+# Env: MONODB_PORT
+port = 7899
+
+# Maximum number of concurrent client connections.
+# Higher values consume more memory but allow more concurrent users.
+# Env: MONODB_MAX_CONNECTIONS
+# max_connections = 1000
+
+# Storage Configuration
+
+[storage]
+# Path where database files are stored.
+# The directory is created if it doesn't exist.
+# Use a fast local SSD for best performance.
+data_dir = "./data"
+
+# Buffer pool size (pages) for B-Tree storage.
+# Memory used ≈ buffer_pool_size × page_size.
+# With the default 16KB pages, 8192 pages ≈ 128MB.
+buffer_pool_size = 8192
+
+# Use LSM-tree storage engine instead of B-tree
+# Default: true
+# - false: Use B-tree (better for read-heavy workloads and range queries)
+# - true: Use LSM-tree (better for write-heavy workloads and sequential access)
+use_lsm = true
+
+# Page size in bytes (for B-tree engine)
+# Default: 16384 (16KB)
+# Must be power of 2, typically 4KB, 8KB, 16KB, or 32KB
+# Larger pages reduce I/O but use more memory
+page_size = 16384
+
+# LSM-tree specific settings
+
+[storage.lsm]
+# Memory table size (bytes) before flushing to disk.
+# Larger values reduce I/O (fewer flushes) but use more RAM.
+# On small machines, reduce to 64–128 MiB.
+memtable_size = 536870912
+
+# Number of level-0 files that trigger compaction.
+# Higher values reduce compaction frequency when memtables are large.
+level0_file_num_compaction_trigger = 8
+
+# Maximum total size for level 0 (bytes).
+# Keep close to memtable_size.
+level0_size = 536870912
+
+# Size multiplier between levels
+# Default: 10
+# Level N+1 is approximately this many times larger than level N
+level_multiplier = 10
+
+# Compression for SST files (placeholder; not implemented yet).
+compression = true
+
+# Maximum number of levels in LSM tree
+# Default: 7
+# More levels allow larger datasets but may increase read latency
+max_level = 7
+
+# Bloom filter false positive rate (0.01 = 1%).
+# Lower values reduce false positives but use more memory.
+bloom_filter_fp_rate = 0.01
+
+# Write-ahead log (WAL) configuration
+[storage.wal]
+# WAL buffer size (bytes) for write batching.
+buffer_size = 4194304
+
+# Maximum WAL size (bytes) before rotation.
+max_size = 268435456
+
+# Sync changes to disk using the thresholds below.
+# Keep this enabled for durability.
+sync_on_write = true
+
+# Background WAL writer (non-blocking appends).
+# Leave enabled for better parallel write throughput.
+async_write = true
+
+# Group-commit thresholds:
+# - Sync after this many bytes appended to the WAL.
+sync_every_bytes = 4194304  # 4 MiB
+# - Ensure a sync at least this often (milliseconds), even if the byte threshold is not hit.
+sync_interval_ms = 20       # 20 ms

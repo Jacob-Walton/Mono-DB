@@ -1,0 +1,26 @@
+[package]
+name = "monodb-admin"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = "1.0.100"
+gpui = "0.2.2"
+gpui-component = "0.3.1"
+indexmap = "2.12.0"
+crossbeam-channel = "0.5.15"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+winreg = "0.55.0"
+windows = { version = "0.62", features = ["Win32_System_Registry", "Win32_Foundation", "Win32_System_Threading", "Win32_Security"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.26"
+objc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5.1", default-features = false, features = ["tokio"] }
+tokio = { version = "1", features = ["rt", "sync"] }

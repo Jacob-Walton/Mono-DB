@@ -1,0 +1,50 @@
+use gpui::*;
+use gpui::prelude::FluentBuilder;
+use gpui_component::StyledExt;
+
+use crate::components::{Dialog, SideBar, TitleBar};
+use crate::theme;
+
+pub struct App {
+    dialog_stack: Vec<Entity<Dialog>>,
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self {
+            dialog_stack: Vec::new(),
+        }
+    }
+}
+
+impl App {
+    pub fn push_dialog(&mut self, dialog: Entity<Dialog>, cx: &mut Context<Self>) {
+        self.dialog_stack.push(dialog);
+        cx.notify();
+    }
+
+    pub fn pop_dialog(&mut self, cx: &mut Context<Self>) {
+        self.dialog_stack.pop();
+        cx.notify();
+    }
+}
+
+impl Render for App {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let app_view = cx.entity();
+        let current_dialog = self.dialog_stack.last().cloned();
+
+        div()
+            .v_flex()
+            .gap_2()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .bg(rgb(theme::background()))
+            .child(cx.new(|_| SideBar::new(app_view.clone())))
+            .child(cx.new(|_| TitleBar::new()))
+            .when_some(current_dialog, |this, dialog| {
+                this.child(dialog)
+            })
+    }
+}

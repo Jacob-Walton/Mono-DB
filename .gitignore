@@ -1,0 +1,12 @@
+/target
+*.log
+dist/
+coursework_docs/
+tarpaulin-report.html
+*.profraw
+test-data*/
+data/
+*.bak
+Temp/
+.monodb_history
+nul

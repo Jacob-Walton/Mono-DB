@@ -1,0 +1,28 @@
+[package]
+name = "monodb-common"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["rlib"] # Define as rust-lib only (no FFI)
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+bincode.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+hex.workspace = true
+rand.workspace = true
+tokio.workspace = true
+# For creating custom errors easily
+thiserror = "2.0.17"
+# For quick hashes (similar to Git)
+sha1 = "0.10.6"
+indexmap = { version = "2.11.4", features = ["serde"] }
+base64 = "0.22.1"
+bytes.workspace = true
+rkyv = "0.8.12"

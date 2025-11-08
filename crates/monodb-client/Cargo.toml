@@ -1,0 +1,13 @@
+[package]
+name = "monodb-client"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tokio.workspace = true
+bytes.workspace = true
+monodb-common = { path = "../monodb-common" }
+parking_lot = "0.12.5"

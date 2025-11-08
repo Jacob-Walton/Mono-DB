@@ -1,0 +1,1067 @@
+use std::{
+    collections::{BTreeMap, HashSet},
+    ops::Index,
+    sync::{OnceLock, atomic::AtomicU32},
+};
+
+use base64::Engine;
+use indexmap::IndexMap;
+use rand::{TryRngCore, rngs::OsRng};
+use serde::{Deserialize, Serialize};
+use sha1::{Digest, Sha1};
+use uuid::Uuid;
+
+use crate::{MonoError, Result};
+
+/// Enum representing a type of value
+///
+/// Variants:
+/// - Primitive types: Null, Bool, Int32, Int64, Float32, Float64, String, Binary
+/// - Date/Time types: DateTime, Date, Time
+/// - Identifiers: Uuid, ObjectId
+/// - Collection types: Array, Object (Document/JSON), Set
+/// - Special types:
+///     - Row (SQL row)
+///     - SortedSet (Redis ZSET)
+///     - GeoPoint (Geospatial)
+///     - Reference (foreign key, document reference)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ValueType {
+    // Primitive types
+    Null,
+    Bool,
+    Int32,
+    Int64,
+    Float32,
+    Float64,
+    String,
+    Binary,
+
+    // Date/Time types
+    DateTime,
+    Date,
+    Time,
+
+    // Identifiers
+    Uuid,
+    ObjectId,
+
+    // Collection types
+    Array,
+    Object,
+    Set,
+
+    // Special types
+    Row,
+    SortedSet,
+    GeoPoint,
+
+    // Reference
+    Reference,
+}
+
+/// Universal value type for MonoDB
+///
+/// Variants
+/// * Primitive types: Null, Bool, Int32, Int64, Float32, Float64, String
+/// * Date/Time types: DateTime, Date, Time
+/// * Identifiers: Uuid, ObjectId
+/// * Collection types: Array, Object (Document/JSON), Set
+/// * Special types
+///     - Row: Represents a database row with named fields.
+///     - SortedSet: Represents a sorted set of unique values.
+///     - GeoPoint: Represents a geographical point with latitude and longitude.
+///     - Reference: Represents a reference to another value (e.g., foreign key, document reference).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Value {
+    // Primitive types
+    Null,
+    Bool(bool),
+    Int32(i32),
+    Int64(i64),
+    Float32(f32),
+    Float64(f64),
+    String(String),
+    Binary(Vec<u8>),
+
+    // Date/Time types
+    DateTime(chrono::DateTime<chrono::FixedOffset>),
+    Date(chrono::NaiveDate),
+    Time(chrono::NaiveTime),
+
+    // Identifiers
+    Uuid(uuid::Uuid),
+    ObjectId(ObjectId),
+
+    // Collection types
+    Array(Vec<Value>),
+    Object(BTreeMap<String, Value>),
+    Set(HashSet<String>),
+
+    // Special types
+    Row(IndexMap<String, Value>),
+    SortedSet(Vec<(f64, String)>),
+    GeoPoint { lat: f64, lng: f64 },
+
+    // Reference type
+    Reference { collection: String, id: Box<Value> },
+}
+
+impl Value {
+    /// Get the type name as a string
+    ///
+    /// # Example
+    /// ```rust
+    /// use monodb_common::Value;
+    ///
+    /// let val = Value::Int32(42);
+    /// assert_eq!(val.type_name(), "int32");
+    ///
+    /// let val = Value::String("Hello".to_string());
+    /// assert_eq!(val.type_name(), "string");
+    ///
+    /// let val = Value::Array(vec![Value::Int32(1), Value::Int32(2)]);
+    /// assert_eq!(val.type_name(), "array");
+    /// ```
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Value::Null => "null",
+            Value::Bool(_) => "bool",
+            Value::Int32(_) => "int32",
+            Value::Int64(_) => "int64",
+            Value::Float32(_) => "float32",
+            Value::Float64(_) => "float64",
+            Value::String(_) => "string",
+            Value::Binary(_) => "binary",
+            Value::DateTime(_) => "datetime",
+            Value::Date(_) => "date",
+            Value::Time(_) => "time",
+            Value::Uuid(_) => "uuid",
+            Value::ObjectId(_) => "objectid",
+            Value::Array(_) => "array",
+            Value::Object(_) => "object",
+            Value::Set(_) => "set",
+            Value::Row(_) => "row",
+            Value::SortedSet(_) => "sortedset",
+            Value::GeoPoint { .. } => "geopoint",
+            Value::Reference { .. } => "reference",
+        }
+    }
+
+    /// Get the corresponding ValueType for this Value
+    ///
+    /// # Example
+    ///
+    /// TODO
+    pub fn data_type(&self) -> ValueType {
+        match self {
+            Value::Null => ValueType::Null,
+            Value::Bool(_) => ValueType::Bool,
+            Value::Int32(_) => ValueType::Int32,
+            Value::Int64(_) => ValueType::Int64,
+            Value::Float32(_) => ValueType::Float32,
+            Value::Float64(_) => ValueType::Float64,
+            Value::String(_) => ValueType::String,
+            Value::Binary(_) => ValueType::Binary,
+            Value::DateTime(_) => ValueType::DateTime,
+            Value::Date(_) => ValueType::Date,
+            Value::Time(_) => ValueType::Time,
+            Value::Uuid(_) => ValueType::Uuid,
+            Value::ObjectId(_) => ValueType::ObjectId,
+            Value::Array(_) => ValueType::Array,
+            Value::Object(_) => ValueType::Object,
+            Value::Set(_) => ValueType::Set,
+            Value::Row(_) => ValueType::Row,
+            Value::SortedSet(_) => ValueType::SortedSet,
+            Value::GeoPoint { .. } => ValueType::GeoPoint,
+            Value::Reference { .. } => ValueType::Reference,
+        }
+    }
+
+    /// Convert Value to JSON representation
+    ///
+    /// # Example
+    /// ```rust
+    /// use monodb_common::Value;
+    ///
+    /// let val = Value::Int32(42);
+    /// let json = val.to_json();
+    /// assert_eq!(json, serde_json::json!(42));
+    ///
+    /// let val = Value::String("Hello".to_string());
+    /// let json = val.to_json();
+    /// assert_eq!(json, serde_json::json!("Hello"));
+    /// ```
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            Value::Null => serde_json::Value::Null,
+            Value::Bool(b) => serde_json::Value::Bool(*b),
+            Value::Int32(i) => serde_json::Value::Number((*i).into()),
+            Value::Int64(i) => serde_json::Value::Number((*i).into()),
+            Value::Float32(f) => serde_json::Number::from_f64(*f as f64)
+                .map_or(serde_json::Value::Null, serde_json::Value::Number),
+            Value::Float64(f) => serde_json::Number::from_f64(*f)
+                .map_or(serde_json::Value::Null, serde_json::Value::Number),
+            Value::String(s) => serde_json::Value::String(s.clone()),
+            Value::Binary(b) => serde_json::Value::String(format!(
+                "b64:{}",
+                base64::engine::general_purpose::STANDARD.encode(b)
+            )),
+            Value::DateTime(dt) => serde_json::Value::String(dt.to_rfc3339()),
+            Value::Date(d) => serde_json::Value::String(d.to_string()),
+            Value::Time(t) => serde_json::Value::String(t.to_string()),
+            Value::Uuid(u) => serde_json::Value::String(u.to_string()),
+            Value::ObjectId(oid) => serde_json::Value::String(oid.to_string()),
+            Value::Array(arr) => {
+                let json_arr: Vec<serde_json::Value> = arr.iter().map(|v| v.to_json()).collect();
+                serde_json::Value::Array(json_arr)
+            }
+            Value::Object(obj) => {
+                let json_obj: serde_json::Map<String, serde_json::Value> =
+                    obj.iter().map(|(k, v)| (k.clone(), v.to_json())).collect();
+                serde_json::Value::Object(json_obj)
+            }
+            Value::Set(set) => {
+                let json_arr: Vec<serde_json::Value> = set
+                    .iter()
+                    .map(|s| serde_json::Value::String(s.clone()))
+                    .collect();
+                serde_json::Value::Array(json_arr)
+            }
+            Value::Row(row) => {
+                let json_obj: serde_json::Map<String, serde_json::Value> =
+                    row.iter().map(|(k, v)| (k.clone(), v.to_json())).collect();
+                serde_json::Value::Object(json_obj)
+            }
+            Value::SortedSet(ss) => {
+                let json_arr: Vec<serde_json::Value> = ss
+                    .iter()
+                    .map(|(score, val)| {
+                        let mut obj = serde_json::Map::new();
+                        obj.insert(
+                            "score".to_string(),
+                            serde_json::Value::Number(
+                                serde_json::Number::from_f64(*score)
+                                    .unwrap_or(serde_json::Number::from(0)),
+                            ),
+                        );
+                        obj.insert("value".to_string(), serde_json::Value::String(val.clone()));
+                        serde_json::Value::Object(obj)
+                    })
+                    .collect();
+                serde_json::Value::Array(json_arr)
+            }
+            Value::GeoPoint { lat, lng } => {
+                let mut obj = serde_json::Map::new();
+                obj.insert(
+                    "lat".to_string(),
+                    serde_json::Value::Number(
+                        serde_json::Number::from_f64(*lat).unwrap_or(serde_json::Number::from(0)),
+                    ),
+                );
+                obj.insert(
+                    "lng".to_string(),
+                    serde_json::Value::Number(
+                        serde_json::Number::from_f64(*lng).unwrap_or(serde_json::Number::from(0)),
+                    ),
+                );
+                serde_json::Value::Object(obj)
+            }
+            Value::Reference { collection, id } => {
+                let mut obj = serde_json::Map::new();
+                obj.insert(
+                    "collection".to_string(),
+                    serde_json::Value::String(collection.clone()),
+                );
+                obj.insert("id".to_string(), id.to_json());
+                obj.insert("id".to_string(), id.to_json());
+                serde_json::Value::Object(obj)
+            }
+        }
+    }
+
+    /// Convert from JSON representation
+    ///
+    /// # Example
+    /// ```rust
+    /// use monodb_common::Value;
+    /// use serde_json::json;
+    ///
+    /// let val = Value::from_json(json!({"key": "value"}));
+    /// assert_eq!(val, Value::Object({let mut map = std::collections::BTreeMap::new(); map.insert("key".into(), Value::String("value".into())); map}));
+    /// ```
+    pub fn from_json(json: serde_json::Value) -> Self {
+        match json {
+            serde_json::Value::Null => Value::Null,
+            serde_json::Value::Bool(b) => Value::Bool(b),
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    if i >= i32::MIN as i64 && i <= i32::MAX as i64 {
+                        Value::Int32(i as i32)
+                    } else {
+                        Value::Int64(i)
+                    }
+                } else if let Some(f) = n.as_f64() {
+                    Value::Float64(f)
+                } else {
+                    Value::Null
+                }
+            }
+            serde_json::Value::String(s) => Value::String(s),
+            serde_json::Value::Array(arr) => {
+                Value::Array(arr.into_iter().map(Value::from_json).collect())
+            }
+            serde_json::Value::Object(map) => {
+                let obj: BTreeMap<String, Value> = map
+                    .into_iter()
+                    .map(|(k, v)| (k, Value::from_json(v)))
+                    .collect();
+                Value::Object(obj)
+            }
+        }
+    }
+
+    /// Extract the array from Value::Array, returning None if not an array
+    pub fn as_array(&self) -> Option<&Vec<Value>> {
+        match self {
+            Value::Array(arr) => Some(arr),
+            _ => None,
+        }
+    }
+
+    /// Extract the array from Value::Array, consuming the value
+    pub fn into_array(self) -> Option<Vec<Value>> {
+        match self {
+            Value::Array(arr) => Some(arr),
+            _ => None,
+        }
+    }
+
+    /// Extract the string from Value::String, returning None if not a string
+    pub fn as_string(&self) -> Option<&String> {
+        match self {
+            Value::String(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Extract the string from Value::String, consuming the value
+    pub fn into_string(self) -> Option<String> {
+        match self {
+            Value::String(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Extract the integer from Value::Int64, returning None if not an int
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Value::Int64(i) => Some(*i),
+            _ => None,
+        }
+    }
+
+    /// Extract the integer from Value::Int32, returning None if not an int
+    pub fn as_i32(&self) -> Option<i32> {
+        match self {
+            Value::Int32(i) => Some(*i),
+            _ => None,
+        }
+    }
+
+    /// Extract the float from Value::Float64, returning None if not a float
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            Value::Float64(f) => Some(*f),
+            _ => None,
+        }
+    }
+
+    /// Extract the float from Value::Float32, returning None if not a float
+    pub fn as_f32(&self) -> Option<f32> {
+        match self {
+            Value::Float32(f) => Some(*f),
+            _ => None,
+        }
+    }
+
+    /// Extract the boolean from Value::Bool, returning None if not a boolean
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Value::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    /// Extract the object from Value::Object, returning None if not an object
+    pub fn as_object(&self) -> Option<&BTreeMap<String, Value>> {
+        match self {
+            Value::Object(obj) => Some(obj),
+            _ => None,
+        }
+    }
+
+    /// Extract the object from Value::Object, consuming the value
+    pub fn into_object(self) -> Option<BTreeMap<String, Value>> {
+        match self {
+            Value::Object(obj) => Some(obj),
+            _ => None,
+        }
+    }
+
+    /// Extract the binary data from Value::Binary, returning None if not binary
+    pub fn as_binary(&self) -> Option<&Vec<u8>> {
+        match self {
+            Value::Binary(data) => Some(data),
+            _ => None,
+        }
+    }
+
+    /// Extract the binary data from Value::Binary, consuming the value
+    pub fn into_binary(self) -> Option<Vec<u8>> {
+        match self {
+            Value::Binary(data) => Some(data),
+            _ => None,
+        }
+    }
+
+    /// Check if the value is null
+    pub fn is_null(&self) -> bool {
+        matches!(self, Value::Null)
+    }
+}
+
+impl Index<&str> for Value {
+    type Output = Value;
+
+    fn index(&self, key: &str) -> &Self::Output {
+        match self {
+            Value::Object(map) => map.get(key).unwrap_or(&Value::Null),
+            Value::Row(map) => map.get(key).unwrap_or(&Value::Null),
+            _ => panic!("Cannot index non-object value with string key"),
+        }
+    }
+}
+
+impl Index<usize> for Value {
+    type Output = Value;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        match self {
+            Value::Array(arr) => arr.get(index).unwrap_or(&Value::Null),
+            _ => panic!("Cannot index non-array value with usize"),
+        }
+    }
+}
+
+/// Implement addition operations for Value
+impl std::ops::Add for Value {
+    type Output = Result<Value>;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            // Int32 + Int32
+            (Value::Int32(a), Value::Int32(b)) => Ok(Value::Int32(a + b)),
+            // Int64 + Int64
+            (Value::Int64(a), Value::Int64(b)) => Ok(Value::Int64(a + b)),
+            // Float32 + Float32
+            (Value::Float32(a), Value::Float32(b)) => Ok(Value::Float32(a + b)),
+            // Float64 + Float64
+            (Value::Float64(a), Value::Float64(b)) => Ok(Value::Float64(a + b)),
+            // Int32 + Int64
+            (Value::Int32(a), Value::Int64(b)) => Ok(Value::Int64(a as i64 + b)),
+            // Int64 + Int32
+            (Value::Int64(a), Value::Int32(b)) => Ok(Value::Int64(a + b as i64)),
+            // Float32 + Float64
+            (Value::Float32(a), Value::Float64(b)) => Ok(Value::Float64(a as f64 + b)),
+            // Float64 + Float32
+            (Value::Float64(a), Value::Float32(b)) => Ok(Value::Float64(a + b as f64)),
+            // String + String (concatenation)
+            (Value::String(a), Value::String(b)) => Ok(Value::String(a + &b)),
+            // Array + Array (concatenation)
+            (Value::Array(mut a), Value::Array(b)) => {
+                a.extend(b);
+                Ok(Value::Array(a))
+            }
+            // Attempt to coerce types for addition
+            (a, b) => {
+                let a_str = a.to_string();
+                let b_str = b.to_string();
+
+                if let (Ok(a_int), Ok(b_int)) = (a_str.parse::<i64>(), b_str.parse::<i64>()) {
+                    return Ok(Value::Int64(a_int + b_int));
+                }
+                if let (Ok(a_float), Ok(b_float)) = (a_str.parse::<f64>(), b_str.parse::<f64>()) {
+                    return Ok(Value::Float64(a_float + b_float));
+                }
+                Err(MonoError::TypeError {
+                    expected: format!(
+                        "compatible types for addition, got {} and {}",
+                        a.type_name(),
+                        b.type_name()
+                    ),
+                    actual: format!("{} and {}", a.type_name(), b.type_name()),
+                })
+            }
+        }
+    }
+}
+
+/// Implement subtraction operations for Value
+impl std::ops::Sub for Value {
+    type Output = Result<Value>;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            // Int32 - Int32
+            (Value::Int32(a), Value::Int32(b)) => Ok(Value::Int32(a - b)),
+            // Int64 - Int64
+            (Value::Int64(a), Value::Int64(b)) => Ok(Value::Int64(a - b)),
+            // Float32 - Float32
+            (Value::Float32(a), Value::Float32(b)) => Ok(Value::Float32(a - b)),
+            // Float64 - Float64
+            (Value::Float64(a), Value::Float64(b)) => Ok(Value::Float64(a - b)),
+            // Int32 - Int64
+            (Value::Int32(a), Value::Int64(b)) => Ok(Value::Int64(a as i64 - b)),
+            // Int64 - Int32
+            (Value::Int64(a), Value::Int32(b)) => Ok(Value::Int64(a - b as i64)),
+            // Float32 - Float64
+            (Value::Float32(a), Value::Float64(b)) => Ok(Value::Float64(a as f64 - b)),
+            // Float64 - Float32
+            (Value::Float64(a), Value::Float32(b)) => Ok(Value::Float64(a - b as f64)),
+            // Unsupported types
+            (a, b) => Err(MonoError::TypeError {
+                expected: format!(
+                    "compatible types for subtraction, got {} and {}",
+                    a.type_name(),
+                    b.type_name()
+                ),
+                actual: format!("{} and {}", a.type_name(), b.type_name()),
+            }),
+        }
+    }
+}
+
+/// Implement multiplication operations for Value
+impl std::ops::Mul for Value {
+    type Output = Result<Value>;
+
+    fn mul(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            // Int32 * Int32
+            (Value::Int32(a), Value::Int32(b)) => Ok(Value::Int32(a * b)),
+            // Int64 * Int64
+            (Value::Int64(a), Value::Int64(b)) => Ok(Value::Int64(a * b)),
+            // Float32 * Float32
+            (Value::Float32(a), Value::Float32(b)) => Ok(Value::Float32(a * b)),
+            // Float64 * Float64
+            (Value::Float64(a), Value::Float64(b)) => Ok(Value::Float64(a * b)),
+            // Int32 * Int64
+            (Value::Int32(a), Value::Int64(b)) => Ok(Value::Int64(a as i64 * b)),
+            // Int64 * Int32
+            (Value::Int64(a), Value::Int32(b)) => Ok(Value::Int64(a * b as i64)),
+            // Float32 * Float64
+            (Value::Float32(a), Value::Float64(b)) => Ok(Value::Float64(a as f64 * b)),
+            // Float64 * Float32
+            (Value::Float64(a), Value::Float32(b)) => Ok(Value::Float64(a * b as f64)),
+            // String * Int32 (repeat string)
+            (Value::String(s), Value::Int32(n)) | (Value::Int32(n), Value::String(s)) if n >= 0 => {
+                Ok(Value::String(s.repeat(n as usize)))
+            }
+            // String * Int64 (repeat string)
+            (Value::String(s), Value::Int64(n)) | (Value::Int64(n), Value::String(s)) if n >= 0 => {
+                Ok(Value::String(s.repeat(n as usize)))
+            }
+            // Unsupported types
+            (a, b) => Err(MonoError::TypeError {
+                expected: format!(
+                    "compatible types for multiplication, got {} and {}",
+                    a.type_name(),
+                    b.type_name()
+                ),
+                actual: format!("{} and {}", a.type_name(), b.type_name()),
+            }),
+        }
+    }
+}
+
+/// Implement division operations for Value
+impl std::ops::Div for Value {
+    type Output = Result<Value>;
+
+    fn div(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            // Int32 / Int32
+            (Value::Int32(a), Value::Int32(b)) => {
+                if b == 0 {
+                    Err(MonoError::TypeError {
+                        expected: "non-zero divisor".into(),
+                        actual: "division by zero".into(),
+                    })
+                } else {
+                    Ok(Value::Int32(a / b))
+                }
+            }
+            // Int64 / Int64
+            (Value::Int64(a), Value::Int64(b)) => {
+                if b == 0 {
+                    Err(MonoError::TypeError {
+                        expected: "non-zero divisor".into(),
+                        actual: "division by zero".into(),
+                    })
+                } else {
+                    Ok(Value::Int64(a / b))
+                }
+            }
+            // Float32 / Float32
+            (Value::Float32(a), Value::Float32(b)) => {
+                if b == 0.0 {
+                    Err(MonoError::TypeError {
+                        expected: "non-zero divisor".into(),
+                        actual: "division by zero".into(),
+                    })
+                } else {
+                    Ok(Value::Float32(a / b))
+                }
+            }
+            // Float64 / Float64
+            (Value::Float64(a), Value::Float64(b)) => {
+                if b == 0.0 {
+                    Err(MonoError::TypeError {
+                        expected: "non-zero divisor".into(),
+                        actual: "division by zero".into(),
+                    })
+                } else {
+                    Ok(Value::Float64(a / b))
+                }
+            }
+            // Int32 / Int64
+            (Value::Int32(a), Value::Int64(b)) => {
+                if b == 0 {
+                    Err(MonoError::TypeError {
+                        expected: "non-zero divisor".into(),
+                        actual: "division by zero".into(),
+                    })
+                } else {
+                    Ok(Value::Int64(a as i64 / b))
+                }
+            }
+            // Int64 / Int32
+            (Value::Int64(a), Value::Int32(b)) => {
+                if b == 0 {
+                    Err(MonoError::TypeError {
+                        expected: "non-zero divisor".into(),
+                        actual: "division by zero".into(),
+                    })
+                } else {
+                    Ok(Value::Int64(a / b as i64))
+                }
+            }
+            // Float32 / Float64
+            (Value::Float32(a), Value::Float64(b)) => {
+                if b == 0.0 {
+                    Err(MonoError::TypeError {
+                        expected: "non-zero divisor".into(),
+                        actual: "division by zero".into(),
+                    })
+                } else {
+                    Ok(Value::Float64(a as f64 / b))
+                }
+            }
+            // Float64 / Float32
+            (Value::Float64(a), Value::Float32(b)) => {
+                if b == 0.0 {
+                    Err(MonoError::TypeError {
+                        expected: "non-zero divisor".into(),
+                        actual: "division by zero".into(),
+                    })
+                } else {
+                    Ok(Value::Float64(a / b as f64))
+                }
+            }
+            // Unsupported types
+            (a, b) => Err(MonoError::TypeError {
+                expected: format!(
+                    "compatible types for division, got {} and {}",
+                    a.type_name(),
+                    b.type_name()
+                ),
+                actual: format!("{} and {}", a.type_name(), b.type_name()),
+            }),
+        }
+    }
+}
+
+impl std::str::FromStr for Value {
+    type Err = MonoError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let s = s.trim();
+
+        if s.starts_with('"') && s.ends_with('"') || (s.starts_with('\'') && s.ends_with('\'')) {
+            return Ok(Value::String(s[1..s.len() - 1].to_string()));
+        }
+
+        // Null/None
+        if s.eq_ignore_ascii_case("null") || s.eq_ignore_ascii_case("none") || s.is_empty() {
+            return Ok(Value::Null);
+        }
+
+        // Boolean
+        if s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("false") {
+            return Ok(Value::Bool(s.parse().unwrap()));
+        }
+
+        // UUID (format: 8-4-4-4-12 hex chars)
+        if let Ok(uuid) = Uuid::parse_str(s) {
+            return Ok(Value::Uuid(uuid));
+        }
+
+        // ObjectId (24 hex chars)
+        if s.len() == 24
+            && s.chars().all(|c| c.is_ascii_hexdigit())
+            && let Ok(oid) = ObjectId::from_hex(s)
+        {
+            return Ok(Value::ObjectId(oid));
+        }
+
+        // DateTime (ISO 8601)
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+            return Ok(Value::DateTime(dt));
+        }
+
+        // Date (YYYY-MM-DD)
+        if let Ok(date) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+            return Ok(Value::Date(date));
+        }
+
+        // Time (HH:MM:SS)
+        if let Ok(time) = chrono::NaiveTime::parse_from_str(s, "%H:%M:%S") {
+            return Ok(Value::Time(time));
+        }
+
+        // JSON Array/Object
+        if ((s.starts_with('[') && s.ends_with(']')) || (s.starts_with('{') && s.ends_with('}')))
+            && let Ok(json_value) = serde_json::from_str(s)
+        {
+            return Ok(Value::from_json(json_value));
+        }
+
+        // Integer
+        if let Ok(i) = s.parse::<i32>() {
+            return Ok(Value::Int32(i));
+        }
+
+        if let Ok(i) = s.parse::<i64>() {
+            return Ok(Value::Int64(i));
+        }
+
+        // Float
+        if let Ok(f) = s.parse::<f64>() {
+            if s.contains('.') {
+                let decimal_places = s.split('.').nth(1).map_or(0, |d| d.len());
+                if decimal_places <= 6 && f <= f32::MAX as f64 {
+                    return Ok(Value::Float32(f as f32));
+                } else {
+                    return Ok(Value::Float64(f));
+                }
+            } else {
+                return Ok(Value::Float64(f));
+            }
+        }
+
+        // Marked types
+        if s.starts_with("0x") && s.len() > 2 {
+            if let Ok(bytes) = hex::decode(&s[2..]) {
+                return Ok(Value::Binary(bytes));
+            } else {
+                return Err(MonoError::Parse("Invalid hex string".into()));
+            }
+        }
+
+        // GeoPoint(lat, lng)
+        if s.starts_with("GeoPoint(") && s.ends_with(')') {
+            let inner = &s[9..s.len() - 1];
+            let parts: Vec<&str> = inner.split(',').map(|p| p.trim()).collect();
+            if parts.len() == 2
+                && let (Ok(lat), Ok(lng)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>())
+            {
+                return Ok(Value::GeoPoint { lat, lng });
+            }
+            return Err(MonoError::Parse("Invalid GeoPoint format".into()));
+        }
+
+        // Set{...}
+        if s.starts_with("Set{") && s.ends_with('}') {
+            let inner = &s[4..s.len() - 1];
+            let items: HashSet<String> = inner
+                .split(',')
+                .map(|item| {
+                    item.trim()
+                        .trim_matches(|c| c == '"' || c == '\'')
+                        .to_string()
+                })
+                .collect();
+            return Ok(Value::Set(items));
+        }
+
+        // Row(...)
+        if s.starts_with("Row(") && s.ends_with(')') {
+            let inner = &s[4..s.len() - 1];
+            let items: Vec<Value> = inner
+                .split(',')
+                .map(|item| item.trim().parse())
+                .collect::<Result<Vec<Value>>>()?;
+            return Ok(Value::Row(
+                items
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, v)| (i.to_string(), v))
+                    .collect(),
+            ));
+        }
+
+        // SortedSet{(score, "member"), ...}
+        if s.starts_with("SortedSet{") && s.ends_with('}') {
+            let inner = &s[10..s.len() - 1];
+            let mut items = Vec::new();
+            for part in inner.split("),") {
+                let part = part.trim().trim_start_matches('(').trim_end_matches(')');
+                let pair: Vec<&str> = part.splitn(2, ',').map(|p| p.trim()).collect();
+                if pair.len() == 2 {
+                    if let (Ok(score), member) = (
+                        pair[0].parse::<f64>(),
+                        pair[1].trim_matches(|c| c == '"' || c == '\''),
+                    ) {
+                        items.push((score, member.to_string()));
+                    } else {
+                        return Err(MonoError::Parse("Invalid SortedSet format".into()));
+                    }
+                } else {
+                    return Err(MonoError::Parse("Invalid SortedSet format".into()));
+                }
+            }
+            return Ok(Value::SortedSet(items));
+        }
+
+        // Reference(collection, id)
+        if s.starts_with("Reference(") && s.ends_with(')') {
+            let inner = &s[10..s.len() - 1];
+            let parts: Vec<&str> = inner.split(',').map(|p| p.trim()).collect();
+            if parts.len() == 2 {
+                let collection = parts[0].trim_matches(|c| c == '"' || c == '\'').to_string();
+                let id = parts[1].trim_matches(|c| c == '"' || c == '\'').to_string();
+                return Ok(Value::Reference {
+                    collection,
+                    id: Box::new(Value::String(id)),
+                });
+            }
+            return Err(MonoError::Parse("Invalid Reference format".into()));
+        }
+
+        Err(MonoError::TypeError {
+            expected: "a valid type".into(),
+            actual: s.into(),
+        })
+    }
+}
+
+impl std::fmt::Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Null => write!(f, "null"),
+            Value::Bool(b) => write!(f, "{}", b),
+            Value::Int32(i) => write!(f, "{}", i),
+            Value::Int64(i) => write!(f, "{}", i),
+            Value::Float32(fl) => write!(f, "{}", fl),
+            Value::Float64(fl) => write!(f, "{}", fl),
+            Value::String(s) => write!(f, "\"{}\"", s),
+            Value::Binary(b) => write!(f, "0x{}", hex::encode(b)),
+            Value::DateTime(dt) => write!(f, "{}", dt.to_rfc3339()),
+            Value::Date(d) => write!(f, "{}", d),
+            Value::Time(t) => write!(f, "{}", t),
+            Value::Uuid(u) => write!(f, "{}", u),
+            Value::ObjectId(oid) => write!(f, "{}", oid),
+            Value::Array(arr) => {
+                let items: Vec<String> = arr.iter().map(|v| v.to_string()).collect();
+                write!(f, "[{}]", items.join(", "))
+            }
+            Value::Object(obj) => {
+                let items: Vec<String> = obj
+                    .iter()
+                    .map(|(k, v)| format!("\"{}\": {}", k, v))
+                    .collect();
+                write!(f, "{{{}}}", items.join(", "))
+            }
+            Value::Set(set) => {
+                let items: Vec<String> = set.iter().map(|s| format!("\"{}\"", s)).collect();
+                write!(f, "Set{{{}}}", items.join(", "))
+            }
+            Value::Row(row) => {
+                let items: Vec<String> = row
+                    .iter()
+                    .map(|(k, v)| format!("\"{}\": {}", k, v))
+                    .collect();
+                write!(f, "Row({})", items.join(", "))
+            }
+            Value::SortedSet(ss) => {
+                let items: Vec<String> = ss
+                    .iter()
+                    .map(|(score, member)| format!("({}, \"{}\")", score, member))
+                    .collect();
+                write!(f, "SortedSet{{{}}}", items.join(", "))
+            }
+            Value::GeoPoint { lat, lng } => write!(f, "GeoPoint({}, {})", lat, lng),
+            Value::Reference { collection, id } => {
+                write!(f, "Reference(\"{}\", {})", collection, id)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ObjectId([u8; 12]);
+
+impl ObjectId {
+    /// Generate a new ObjectId
+    ///
+    /// # Example
+    /// ```rust
+    /// use monodb_common::ObjectId;
+    ///
+    /// let oid = ObjectId::new().unwrap();
+    /// println!("Generated ObjectId: {}", oid);
+    /// ```
+    pub fn new() -> Result<Self> {
+        static MACHINE_BYTES: OnceLock<[u8; 3]> = OnceLock::new();
+        static PROCESS_BYTES: OnceLock<[u8; 2]> = OnceLock::new();
+        static COUNTER: OnceLock<AtomicU32> = OnceLock::new();
+
+        let mut bytes = [0u8; 12];
+
+        // 4-byte timestamp (big-endian)
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| MonoError::Io(format!("System time error: {e}")))?
+            .as_secs() as u32;
+        bytes[0..4].copy_from_slice(&timestamp.to_be_bytes());
+
+        // 3-byte machine identifier
+        let machine_bytes = MACHINE_BYTES.get_or_init(|| {
+            let mut hasher = Sha1::new();
+
+            // Try hostname
+            if let Ok(hostname) = std::env::var("HOSTNAME") {
+                hasher.update(hostname.as_bytes());
+            } else if let Ok(hostname) = std::env::var("COMPUTERNAME") {
+                hasher.update(hostname.as_bytes());
+            } else {
+                // Fallback to process ID + preset data
+                hasher.update(std::process::id().to_be_bytes());
+                hasher.update(b"monodb_fallback_id");
+            }
+
+            let hash = hasher.finalize();
+            [hash[0], hash[1], hash[2]]
+        });
+        bytes[4..7].copy_from_slice(machine_bytes);
+
+        // 2-byte process identifier
+        let process_bytes = PROCESS_BYTES.get_or_init(|| {
+            let pid = std::process::id();
+            [((pid >> 8) & 0xFF) as u8, (pid & 0xFF) as u8]
+        });
+        bytes[7..9].copy_from_slice(process_bytes);
+
+        // 3-byte counter
+        let counter_atomic = COUNTER.get_or_init(|| {
+            let mut rng = OsRng;
+            let mut random_bytes = [0u8; 4];
+
+            if rng.try_fill_bytes(&mut random_bytes).is_ok() {
+                let initial = u32::from_be_bytes(random_bytes) & 0xFFFFFF;
+                std::sync::atomic::AtomicU32::new(initial)
+            } else {
+                // Fallback for if RNG fails (unlikely)
+                let fallback = (std::process::id() ^ 0xDEADBEEF) & 0xFFFFFF;
+                std::sync::atomic::AtomicU32::new(fallback)
+            }
+        });
+
+        let counter = counter_atomic.fetch_add(1, std::sync::atomic::Ordering::SeqCst) & 0xFFFFFF;
+        bytes[9] = ((counter >> 16) & 0xFF) as u8;
+        bytes[10] = ((counter >> 8) & 0xFF) as u8;
+        bytes[11] = (counter & 0xFF) as u8;
+
+        Ok(Self(bytes))
+    }
+
+    pub fn bytes(&self) -> [u8; 12] {
+        self.0
+    }
+
+    pub fn to_hex(&self) -> String {
+        self.0
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    pub fn from_hex(s: &str) -> Result<Self> {
+        if s.len() != 24 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(MonoError::Parse("Invalid ObjectId hex string".into()));
+        }
+        let mut bytes = [0u8; 12];
+        for i in 0..12 {
+            let byte_str = &s[i * 2..i * 2 + 2];
+            bytes[i] = u8::from_str_radix(byte_str, 16)
+                .map_err(|_| MonoError::Parse("Invalid ObjectId hex string".into()))?;
+        }
+        Ok(Self(bytes))
+    }
+}
+
+impl std::fmt::Display for ObjectId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            self.0
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>()
+        )
+    }
+}
+
+// RKYV
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug, Clone, PartialEq)]
+pub enum ValueArchived {
+    Null,
+    Bool(bool),
+    Int32(i32),
+    Int64(i64),
+    Float32(f32),
+    Float64(f64),
+    String(String),
+    Binary(Vec<u8>),
+
+    DateTime(String),
+    Date(String),
+    Time(String),
+
+    Uuid([u8; 16]),
+    ObjectId([u8; 12]),
+
+    // reference children by index into a flat table
+    Array(Vec<u32>),
+    Object(BTreeMap<String, u32>),
+    Set(HashSet<String>),
+
+    Row(Vec<(String, u32)>),
+    SortedSet(Vec<(f64, String)>),
+    GeoPoint { lat: f64, lng: f64 },
+
+    Reference { collection: String, id: u32 },
+}
