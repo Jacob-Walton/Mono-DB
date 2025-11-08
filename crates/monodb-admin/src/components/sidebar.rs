@@ -1,107 +1,133 @@
-use gpui::*;
 use gpui::prelude::FluentBuilder;
+use gpui::*;
+use gpui_component::StyledExt;
 
 use crate::components::{
-    App, Dialog, DialogContent, Icon,
-    ICON_GEAR, ICON_HOME, ICON_RIGHT_FROM_BRACKET, ICON_FILE, ICON_SEARCH
+    App, ICON_CHEVRON_DOWN, ICON_CHEVRON_RIGHT, ICON_DATABASE, ICON_TABLE, Icon,
 };
-use crate::constants::{TITLEBAR_HEIGHT, SIDEBAR_WIDTH};
+use crate::constants::{SIDEBAR_WIDTH, TITLEBAR_HEIGHT};
 use crate::theme;
 
 /// Application sidebar component
 ///
-/// Provides vertical navigation with main menu items and bottom action items.
-/// Features hover states, proper spacing, and visual hierarchy.
+/// Database object explorer showing databases and collections in a tree structure.
+/// Similar to pgAdmin's object browser.
 pub struct SideBar {
     app: Entity<App>,
-    active_item: Option<&'static str>,
+    expanded_databases: Vec<String>,
 }
 
 impl SideBar {
     pub fn new(app: Entity<App>) -> Self {
         Self {
             app,
-            active_item: Some("home"),
+            expanded_databases: vec!["sample_db".to_string()],
         }
     }
 
-    /// Renders a navigation item with icon and label
-    fn nav_item(
-        &self,
-        id: &'static str,
-        icon: char,
-        label: &'static str,
-        is_active: bool,
-    ) -> Div {
-        let active_color = rgb(0x3B82F6);
-        let active_bg = rgb(0x3B82F6).opacity(0.1);
-
-        div()
-            .id(id)
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_3()
-            .w_full()
-            .px_3()
-            .py_2p5()
-            .rounded(px(6.0))
-            .text_size(px(13.0))
-            .font_weight(FontWeight::MEDIUM)
-            .cursor_pointer()
-            .when(is_active, |style| {
-                style
-                    .bg(active_bg)
-                    .text_color(active_color)
-            })
-            .when(!is_active, |style| {
-                style
-                    .text_color(rgb(theme::foreground()))
-                    .hover(|s| s.bg(rgb(theme::hover())))
-                    .active(|s| s.bg(rgb(theme::active())))
-            })
-            .child(
-                Icon::new(icon)
-                    .size(px(16.0))
-                    .color(if is_active {
-                        active_color.into()
-                    } else {
-                        rgb(theme::foreground()).into()
-                    })
-            )
-            .child(label)
+    /// Toggle a database's expanded state
+    fn toggle_database(&mut self, db_name: &str, cx: &mut Context<Self>) {
+        if let Some(pos) = self.expanded_databases.iter().position(|x| x == db_name) {
+            self.expanded_databases.remove(pos);
+        } else {
+            self.expanded_databases.push(db_name.to_string());
+        }
+        cx.notify();
     }
 
-    /// Renders a bottom action item (settings, logout)
-    fn action_item(&self, icon: char, label: &'static str) -> Div {
+    /// Check if a database is expanded
+    fn is_expanded(&self, db_name: &str) -> bool {
+        self.expanded_databases.contains(&db_name.to_string())
+    }
+
+    /// Renders a database node with expand/collapse chevron
+    fn database_node(&mut self, db_name: &str, cx: &mut Context<Self>) -> impl IntoElement {
+        let is_expanded = self.is_expanded(db_name);
+        let db_name_owned = db_name.to_string();
+        let db_name_display = db_name.to_string();
+        let view = cx.entity();
+
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .w_full()
+                    .px_2()
+                    .py_1p5()
+                    .rounded(px(4.0))
+                    .text_size(px(13.0))
+                    .text_color(rgb(theme::foreground()))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(theme::hover())))
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        view.update(cx, |this, cx| {
+                            this.toggle_database(&db_name_owned, cx);
+                        });
+                    })
+                    .child(
+                        Icon::new(if is_expanded {
+                            ICON_CHEVRON_DOWN
+                        } else {
+                            ICON_CHEVRON_RIGHT
+                        })
+                        .size(px(12.0))
+                        .color(rgb(theme::foreground_muted()).into()),
+                    )
+                    .child(
+                        Icon::new(ICON_DATABASE)
+                            .size(px(14.0))
+                            .color(rgb(theme::foreground()).into()),
+                    )
+                    .child(db_name_display),
+            )
+            .when(is_expanded, |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .pl(px(24.0))
+                        .gap_0p5()
+                        .child(self.collection_node("users"))
+                        .child(self.collection_node("products"))
+                        .child(self.collection_node("orders")),
+                )
+            })
+    }
+
+    /// Renders a collection/table node
+    fn collection_node(&self, collection_name: &str) -> impl IntoElement {
+        let name = collection_name.to_string();
+
         div()
             .flex()
             .flex_row()
             .items_center()
-            .gap_3()
+            .gap_2()
             .w_full()
-            .px_3()
-            .py_2p5()
-            .rounded(px(6.0))
+            .px_2()
+            .py_1p5()
+            .rounded(px(4.0))
             .text_size(px(13.0))
-            .font_weight(FontWeight::MEDIUM)
             .text_color(rgb(theme::foreground()))
             .cursor_pointer()
             .hover(|style| style.bg(rgb(theme::hover())))
-            .active(|style| style.bg(rgb(theme::active())))
             .child(
-                Icon::new(icon)
-                    .size(px(16.0))
-                    .color(rgb(theme::foreground()).into())
+                Icon::new(ICON_TABLE)
+                    .size(px(14.0))
+                    .color(rgb(theme::foreground_muted()).into()),
             )
-            .child(label)
+            .child(name)
     }
 }
 
 impl Render for SideBar {
-    fn render(&mut self, _: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let app = self.app.clone();
-
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .absolute()
             .top_0()
@@ -116,47 +142,27 @@ impl Render for SideBar {
             .border_r_1()
             .border_color(rgb(theme::border()))
             .child(
-                // Main navigation section
+                // Object Explorer
                 div()
                     .flex()
                     .flex_col()
                     .flex_1()
                     .gap_1()
                     .p_3()
+                    .scrollable(Axis::Vertical)
                     .child(
                         // Section label
                         div()
                             .text_size(px(11.0))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(theme::foreground()).opacity(0.5))
-                            .px_3()
+                            .text_color(rgb(theme::foreground_muted()))
+                            .px_2()
                             .py_2()
-                            .child("NAVIGATION")
+                            .child("DATABASES"),
                     )
-                    .child(self.nav_item("home", ICON_HOME, "Home", self.active_item == Some("home")))
-                    .child(self.nav_item("databases", ICON_FILE, "Databases", false))
-                    .child(self.nav_item("query", ICON_SEARCH, "Query", false))
-            )
-            .child(
-                // Bottom actions section
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .p_3()
-                    .border_t_1()
-                    .border_color(rgb(theme::border()))
-                    .child({
-                        let app = app.clone();
-                        self.action_item(ICON_GEAR, "Settings")
-                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                let dialog = cx.new(|_cx| Dialog::new(app.clone(), DialogContent::Settings));
-                                app.update(cx, |this, cx| {
-                                    this.push_dialog(dialog, cx);
-                                });
-                            })
-                    })
-                    .child(self.action_item(ICON_RIGHT_FROM_BRACKET, "Sign Out"))
+                    .child(self.database_node("sample_db", cx))
+                    .child(self.database_node("production_db", cx))
+                    .child(self.database_node("test_db", cx)),
             )
     }
 }

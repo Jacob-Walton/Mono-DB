@@ -7,11 +7,14 @@ pub struct Theme {
     pub black: u32,
     pub white: u32,
     pub foreground: u32,
+    pub foreground_muted: u32,
     pub background: u32,
     pub surface: u32,
     pub hover: u32,
     pub active: u32,
     pub border: u32,
+    pub primary: u32,
+    pub primary_bg: u32,
     pub primary_border: u32,
     pub danger: u32,
     pub danger_hover: u32,
@@ -35,11 +38,14 @@ impl Theme {
             black: 0x09090B,
             white: 0xFAFAFA,
             foreground: 0x18181B,
+            foreground_muted: 0x71717A,
             background: 0xFFFFFF,
             surface: 0xFAFAFA,
             hover: 0xF4F4F5,
             active: 0xE4E4E7,
             border: 0xE4E4E7,
+            primary: 0x3B82F6,
+            primary_bg: 0xEFF6FF,
             primary_border: 0xA1A1AA,
             danger: 0xDC2626,
             danger_hover: 0xB91C1C,
@@ -58,11 +64,14 @@ impl Theme {
             black: 0x09090B,
             white: 0xFAFAFA,
             foreground: 0xFAFAFA,
+            foreground_muted: 0xA1A1AA,
             background: 0x09090B,
             surface: 0x18181B,
             hover: 0x27272A,
             active: 0x3F3F46,
             border: 0x27272A,
+            primary: 0x3B82F6,
+            primary_bg: 0x1E3A5F,
             primary_border: 0x52525B,
             danger: 0xFCA5A5,
             danger_hover: 0xF87171,
@@ -205,6 +214,9 @@ pub fn white() -> u32 {
 pub fn foreground() -> u32 {
     current_theme().foreground
 }
+pub fn foreground_muted() -> u32 {
+    current_theme().foreground_muted
+}
 pub fn background() -> u32 {
     current_theme().background
 }
@@ -219,6 +231,12 @@ pub fn active() -> u32 {
 }
 pub fn border() -> u32 {
     current_theme().border
+}
+pub fn primary() -> u32 {
+    current_theme().primary
+}
+pub fn primary_bg() -> u32 {
+    current_theme().primary_bg
 }
 pub fn primary_border() -> u32 {
     current_theme().primary_border

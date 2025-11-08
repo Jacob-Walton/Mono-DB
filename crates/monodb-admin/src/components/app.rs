@@ -7,12 +7,16 @@ use crate::theme;
 
 pub struct App {
     dialog_stack: Vec<Entity<Dialog>>,
+    sidebar: Option<Entity<SideBar>>,
+    titlebar: Option<Entity<TitleBar>>,
 }
 
 impl Default for App {
     fn default() -> Self {
         Self {
             dialog_stack: Vec::new(),
+            sidebar: None,
+            titlebar: None,
         }
     }
 }
@@ -34,6 +38,14 @@ impl Render for App {
         let app_view = cx.entity();
         let current_dialog = self.dialog_stack.last().cloned();
 
+        // Initialize sidebar and titlebar once
+        if self.sidebar.is_none() {
+            self.sidebar = Some(cx.new(|_| SideBar::new(app_view.clone())));
+        }
+        if self.titlebar.is_none() {
+            self.titlebar = Some(cx.new(|_| TitleBar::new(app_view.clone())));
+        }
+
         div()
             .v_flex()
             .gap_2()
@@ -41,8 +53,8 @@ impl Render for App {
             .items_center()
             .justify_center()
             .bg(rgb(theme::background()))
-            .child(cx.new(|_| SideBar::new(app_view.clone())))
-            .child(cx.new(|_| TitleBar::new()))
+            .child(self.sidebar.clone().unwrap())
+            .child(self.titlebar.clone().unwrap())
             .when_some(current_dialog, |this, dialog| {
                 this.child(dialog)
             })

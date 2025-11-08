@@ -40,6 +40,7 @@ impl IntoElement for Icon {
             .text_color(self.color)
             .text_size(self.size)
             .font_family(theme::FONT_AWESOME_SOLID)
+            .font_weight(FontWeight::BLACK) // Font Awesome 7 Solid uses weight 900
             .line_height(relative(1.0))
             .child(self.icon.to_string())
     }
@@ -67,7 +68,7 @@ pub const ICON_BARS: char = '\u{f0c9}';
 pub const ICON_XMARK: char = '\u{f00d}';
 
 /// Plus icon (solid)
-pub const ICON_PLUS: char = '\u{2b}';
+pub const ICON_PLUS: char = '\u{f067}';
 
 /// Minus icon (solid)
 pub const ICON_MINUS: char = '\u{f068}';
@@ -126,6 +127,15 @@ pub const ICON_FILE: char = '\u{f15b}';
 /// Folder icon (solid)
 pub const ICON_FOLDER: char = '\u{f07b}';
 
+/// Folder Open icon (solid)
+pub const ICON_FOLDER_OPEN: char = '\u{f07c}';
+
+/// Database icon (solid)
+pub const ICON_DATABASE: char = '\u{f1c0}';
+
+/// Table icon (solid)
+pub const ICON_TABLE: char = '\u{f0ce}';
+
 /// Download icon (solid)
 pub const ICON_DOWNLOAD: char = '\u{f019}';
 
@@ -136,4 +146,4 @@ pub const ICON_UPLOAD: char = '\u{f093}';
 pub const ICON_POWER_OFF: char = '\u{f011}';
 
 /// Sign Out icon (solid)
-pub const ICON_RIGHT_FROM_BRACKET: char = '\u{f2f5}';
+pub const ICON_RIGHT_FROM_BRACKET: char = '\u{f08b}';
