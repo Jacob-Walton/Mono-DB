@@ -123,6 +123,10 @@ fn main() {
                         window_bounds: Some(WindowBounds::Windowed(bounds)),
                         focus: true,
                         show: true,
+                        titlebar: Some(TitlebarOptions {
+                            title: Some("MonoDB Admin".into()),
+                            ..Default::default()
+                        }),
                         ..Default::default()
                     }
                 })

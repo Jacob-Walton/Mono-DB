@@ -217,6 +217,7 @@ async fn handle_request(
         Request::BeginTx { .. } => todo!(),
         Request::CommitTx { .. } => todo!(),
         Request::RollbackTx { .. } => todo!(),
+        Request::List { .. } => todo!(),
     }
 }
 

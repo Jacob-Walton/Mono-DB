@@ -30,6 +30,9 @@ pub enum Request {
         user_id: Option<String>,
     },
 
+    /// List tables
+    List {},
+
     /// Begin a transaction
     BeginTx {
         isolation: IsolationLevel,
