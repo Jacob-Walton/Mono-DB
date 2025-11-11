@@ -1,7 +1,7 @@
 //! B-tree index implementation for MonoDB
 
-mod insert;
 mod delete;
+mod insert;
 mod node;
 mod search;
 
@@ -115,7 +115,9 @@ impl BTree {
         // Ensure data and meta are synced to storage
         self.buffer_pool.sync()?;
         // Ensure WAL is durable
-        if let Some(wal) = &self.wal { wal.write().sync()?; }
+        if let Some(wal) = &self.wal {
+            wal.write().sync()?;
+        }
         Ok(())
     }
 

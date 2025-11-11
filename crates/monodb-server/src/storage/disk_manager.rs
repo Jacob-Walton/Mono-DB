@@ -79,7 +79,12 @@ impl DiskManager {
         Ok(())
     }
 
-    fn write_metadata(&self, file: &mut File, next_page_id: PageId, root: Option<PageId>) -> Result<()> {
+    fn write_metadata(
+        &self,
+        file: &mut File,
+        next_page_id: PageId,
+        root: Option<PageId>,
+    ) -> Result<()> {
         file.seek(SeekFrom::Start(0))?;
         file.write_all(&next_page_id.0.to_le_bytes())?;
         let root_raw = root.map(|p| p.0).unwrap_or(0);

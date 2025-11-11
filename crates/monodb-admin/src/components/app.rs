@@ -1,5 +1,5 @@
-use gpui::*;
 use gpui::prelude::FluentBuilder;
+use gpui::*;
 use gpui_component::StyledExt;
 
 use crate::components::{Dialog, SideBar, TitleBar};
@@ -55,8 +55,6 @@ impl Render for App {
             .bg(rgb(theme::background()))
             .child(self.sidebar.clone().unwrap())
             .child(self.titlebar.clone().unwrap())
-            .when_some(current_dialog, |this, dialog| {
-                this.child(dialog)
-            })
+            .when_some(current_dialog, |this, dialog| this.child(dialog))
     }
 }

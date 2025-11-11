@@ -104,7 +104,9 @@ impl QueryExecutor {
         match result {
             Ok(exec_result) => {
                 let updated = match exec_result {
-                    ExecutionResult::Ok { data, row_count, .. } => ExecutionResult::Ok {
+                    ExecutionResult::Ok {
+                        data, row_count, ..
+                    } => ExecutionResult::Ok {
                         data,
                         time: timestamp,
                         commit_timestamp: None,
@@ -489,7 +491,12 @@ impl QueryExecutor {
         // Relational path: Auto-generate primary key if needed
         if is_relational {
             if let Some(schema) = &schema_opt {
-                if let Schema::Table { columns, primary_key, .. } = schema.as_ref() {
+                if let Schema::Table {
+                    columns,
+                    primary_key,
+                    ..
+                } = schema.as_ref()
+                {
                     // Auto-generate primary key value if it's missing and is numeric
                     // Only handle single-column primary keys for auto-increment
                     if primary_key.len() == 1 {
@@ -501,7 +508,9 @@ impl QueryExecutor {
                                         .storage
                                         .next_sequence_value(&target, pk_name)
                                         .await
-                                        .map_err(|e| ExecutorError::InvalidOperation(e.to_string()))?;
+                                        .map_err(|e| {
+                                            ExecutorError::InvalidOperation(e.to_string())
+                                        })?;
 
                                     row.insert(
                                         pk_name.clone(),

@@ -1,6 +1,6 @@
 use gpui::*;
-use gpui_component::button::*;
 use gpui_component::ActiveTheme;
+use gpui_component::button::*;
 
 use crate::theme;
 

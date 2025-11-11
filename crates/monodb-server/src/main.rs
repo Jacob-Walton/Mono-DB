@@ -145,9 +145,7 @@ async fn main() -> anyhow::Result<()> {
                         Ok(mut ctrl_c) => {
                             tracing::info!("Ctrl+C handler registered as fallback");
                             ctrl_c.recv().await;
-                            tracing::info!(
-                                "Received Ctrl+C (fallback), initiating graceful shutdown..."
-                            );
+                            tracing::info!("Received Ctrl+C, initiating graceful shutdown...");
                         }
                         Err(e) => {
                             tracing::error!("Failed to register Ctrl+C handler: {}", e);
@@ -160,7 +158,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         if let Err(e) = shutdown_signal.send(()) {
-            tracing::error!("Failed to send shutdown signal: {}", e);
+            tracing::error!("Failed to send shutdown signal: {e}");
         }
     });
 

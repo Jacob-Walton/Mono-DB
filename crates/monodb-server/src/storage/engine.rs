@@ -491,15 +491,15 @@ impl StorageEngine {
                 matched_values
                     .into_iter()
                     .filter_map(|v| {
-                        v.as_object().and_then(|m| m.get("_id")).and_then(|id_val| {
-                            match id_val {
+                        v.as_object()
+                            .and_then(|m| m.get("_id"))
+                            .and_then(|id_val| match id_val {
                                 MonoValue::ObjectId(oid) => Some(oid.to_hex()),
                                 MonoValue::String(s) => Some(s.clone()),
                                 MonoValue::Int32(i) => Some(i.to_string()),
                                 MonoValue::Int64(i) => Some(i.to_string()),
                                 _ => Some(format!("{id_val}")),
-                            }
-                        })
+                            })
                     })
                     .collect()
             }
@@ -522,14 +522,14 @@ impl StorageEngine {
                     matched_values
                         .into_iter()
                         .filter_map(|v| {
-                            v.as_object().and_then(|m| m.get(pk_name)).and_then(|pk_val| {
-                                match pk_val {
+                            v.as_object()
+                                .and_then(|m| m.get(pk_name))
+                                .and_then(|pk_val| match pk_val {
                                     MonoValue::String(s) => Some(s.clone()),
                                     MonoValue::Int32(i) => Some(i.to_string()),
                                     MonoValue::Int64(i) => Some(i.to_string()),
                                     _ => Some(format!("{pk_val}")),
-                                }
-                            })
+                                })
                         })
                         .collect()
                 } else {
@@ -676,7 +676,8 @@ impl StorageEngine {
         let primary_key = match (schema.value(), data) {
             (Schema::KeySpace { .. }, Data::KeyValue { key, value }) => {
                 let value_typed = MonoValue::Binary(value.to_vec());
-                self.insert_kv_typed(collection_name, key, &value_typed).await?;
+                self.insert_kv_typed(collection_name, key, &value_typed)
+                    .await?;
                 key.to_vec()
             }
             (Schema::Collection { .. }, Data::Document(doc)) => {
@@ -1455,10 +1456,18 @@ impl StorageEngine {
             // Cross-numeric comparisons (promote to f64)
             (Int32(x), Int64(y)) => (*x as i64).cmp(y),
             (Int64(x), Int32(y)) => x.cmp(&(*y as i64)),
-            (Int32(x), Float64(y)) => (*x as f64).partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-            (Float64(x), Int32(y)) => x.partial_cmp(&(*y as f64)).unwrap_or(std::cmp::Ordering::Equal),
-            (Int64(x), Float64(y)) => (*x as f64).partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-            (Float64(x), Int64(y)) => x.partial_cmp(&(*y as f64)).unwrap_or(std::cmp::Ordering::Equal),
+            (Int32(x), Float64(y)) => (*x as f64)
+                .partial_cmp(y)
+                .unwrap_or(std::cmp::Ordering::Equal),
+            (Float64(x), Int32(y)) => x
+                .partial_cmp(&(*y as f64))
+                .unwrap_or(std::cmp::Ordering::Equal),
+            (Int64(x), Float64(y)) => (*x as f64)
+                .partial_cmp(y)
+                .unwrap_or(std::cmp::Ordering::Equal),
+            (Float64(x), Int64(y)) => x
+                .partial_cmp(&(*y as f64))
+                .unwrap_or(std::cmp::Ordering::Equal),
 
             // String comparison
             (String(x), String(y)) => x.cmp(y),
@@ -1482,19 +1491,33 @@ impl StorageEngine {
             F::Gt(field, v) => row
                 .as_object()
                 .and_then(|m| m.get(field))
-                .map_or(false, |x| Self::compare_values(x, v) == std::cmp::Ordering::Greater),
+                .map_or(false, |x| {
+                    Self::compare_values(x, v) == std::cmp::Ordering::Greater
+                }),
             F::Gte(field, v) => row
                 .as_object()
                 .and_then(|m| m.get(field))
-                .map_or(false, |x| matches!(Self::compare_values(x, v), std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)),
+                .map_or(false, |x| {
+                    matches!(
+                        Self::compare_values(x, v),
+                        std::cmp::Ordering::Greater | std::cmp::Ordering::Equal
+                    )
+                }),
             F::Lt(field, v) => row
                 .as_object()
                 .and_then(|m| m.get(field))
-                .map_or(false, |x| Self::compare_values(x, v) == std::cmp::Ordering::Less),
+                .map_or(false, |x| {
+                    Self::compare_values(x, v) == std::cmp::Ordering::Less
+                }),
             F::Lte(field, v) => row
                 .as_object()
                 .and_then(|m| m.get(field))
-                .map_or(false, |x| matches!(Self::compare_values(x, v), std::cmp::Ordering::Less | std::cmp::Ordering::Equal)),
+                .map_or(false, |x| {
+                    matches!(
+                        Self::compare_values(x, v),
+                        std::cmp::Ordering::Less | std::cmp::Ordering::Equal
+                    )
+                }),
             F::Contains(field, v) => {
                 row.as_object()
                     .and_then(|m| m.get(field))
@@ -1632,7 +1655,11 @@ impl StorageEngine {
 
     /// Commit barrier: wait until current WAL writes for a collection are durable.
     /// Only effective when WAL async mode is enabled; returns Ok(false) on timeout.
-    pub async fn wal_commit_current(&self, collection_name: &str, timeout_ms: Option<u64>) -> Result<bool> {
+    pub async fn wal_commit_current(
+        &self,
+        collection_name: &str,
+        timeout_ms: Option<u64>,
+    ) -> Result<bool> {
         if let Some(lsm) = self.lsm_trees.get(collection_name) {
             let to = timeout_ms.map(std::time::Duration::from_millis);
             lsm.wal_commit_current(to).await

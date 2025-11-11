@@ -1,29 +1,32 @@
 #!/usr/bin/env python3
 
 import os
+import shutil
 import subprocess
+
+import colorama
 import invoke
 import psutil
-import colorama
-import shutil
 
 PROJECT_NAME = os.path.basename(os.getcwd())
-BINARIES = ["monodb", "mdb"]
-GUI_DIR = os.path.join(os.getcwd(), "gui")
-TAURI_DIR = os.path.join(GUI_DIR, "src-tauri")
+BINARIES = ["monod", "mdb", "monodb-admin"]
+GUI_TARGET = "monodb-admin"
 MANDIR = "/usr/share/man/man1"  # Only on Unix
 
 
 def get_cores():
     cpu_count = psutil.cpu_count(logical=True) or 4
-    available_gb = psutil.virtual_memory().available / (1024**3)
+    total_gb = psutil.virtual_memory().total / (1024**3)
 
-    max_by_cpu = min(cpu_count * 2, 32)
-    max_by_memory = min(max(int(available_gb) - 2, 0), 32)
+    # Rust builds are CPU-bound; assume around 1GB per job
+    memory_limited_cores = int(total_gb / 1.0)
 
-    optimal = max(1, min(max_by_cpu, max_by_memory))
+    # Favour CPU, only constrain if memory clearly insufficient
+    optimal = min(cpu_count, max(memory_limited_cores, cpu_count // 2))
+    optimal = max(1, min(optimal, 32))
 
-    if optimal > 1 and optimal % 2 == 1:
+    # Prefer even numbers for better scheduling
+    if optimal > 4 and optimal % 2 != 0:
         optimal -= 1
 
     return optimal
@@ -70,6 +73,7 @@ def help(c):
     tasks = [
         ("help", "Show this help message"),
         ("build", "Build the project"),
+        ("build-gui", "Build the GUI."),
         ("clean", "Clean build artifacts"),
         ("test", "Run tests"),
         ("lint", "Run linters"),
@@ -99,26 +103,17 @@ def deps(c):
         f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Installing dependencies..."
     )
     run_cmd(c, "cargo install cargo-audit cargo-tarpaulin")
-    run_cmd(c, "npm install", cwd=TAURI_DIR)
     print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Dependencies installed.")
 
 
-def install_gui_deps(c):
-    """Install GUI dependencies."""
-    print(
-        f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Installing GUI dependencies..."
-    )
-    run_cmd(c, "npm install", cwd=TAURI_DIR)
-    print(
-        f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} GUI dependencies installed."
-    )
-
-
-def build_gui(c):
-    """Build the GUI using Tauri."""
-    install_gui_deps(c)
+@invoke.task
+def build_gui(c, release=False):
+    """Build the GUI."""
     print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Building GUI...")
-    run_cmd(c, "npm run tauri build", cwd=TAURI_DIR)
+    run_cmd(
+        c,
+        f"cargo build {'--release' if release else ''} -p {GUI_TARGET} -j {get_cores()}",
+    )
     print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} GUI build complete.")
 
 
@@ -129,7 +124,7 @@ def build(c, release=False):
         f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Building project with {CORES} cores..."
     )
     run_cmd(c, f"cargo build {'--release' if release else ''} -j {CORES}")
-    # build_gui(c)
+    build_gui(c, release)
     print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Build complete.")
 
 
@@ -140,7 +135,6 @@ def clean(c):
         f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Cleaning build artifacts..."
     )
     run_cmd(c, "cargo clean")
-    run_cmd(c, "cargo clean", cwd=TAURI_DIR)
     print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Clean complete.")
 
 
@@ -158,8 +152,7 @@ def lint(c):
     """Run linters."""
     print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Running linters...")
     run_cmd(c, "cargo fmt -- --check")
-    run_cmd(c, "cargo clippy -- -D warnings")
-    run_cmd(c, "npm run lint", cwd=TAURI_DIR)
+    run_cmd(c, "cargo clippy --all-targets -- -D warnings")
     print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Linting complete.")
 
 
@@ -168,7 +161,6 @@ def format(c):
     """Format the code."""
     print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Formatting code...")
     run_cmd(c, "cargo fmt")
-    run_cmd(c, "npm run format", cwd=TAURI_DIR)
     print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Formatting complete.")
 
 
@@ -208,19 +200,5 @@ def package(c):
             print(
                 f"{colorama.Fore.YELLOW}Warning: {binary_name} not found in {target_dir}, skipping.{colorama.Style.RESET_ALL}"
             )
-
-    # Copy tauri binary
-    tauri_binary_name = "mdb-admin.exe" if os.name == "nt" else "mdb-admin"
-    tauri_binary_path = os.path.join(TAURI_DIR, "target", "release", tauri_binary_name)
-    if os.path.isfile(tauri_binary_path):
-        dest_path = os.path.join(dist_dir, tauri_binary_name)
-        shutil.copy2(tauri_binary_path, dest_path)
-        print(
-            f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Packaged {tauri_binary_name}."
-        )
-    else:
-        print(
-            f"{colorama.Fore.YELLOW}Warning: Tauri binary not found at {tauri_binary_path}, skipping.{colorama.Style.RESET_ALL}"
-        )
 
     print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Packaging complete.")

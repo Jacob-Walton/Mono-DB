@@ -4,7 +4,10 @@ use std::{
     fs::{File, OpenOptions},
     io::{BufWriter, Read, Write},
     path::{Path, PathBuf},
-    sync::{atomic::{AtomicU64, Ordering}, Arc, Condvar, Mutex},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tracing::{debug, error, info, warn};
@@ -188,29 +191,53 @@ impl Wal {
             let commit_cv_arc = Arc::clone(&wal.commit_cv);
             std::thread::spawn(move || {
                 let open_writer = || -> std::io::Result<BufWriter<File>> {
-                    let f = OpenOptions::new().create(true).append(true).open(&path_bg)?;
+                    let f = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path_bg)?;
                     Ok(BufWriter::with_capacity(buffer_size, f))
                 };
-                let mut writer = match open_writer() { Ok(w) => w, Err(_) => return };
+                let mut writer = match open_writer() {
+                    Ok(w) => w,
+                    Err(_) => return,
+                };
                 let mut pending_bytes: u64 = 0;
                 let mut last_sync = Instant::now();
-                let per_write_sync = sync_on_write && sync_every_bytes.is_none() && sync_interval_ms.is_none();
+                let per_write_sync =
+                    sync_on_write && sync_every_bytes.is_none() && sync_interval_ms.is_none();
                 let mut max_seq_written: u64 = 0;
                 loop {
                     // Determine timeout for recv based on sync interval
-                    let timeout_opt = if sync_on_write { sync_interval_ms.map(Duration::from_millis) } else { None };
-                    let recv_result = if let Some(to) = timeout_opt { rx.recv_timeout(to) } else { rx.recv().map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected) };
+                    let timeout_opt = if sync_on_write {
+                        sync_interval_ms.map(Duration::from_millis)
+                    } else {
+                        None
+                    };
+                    let recv_result = if let Some(to) = timeout_opt {
+                        rx.recv_timeout(to)
+                    } else {
+                        rx.recv()
+                            .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected)
+                    };
                     match recv_result {
                         Ok(buf) => {
                             if current_size_bg + buf.len() as u64 > max_size {
                                 // Rotate: close current, archive, open new
                                 let _ = writer.flush();
                                 let _ = sync_file_data(writer.get_ref());
-                                let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                                let ts = SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_secs();
                                 let archive = path_bg.with_extension(format!("wal.{}", ts));
                                 let _ = std::fs::rename(&path_bg, &archive);
                                 // Create fresh file
-                                if let Ok(f) = OpenOptions::new().create(true).write(true).truncate(true).open(&path_bg) {
+                                if let Ok(f) = OpenOptions::new()
+                                    .create(true)
+                                    .write(true)
+                                    .truncate(true)
+                                    .open(&path_bg)
+                                {
                                     writer = BufWriter::with_capacity(buffer_size, f);
                                     current_size_bg = 0;
                                 }
@@ -225,15 +252,23 @@ impl Wal {
                                 let mut seq_bytes = [0u8; 8];
                                 seq_bytes.copy_from_slice(&buf[6..14]);
                                 let seq = u64::from_le_bytes(seq_bytes);
-                                if seq > max_seq_written { max_seq_written = seq; }
+                                if seq > max_seq_written {
+                                    max_seq_written = seq;
+                                }
                             }
                             pending_bytes += buf.len() as u64;
                             if sync_on_write {
                                 let mut do_sync = false;
-                                if let Some(threshold) = sync_every_bytes { if pending_bytes >= threshold { do_sync = true; } }
+                                if let Some(threshold) = sync_every_bytes {
+                                    if pending_bytes >= threshold {
+                                        do_sync = true;
+                                    }
+                                }
                                 if !do_sync {
                                     if let Some(iv) = sync_interval_ms.map(Duration::from_millis) {
-                                        if last_sync.elapsed() >= iv { do_sync = true; }
+                                        if last_sync.elapsed() >= iv {
+                                            do_sync = true;
+                                        }
                                     }
                                 }
                                 if per_write_sync || do_sync {
@@ -279,7 +314,9 @@ impl Wal {
     }
 
     /// Returns true if WAL is using background async writer
-    pub fn is_async(&self) -> bool { self.async_mode }
+    pub fn is_async(&self) -> bool {
+        self.async_mode
+    }
 
     /// Append using async path without taking a mutable writer lock.
     /// Only valid when async mode is enabled.
@@ -330,7 +367,9 @@ impl Wal {
         buf.extend_from_slice(key);
         buf.extend_from_slice(value);
 
-        if let Some(tx) = &self.tx { let _ = tx.send(buf); }
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(buf);
+        }
         Ok(sequence)
     }
 
@@ -376,7 +415,9 @@ impl Wal {
             buf.extend_from_slice(&checksum.to_le_bytes());
             buf.extend_from_slice(key);
             buf.extend_from_slice(value);
-            if let Some(tx) = &self.tx { let _ = tx.send(buf); }
+            if let Some(tx) = &self.tx {
+                let _ = tx.send(buf);
+            }
             return Ok(sequence);
         }
 
@@ -419,9 +460,17 @@ impl Wal {
         if self.sync_on_write {
             self.bytes_since_sync += buf.len() as u64;
             let mut do_sync = false;
-            if let Some(threshold) = self.sync_every_bytes { if self.bytes_since_sync >= threshold { do_sync = true; } }
+            if let Some(threshold) = self.sync_every_bytes {
+                if self.bytes_since_sync >= threshold {
+                    do_sync = true;
+                }
+            }
             if !do_sync {
-                if let Some(iv) = self.sync_interval { if self.last_sync.elapsed() >= iv { do_sync = true; } }
+                if let Some(iv) = self.sync_interval {
+                    if self.last_sync.elapsed() >= iv {
+                        do_sync = true;
+                    }
+                }
             }
             if do_sync || (self.sync_every_bytes.is_none() && self.sync_interval.is_none()) {
                 self.writer.flush()?;
@@ -903,7 +952,9 @@ impl Wal {
                 "commit_barrier requires async WAL mode".to_string(),
             ));
         }
-        if self.last_synced.load(Ordering::Acquire) >= sequence { return Ok(true); }
+        if self.last_synced.load(Ordering::Acquire) >= sequence {
+            return Ok(true);
+        }
         let guard = self.commit_mu.lock().unwrap();
         if let Some(to) = timeout {
             let mut g = guard;
@@ -912,10 +963,16 @@ impl Wal {
             loop {
                 let (gg, timeout_res) = self.commit_cv.wait_timeout(g, remaining).unwrap();
                 g = gg;
-                if self.last_synced.load(Ordering::Acquire) >= sequence { return Ok(true); }
-                if timeout_res.timed_out() { return Ok(false); }
+                if self.last_synced.load(Ordering::Acquire) >= sequence {
+                    return Ok(true);
+                }
+                if timeout_res.timed_out() {
+                    return Ok(false);
+                }
                 let elapsed = start.elapsed();
-                if elapsed >= to { return Ok(false); }
+                if elapsed >= to {
+                    return Ok(false);
+                }
                 remaining = to - elapsed;
             }
         } else {

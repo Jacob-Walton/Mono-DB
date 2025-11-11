@@ -456,12 +456,18 @@ impl LsmTree {
         let sequence = {
             let wal_r = self.wal.read();
             if wal_r.is_async() {
-                wal_r.append_with_type_async(&key, &[], crate::storage::wal::WalEntryType::Delete)?
+                wal_r.append_with_type_async(
+                    &key,
+                    &[],
+                    crate::storage::wal::WalEntryType::Delete,
+                )?
             } else {
                 drop(wal_r);
-                self.wal
-                    .write()
-                    .append_with_type(&key, &[], crate::storage::wal::WalEntryType::Delete)?
+                self.wal.write().append_with_type(
+                    &key,
+                    &[],
+                    crate::storage::wal::WalEntryType::Delete,
+                )?
             }
         };
         debug!("WAL: Wrote delete entry with sequence {}", sequence);
@@ -538,7 +544,11 @@ impl LsmTree {
 
     /// Wait for the WAL to be fsynced up to at least the given sequence.
     /// Only effective in async WAL mode. Returns Ok(true) if reached, Ok(false) on timeout.
-    pub async fn wal_commit_barrier(&self, sequence: u64, timeout: Option<std::time::Duration>) -> Result<bool> {
+    pub async fn wal_commit_barrier(
+        &self,
+        sequence: u64,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<bool> {
         let wal = self.wal.read();
         wal.commit_barrier(sequence, timeout)
             .map_err(|e| monodb_common::MonoError::Storage(format!("commit barrier: {}", e)))

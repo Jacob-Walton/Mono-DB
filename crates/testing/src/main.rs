@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use monodb_common::schema::{KeySpacePersistence, Schema};
 use monodb_server::config::Config as ServerConfig;
-use monodb_server::storage::engine::StorageEngine;
 use monodb_server::storage::Data;
+use monodb_server::storage::engine::StorageEngine;
 
 #[derive(Debug, Clone)]
 struct EngineOptions {
@@ -98,7 +98,11 @@ struct WritePlan {
     concurrency: usize,
 }
 
-async fn write_on_the_fly(engine: Arc<StorageEngine>, opts: &EngineOptions, plan: &WritePlan) -> Result<()> {
+async fn write_on_the_fly(
+    engine: Arc<StorageEngine>,
+    opts: &EngineOptions,
+    plan: &WritePlan,
+) -> Result<()> {
     ensure_kv_collection(&engine, &opts.collection).await?;
     let start = std::time::Instant::now();
 
@@ -111,7 +115,11 @@ async fn write_on_the_fly(engine: Arc<StorageEngine>, opts: &EngineOptions, plan
         let opts_cloned = opts.clone();
         let value_size = plan.value_size;
 
-        let extra = if w == plan.concurrency - 1 { remainder } else { 0 };
+        let extra = if w == plan.concurrency - 1 {
+            remainder
+        } else {
+            0
+        };
         let my_count = per_worker + extra;
         let my_start = plan.start_id + (w as u64) * per_worker;
 
@@ -144,11 +152,23 @@ async fn write_on_the_fly(engine: Arc<StorageEngine>, opts: &EngineOptions, plan
 
                 if opts_cloned.key_binary {
                     engine_cloned
-                        .insert(&opts_cloned.collection, &Data::KeyValue { key: &key_bin, value: &value })
+                        .insert(
+                            &opts_cloned.collection,
+                            &Data::KeyValue {
+                                key: &key_bin,
+                                value: &value,
+                            },
+                        )
                         .await?;
                 } else {
                     engine_cloned
-                        .insert(&opts_cloned.collection, &Data::KeyValue { key: key_str.as_bytes(), value: &value })
+                        .insert(
+                            &opts_cloned.collection,
+                            &Data::KeyValue {
+                                key: key_str.as_bytes(),
+                                value: &value,
+                            },
+                        )
                         .await?;
                 }
 
@@ -170,8 +190,16 @@ async fn write_on_the_fly(engine: Arc<StorageEngine>, opts: &EngineOptions, plan
     // Measure ingest time separately from flush time to isolate WAL impact
     let ingest_secs = start.elapsed().as_secs_f64();
     let value_mb = (plan.total_records as f64 * plan.value_size as f64) / (1024.0 * 1024.0);
-    let ingest_mbps = if ingest_secs > 0.0 { value_mb / ingest_secs } else { 0.0 };
-    let ingest_rps = if ingest_secs > 0.0 { plan.total_records as f64 / ingest_secs } else { 0.0 };
+    let ingest_mbps = if ingest_secs > 0.0 {
+        value_mb / ingest_secs
+    } else {
+        0.0
+    };
+    let ingest_rps = if ingest_secs > 0.0 {
+        plan.total_records as f64 / ingest_secs
+    } else {
+        0.0
+    };
     println!(
         "ingest: records={}, value_size={}, time={:.3}s, value_MB={:.2}, value_MB/s={:.2}, rec/s={:.0}",
         plan.total_records, plan.value_size, ingest_secs, value_mb, ingest_mbps, ingest_rps
@@ -188,31 +216,55 @@ async fn write_on_the_fly(engine: Arc<StorageEngine>, opts: &EngineOptions, plan
 fn parse_bytes(s: &str) -> Option<u64> {
     let lower = s.to_ascii_lowercase();
     let (num, mul) = if lower.ends_with("gib") || lower.ends_with("gb") || lower.ends_with('g') {
-        (lower.trim_end_matches(|c: char| c == 'g' || c == 'b' || c == 'i'), 1024u64 * 1024 * 1024)
+        (
+            lower.trim_end_matches(|c: char| c == 'g' || c == 'b' || c == 'i'),
+            1024u64 * 1024 * 1024,
+        )
     } else if lower.ends_with("mib") || lower.ends_with("mb") || lower.ends_with('m') {
-        (lower.trim_end_matches(|c: char| c == 'm' || c == 'b' || c == 'i'), 1024u64 * 1024)
+        (
+            lower.trim_end_matches(|c: char| c == 'm' || c == 'b' || c == 'i'),
+            1024u64 * 1024,
+        )
     } else if lower.ends_with("kib") || lower.ends_with("kb") || lower.ends_with('k') {
-        (lower.trim_end_matches(|c: char| c == 'k' || c == 'b' || c == 'i'), 1024u64)
+        (
+            lower.trim_end_matches(|c: char| c == 'k' || c == 'b' || c == 'i'),
+            1024u64,
+        )
     } else {
         (lower.as_str(), 1u64)
     };
     num.parse::<f64>().ok().map(|n| (n * mul as f64) as u64)
 }
 
-fn parse_bytes_u64(s: &str) -> Result<u64, String> { parse_bytes(s).ok_or_else(|| format!("invalid size: {}", s)) }
-fn parse_bytes_usize(s: &str) -> Result<usize, String> { parse_bytes(s).and_then(|v| usize::try_from(v).ok()).ok_or_else(|| format!("invalid size: {}", s)) }
+fn parse_bytes_u64(s: &str) -> Result<u64, String> {
+    parse_bytes(s).ok_or_else(|| format!("invalid size: {}", s))
+}
+fn parse_bytes_usize(s: &str) -> Result<usize, String> {
+    parse_bytes(s)
+        .and_then(|v| usize::try_from(v).ok())
+        .ok_or_else(|| format!("invalid size: {}", s))
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Preset benchmark parameters
     let value_size = 1024; // 1 KiB values
     let total_records = 100_000; // 100k writes per scenario
-    let concurrency = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let concurrency = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
 
     println!("MonoDB storage benchmark preset comparison");
-    println!("Records: {total_records}, Value size: {value_size} bytes, Concurrency: {concurrency}\n");
+    println!(
+        "Records: {total_records}, Value size: {value_size} bytes, Concurrency: {concurrency}\n"
+    );
 
-    let plan = WritePlan { total_records, value_size, start_id: 0, concurrency };
+    let plan = WritePlan {
+        total_records,
+        value_size,
+        start_id: 0,
+        concurrency,
+    };
 
     // Scenario 1: Full WAL (durable)
     let mut opts_full = EngineOptions::default();
@@ -224,7 +276,13 @@ async fn main() -> Result<()> {
     // Enable group-commit for durability + throughput
     opts_full.wal_sync_every_bytes = Some(1 * 1024 * 1024); // 1 MiB
     opts_full.wal_sync_interval_ms = Some(10); // 10 ms
-    run_scenario("Full WAL (durable)", &opts_full, &plan, KeySpacePersistence::Persistent).await?;
+    run_scenario(
+        "Full WAL (durable)",
+        &opts_full,
+        &plan,
+        KeySpacePersistence::Persistent,
+    )
+    .await?;
 
     // Scenario 2: High-performance WAL (reduced durability)
     let mut opts_perf = EngineOptions::default();
@@ -233,7 +291,13 @@ async fn main() -> Result<()> {
     opts_perf.wal_sync_on_write = Some(false);
     opts_perf.wal_async = true;
     opts_perf.wal_buffer_size = Some(1 * 1024 * 1024); // 1 MiB
-    run_scenario("High-performance WAL", &opts_perf, &plan, KeySpacePersistence::Persistent).await?;
+    run_scenario(
+        "High-performance WAL",
+        &opts_perf,
+        &plan,
+        KeySpacePersistence::Persistent,
+    )
+    .await?;
 
     // Scenario 3: No WAL (in-memory keyspace for demo)
     // Note: Engine currently always uses WAL for persistent stores.
@@ -244,12 +308,23 @@ async fn main() -> Result<()> {
     // WAL settings irrelevant for memory keyspace, but set to minimal anyway
     opts_mem.wal_sync_on_write = Some(false);
     opts_mem.wal_async = false;
-    run_scenario("No WAL (in-memory)", &opts_mem, &plan, KeySpacePersistence::Memory).await?;
+    run_scenario(
+        "No WAL (in-memory)",
+        &opts_mem,
+        &plan,
+        KeySpacePersistence::Memory,
+    )
+    .await?;
 
     Ok(())
 }
 
-async fn run_scenario(name: &str, opts: &EngineOptions, plan: &WritePlan, persistence: KeySpacePersistence) -> Result<()> {
+async fn run_scenario(
+    name: &str,
+    opts: &EngineOptions,
+    plan: &WritePlan,
+    persistence: KeySpacePersistence,
+) -> Result<()> {
     println!("=== {name} ===");
     let engine = open_engine(opts).await?;
     ensure_kv_collection_with_persistence(&engine, &opts.collection, persistence).await?;

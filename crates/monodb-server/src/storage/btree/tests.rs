@@ -1,16 +1,13 @@
 use super::*;
-use crate::storage::{
-    buffer_pool::BufferPool,
-    disk_manager::DiskManager,
-    page::PageType,
-};
+use crate::storage::{buffer_pool::BufferPool, disk_manager::DiskManager, page::PageType};
 use std::sync::Arc;
 use tempfile::TempDir;
 
 /// Helper to create a temporary B-tree for testing
 fn create_test_btree() -> (BTree, TempDir) {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
-    let disk_manager = Arc::new(DiskManager::new(temp_dir.path()).expect("Failed to create disk manager"));
+    let disk_manager =
+        Arc::new(DiskManager::new(temp_dir.path()).expect("Failed to create disk manager"));
     let buffer_pool = Arc::new(BufferPool::new(100, disk_manager)); // 100 pages
 
     let btree = BTree::new("test_tree".to_string(), buffer_pool);
@@ -57,7 +54,11 @@ async fn test_btree_node_split() {
     // Verify scan results are in order
     for (idx, (key, _value)) in scan_results.iter().enumerate() {
         let expected_key = format!("key_{:05}", idx + 1).into_bytes();
-        assert_eq!(key, &expected_key, "Scan results out of order at index {}", idx);
+        assert_eq!(
+            key, &expected_key,
+            "Scan results out of order at index {}",
+            idx
+        );
     }
 
     println!("✓ B-Tree Node Split test passed: 500 keys inserted, all retrievable, scan works");

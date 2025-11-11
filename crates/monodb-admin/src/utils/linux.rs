@@ -133,7 +133,10 @@ fn listen_polling_fallback() {
         if let Ok(is_dark) = is_dark_mode() {
             if is_dark != last_dark_mode {
                 last_dark_mode = is_dark;
-                eprintln!("Theme changed to: {}", if is_dark { "dark" } else { "light" });
+                eprintln!(
+                    "Theme changed to: {}",
+                    if is_dark { "dark" } else { "light" }
+                );
             }
         }
     }

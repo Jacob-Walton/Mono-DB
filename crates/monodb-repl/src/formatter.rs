@@ -56,7 +56,7 @@ fn format_array(arr: &[Value], indent: usize) {
     let all_rows = arr.iter().all(|v| matches!(v, Value::Row(_)));
     let all_objects = arr.iter().all(|v| matches!(v, Value::Object(_)));
 
-    if arr.first().is_some() && (all_rows || all_objects) {
+    if !arr.is_empty() && (all_rows || all_objects) {
         format_table(arr);
         return;
     }
@@ -131,8 +131,8 @@ fn format_table(rows: &[Value]) {
     for row in rows {
         for (i, col) in columns.iter().enumerate() {
             let val_str = match row {
-                Value::Row(r) => r.get(col).map(|v| value_to_string(v)),
-                Value::Object(o) => o.get(col).map(|v| value_to_string(v)),
+                Value::Row(r) => r.get(col).map(value_to_string),
+                Value::Object(o) => o.get(col).map(value_to_string),
                 _ => None,
             }
             .unwrap_or_else(|| "null".to_string());

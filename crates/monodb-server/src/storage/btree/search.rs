@@ -189,7 +189,10 @@ pub async fn scan(
         }
         // Cycle detection on sibling hop
         if !visited.insert(next.0) {
-            tracing::warn!("B-Tree scan detected cycle on sibling hop to page {}", next.0);
+            tracing::warn!(
+                "B-Tree scan detected cycle on sibling hop to page {}",
+                next.0
+            );
             break;
         }
         current = next;

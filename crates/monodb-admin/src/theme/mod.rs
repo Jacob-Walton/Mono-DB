@@ -1,5 +1,5 @@
-mod palette;
 mod fonts;
+mod palette;
 
-pub use palette::*;
 pub use fonts::*;
+pub use palette::*;

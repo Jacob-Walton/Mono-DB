@@ -106,12 +106,7 @@ impl PageHeader {
             3 => PageType::Leaf,
             4 => PageType::Overflow,
             5 => PageType::Free,
-            v => {
-                return Err(MonoError::Storage(format!(
-                    "Invalid page type byte: {}",
-                    v
-                )))
-            }
+            v => return Err(MonoError::Storage(format!("Invalid page type byte: {}", v))),
         };
         let page_id = PageId(u64::from_le_bytes([
             bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
@@ -177,7 +172,10 @@ impl Page {
         // Deserialize header from fixed layout
         let header = PageHeader::from_bytes(&bytes[0..PAGE_HEADER_SIZE])?;
 
-        let mut page = Self { header, data: [0; PAGE_DATA_SIZE] };
+        let mut page = Self {
+            header,
+            data: [0; PAGE_DATA_SIZE],
+        };
         page.data.copy_from_slice(&bytes[PAGE_HEADER_SIZE..]);
         Ok(page)
     }
@@ -529,4 +527,3 @@ impl Page {
         fragmentation.max(0.0).min(1.0)
     }
 }
-
