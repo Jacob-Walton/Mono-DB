@@ -12,6 +12,7 @@ use tokio::{
 use monodb_common::{
     MonoError, Result,
     protocol::{ErrorCode, ExecutionResult, ProtocolCodec, Request, Response},
+    schema::Schema,
 };
 
 use crate::{
@@ -217,7 +218,24 @@ async fn handle_request(
         Request::BeginTx { .. } => todo!(),
         Request::CommitTx { .. } => todo!(),
         Request::RollbackTx { .. } => todo!(),
-        Request::List { .. } => todo!(),
+        Request::List => {
+            let schemas = storage_engine.schemas();
+
+            let tables: Vec<(String, String)> = schemas
+                .into_iter()
+                .map(|schema| match *schema {
+                    Schema::Table { name, .. } => ("Table".to_string(), name),
+                    Schema::Collection { name, .. } => ("Collection".to_string(), name),
+                    Schema::KeySpace { name, .. } => ("KeySpace".to_string(), name),
+                })
+                .collect();
+
+            Ok(Response::Success {
+                result: vec![ExecutionResult::Ok {
+                    data:
+                }],
+            })
+        }
     }
 }
 
