@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+"""GUI tasks now work with Tauri setup in gui/ directory."""
+
 import os
 import shutil
 import subprocess
@@ -9,8 +11,7 @@ import invoke
 import psutil
 
 PROJECT_NAME = os.path.basename(os.getcwd())
-BINARIES = ["monod", "mdb", "monodb-admin"]
-GUI_TARGET = "monodb-admin"
+BINARIES = ["monod", "mdb"]
 MANDIR = "/usr/share/man/man1"  # Only on Unix
 
 
@@ -33,6 +34,8 @@ def get_cores():
 
 
 CORES = get_cores()
+GUI_DIR = "./gui"
+TAURI_DIR = os.path.join(GUI_DIR, "src-tauri")
 
 
 def run_cmd(c, command, **kwargs):
@@ -73,7 +76,10 @@ def help(c):
     tasks = [
         ("help", "Show this help message"),
         ("build", "Build the project"),
-        ("build-gui", "Build the GUI."),
+        ("build-gui", "Build the GUI (Next.js + Tauri)"),
+        ("build-frontend", "Build Next.js frontend only"),
+        ("build-tauri", "Build Tauri backend only"),
+        ("dev-gui", "Run GUI in development mode"),
         ("clean", "Clean build artifacts"),
         ("test", "Run tests"),
         ("lint", "Run linters"),
@@ -103,18 +109,48 @@ def deps(c):
         f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Installing dependencies..."
     )
     run_cmd(c, "cargo install cargo-audit cargo-tarpaulin")
+    print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Installing GUI dependencies...")
+    run_cmd(c, "yarn install", cwd=GUI_DIR)
     print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Dependencies installed.")
 
 
 @invoke.task
-def build_gui(c, release=False):
-    """Build the GUI."""
-    print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Building GUI...")
+def build_frontend(c):
+    """Build the Next.js frontend."""
+    print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Building Next.js frontend...")
+    run_cmd(c, "yarn build", cwd=GUI_DIR)
+    print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Frontend build complete.")
+
+
+@invoke.task
+def build_tauri(c, release=False):
+    """Build the Tauri backend."""
+    print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Building Tauri backend...")
     run_cmd(
         c,
-        f"cargo build {'--release' if release else ''} -p {GUI_TARGET} -j {get_cores()}",
+        f"cargo build {'--release' if release else ''} -j {get_cores()}",
+        cwd=TAURI_DIR,
     )
+    print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Tauri backend build complete.")
+
+
+@invoke.task
+def build_gui(c, release=False):
+    """Build the GUI (Next.js + Tauri)."""
+    print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Building GUI...")
+    # Use Tauri's build command which properly links frontend and backend
+    if release:
+        run_cmd(c, "yarn tauri build", cwd=GUI_DIR)
+    else:
+        run_cmd(c, "yarn tauri build --debug", cwd=GUI_DIR)
     print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} GUI build complete.")
+
+
+@invoke.task
+def dev_gui(c):
+    """Run GUI in development mode."""
+    print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Starting GUI in dev mode...")
+    run_cmd(c, "yarn tauri dev", cwd=GUI_DIR)
 
 
 @invoke.task
@@ -135,6 +171,14 @@ def clean(c):
         f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Cleaning build artifacts..."
     )
     run_cmd(c, "cargo clean")
+    run_cmd(c, "cargo clean", cwd=TAURI_DIR)
+    # Clean Next.js build artifacts
+    nextjs_dirs = [".next", "out"]
+    for dir_name in nextjs_dirs:
+        dir_path = os.path.join(GUI_DIR, dir_name)
+        if os.path.exists(dir_path):
+            shutil.rmtree(dir_path)
+            print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Removed {dir_path}")
     print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Clean complete.")
 
 
@@ -178,13 +222,26 @@ def docs(c):
 def package(c):
     """Package the application."""
     print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Packaging application...")
-    build(c, release=True)
+    
+    # Build CLI binaries first
+    run_cmd(c, f"cargo build --release -j {CORES}")
+    
+    # Build and bundle GUI with Tauri's bundler
+    print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Building and bundling GUI...")
+    result = run_cmd(c, "yarn tauri build", cwd=GUI_DIR)
+    
+    # Check if bundling failed (e.g., AppImage issues)
+    if result.returncode != 0:
+        print(
+            f"{colorama.Fore.YELLOW}Warning: Some bundles may have failed to build. Continuing with available packages...{colorama.Style.RESET_ALL}"
+        )
+    
     # Create dist/
     dist_dir = "./dist"
     if not os.path.exists(dist_dir):
         os.makedirs(dist_dir)
 
-    # List target and find all executables
+    # Package CLI binaries
     target_dir = "./target/release"
     for binary in BINARIES:
         # Add .exe extension on Windows
@@ -200,5 +257,55 @@ def package(c):
             print(
                 f"{colorama.Fore.YELLOW}Warning: {binary_name} not found in {target_dir}, skipping.{colorama.Style.RESET_ALL}"
             )
+
+    # Package Tauri bundles (deb, AppImage, dmg, msi, etc.)
+    # Only package actual distribution files, skip intermediate directories
+    tauri_bundle_dir = os.path.join(TAURI_DIR, "target", "release", "bundle")
+    if os.path.exists(tauri_bundle_dir):
+        # Define valid distribution file extensions and directories to skip
+        valid_extensions = {'.deb', '.rpm', '.AppImage', '.dmg', '.msi', '.exe', '.app'}
+        skip_dirs = {'data', 'macos', 'appimage'}  # Intermediate build directories
+        
+        packaged_count = 0
+        for bundle_type in os.listdir(tauri_bundle_dir):
+            bundle_path = os.path.join(tauri_bundle_dir, bundle_type)
+            if os.path.isdir(bundle_path):
+                # For directories like 'deb', 'rpm', 'appimage', 'dmg', 'msi', 'nsis'
+                for artifact in os.listdir(bundle_path):
+                    # Skip intermediate directories (e.g., .AppDir, data/)
+                    if artifact.lower() in skip_dirs or artifact.endswith('.AppDir'):
+                        continue
+                    
+                    src = os.path.join(bundle_path, artifact)
+                    
+                    # Only copy files with valid extensions or .app bundles
+                    if os.path.isfile(src):
+                        _, ext = os.path.splitext(artifact)
+                        if ext in valid_extensions:
+                            dst = os.path.join(dist_dir, artifact)
+                            shutil.copy2(src, dst)
+                            print(
+                                f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Packaged {artifact}"
+                            )
+                            packaged_count += 1
+                    elif os.path.isdir(src) and artifact.endswith('.app'):
+                        # macOS .app bundles are directories
+                        dst = os.path.join(dist_dir, artifact)
+                        if os.path.exists(dst):
+                            shutil.rmtree(dst)
+                        shutil.copytree(src, dst)
+                        print(
+                            f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Packaged {artifact}/"
+                        )
+                        packaged_count += 1
+        
+        if packaged_count == 0:
+            print(
+                f"{colorama.Fore.YELLOW}Warning: No Tauri bundles were packaged. Check build output for errors.{colorama.Style.RESET_ALL}"
+            )
+    else:
+        print(
+            f"{colorama.Fore.YELLOW}Warning: Tauri bundles not found at {tauri_bundle_dir}{colorama.Style.RESET_ALL}"
+        )
 
     print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Packaging complete.")
