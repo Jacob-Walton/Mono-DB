@@ -124,4 +124,21 @@ impl Connection {
             ))),
         }
     }
+
+    pub async fn list_tables(&mut self) -> Result<Response> {
+        let request = Request::List {};
+
+        let response = self
+            .send_request(request)
+            .await
+            .map_err(|e| MonoError::Execution(e.to_string()))?;
+
+        match response {
+            Response::Success { .. } => Ok(response),
+            Response::Error { code: _, message } => Err(MonoError::Execution(message)),
+            other => Err(MonoError::Execution(format!(
+                "Unexpected response: {other:?}"
+            ))),
+        }
+    }
 }

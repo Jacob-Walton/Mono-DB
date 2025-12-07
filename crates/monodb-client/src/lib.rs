@@ -5,6 +5,7 @@ use crate::pool::ConnectionPool;
 mod connection;
 mod pool;
 
+#[derive(Clone)]
 pub struct Client {
     pool: ConnectionPool,
 }

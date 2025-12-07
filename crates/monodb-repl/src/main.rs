@@ -1,6 +1,9 @@
 use colored::*;
 use monodb_client::Client;
-use monodb_common::protocol::{ExecutionResult, Response};
+use monodb_common::{
+    Value,
+    protocol::{ExecutionResult, Response},
+};
 use std::io::{self, BufRead, Write};
 
 mod formatter;
@@ -91,18 +94,22 @@ async fn handle_command(cmd: &str, lines: &mut Vec<String>, client: &Client) -> 
                 }
             }
         }
+        ":lt" | ":tables" => {
+            get_tables(client).await;
+        }
         ":q" | ":quit" => {
             return true;
         }
         ":h" | ":help" => {
             println!("\nCommands:");
-            println!("  :x, :run        Execute buffered query");
-            println!("  :c, :clear      Clear buffer");
-            println!("  :l, :list       Show buffered lines");
-            println!("  :d <N>          Delete line N");
-            println!("  :u, :undo       Remove last line");
-            println!("  :q, :quit       Exit");
-            println!("  :h, :help       Show this help");
+            println!("  :x,  :run        Execute buffered query");
+            println!("  :c,  :clear      Clear buffer");
+            println!("  :l,  :list       Show buffered lines");
+            println!("  :lt, :tables     List tables from server");
+            println!("  :d   <N>         Delete line N");
+            println!("  :u,  :undo       Remove last line");
+            println!("  :q,  :quit       Exit");
+            println!("  :h,  :help       Show this help");
             println!();
         }
         _ if cmd.starts_with(":d ") => {
@@ -141,6 +148,74 @@ async fn execute(client: &Client, query: &str) {
                     let elapsed = start.elapsed();
                     println!();
                     format_response(&response, elapsed);
+                }
+                Err(e) => {
+                    println!("\n{}: {}\n", "Error".red(), e);
+                }
+            }
+            pool.return_connection(conn);
+        }
+        Err(e) => {
+            println!("\n{}: {}\n", "Connection error".red(), e);
+        }
+    }
+}
+
+async fn get_tables(client: &Client) {
+    let start = std::time::Instant::now();
+    let pool = client.pool().await;
+
+    match pool.get().await {
+        Ok(mut conn) => {
+            match conn.list_tables().await {
+                Ok(response) => {
+                    let elapsed = start.elapsed();
+                    println!();
+                    match response {
+                        Response::Success { result } => {
+                            for exec_result in result.iter() {
+                                match exec_result {
+                                    ExecutionResult::Ok { data, .. } => match data {
+                                        Value::Array(arr) => {
+                                            for item in arr {
+                                                match item {
+                                                    Value::Array(table) => {
+                                                        let fallback =
+                                                            Value::String("unknown".to_string());
+
+                                                        let table_type =
+                                                            table.get(0).unwrap_or(&fallback);
+                                                        let table_name =
+                                                            table.get(1).unwrap_or(&fallback);
+
+                                                        println!(
+                                                            "{}: {}",
+                                                            table_name.as_string().unwrap(),
+                                                            table_type.as_string().unwrap()
+                                                        );
+                                                    }
+                                                    _ => eprintln!(
+                                                        "Found unexpected type when getting tables"
+                                                    ),
+                                                }
+                                            }
+                                        }
+                                        _ => eprintln!("Found unexpected type when getting tables"),
+                                    },
+                                    _ => eprintln!(
+                                        "Got an unexpected type when attempting to list tables"
+                                    ),
+                                }
+                            }
+                            println!("({:.2?})\n", elapsed);
+                        }
+                        Response::Error { code, message } => {
+                            println!("{}: [{:?}] {}\n", "Error".red(), code, message);
+                        }
+                        _ => {
+                            println!("{:?}\n", response);
+                        }
+                    }
                 }
                 Err(e) => {
                     println!("\n{}: {}\n", "Error".red(), e);

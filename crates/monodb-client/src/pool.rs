@@ -4,6 +4,7 @@ use parking_lot::Mutex;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
 
+#[derive(Clone)]
 pub struct PoolConfig {
     pub min_connections: usize,
     pub max_connections: usize,
@@ -22,6 +23,7 @@ impl Default for PoolConfig {
     }
 }
 
+#[derive(Clone)]
 pub struct ConnectionPool {
     addr: String,
     connections: Arc<Mutex<Vec<Connection>>>,

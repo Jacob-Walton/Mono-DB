@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::UNIX_EPOCH};
 
 use bytes::BytesMut;
 use dashmap::DashMap;
@@ -10,7 +10,7 @@ use tokio::{
 };
 
 use monodb_common::{
-    MonoError, Result,
+    MonoError, Result, Value,
     protocol::{ErrorCode, ExecutionResult, ProtocolCodec, Request, Response},
     schema::Schema,
 };
@@ -218,21 +218,42 @@ async fn handle_request(
         Request::BeginTx { .. } => todo!(),
         Request::CommitTx { .. } => todo!(),
         Request::RollbackTx { .. } => todo!(),
-        Request::List => {
+        Request::List { .. } => {
             let schemas = storage_engine.schemas();
 
             let tables: Vec<(String, String)> = schemas
-                .into_iter()
-                .map(|schema| match *schema {
-                    Schema::Table { name, .. } => ("Table".to_string(), name),
-                    Schema::Collection { name, .. } => ("Collection".to_string(), name),
-                    Schema::KeySpace { name, .. } => ("KeySpace".to_string(), name),
+                .iter()
+                .map(|schema| match &**schema {
+                    Schema::Table { name, .. } => ("Table".to_string(), name.clone()),
+                    Schema::Collection { name, .. } => ("Collection".to_string(), name.clone()),
+                    Schema::KeySpace { name, .. } => ("KeySpace".to_string(), name.clone()),
                 })
                 .collect();
 
+            let data = Value::Array(
+                tables
+                    .iter()
+                    .map(|(kind, name)| {
+                        Value::Array(vec![
+                            Value::String(kind.clone()),
+                            Value::String(name.clone()),
+                        ])
+                    })
+                    .collect(),
+            );
+
+            let time = std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+
             Ok(Response::Success {
                 result: vec![ExecutionResult::Ok {
-                    data:
+                    data,
+                    time,
+                    time_elapsed: None,
+                    row_count: Some(tables.len() as u64),
+                    commit_timestamp: None,
                 }],
             })
         }
