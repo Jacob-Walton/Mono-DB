@@ -3521,8 +3521,6 @@ dependencies = [
  "gpui",
  "gpui-component",
  "indexmap",
- "monodb-client",
- "monodb-common",
  "objc",
  "tokio",
  "windows 0.62.2",
