@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState, useRef } from "react";
-import styles from "@/styles/components/Resizer.module.css";
+import styles from "./Resizer.module.css";
 
 interface ResizerProps {
   onResize: (delta: number) => void;

@@ -49,6 +49,9 @@
   border-radius: 20px;
   font-size: 12px;
   font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-family: inherit;
 }
 
 .connectionStatus.connected {
@@ -57,10 +60,31 @@
   color: #4ade80;
 }
 
+.connectionStatus.connected:hover {
+  background: rgba(34, 197, 94, 0.15);
+  border-color: rgba(34, 197, 94, 0.3);
+}
+
 .connectionStatus.disconnected {
-  background: rgba(239, 68, 68, 0.08);
-  border: 1px solid rgba(239, 68, 68, 0.2);
-  color: #f87171;
+  background: rgba(99, 102, 241, 0.08);
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  color: var(--accent);
+}
+
+.connectionStatus.disconnected:hover {
+  background: rgba(99, 102, 241, 0.15);
+  border-color: rgba(99, 102, 241, 0.3);
+}
+
+.disconnectIcon {
+  opacity: 0;
+  margin-left: -4px;
+  transition: all 0.15s ease;
+}
+
+.connectionStatus:hover .disconnectIcon {
+  opacity: 1;
+  margin-left: 0;
 }
 
 .statusDot {
@@ -98,10 +122,15 @@
   font-family: inherit;
 }
 
-.btn:hover {
+.btn:hover:not(:disabled) {
   background: var(--bg-hover);
   color: var(--text-primary);
   border-color: var(--border-hover);
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .btnIcon {

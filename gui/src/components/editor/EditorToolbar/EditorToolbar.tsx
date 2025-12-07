@@ -1,6 +1,6 @@
 "use client";
 
-import styles from "@/styles/components/EditorToolbar.module.css";
+import styles from "./EditorToolbar.module.css";
 import { Loader2, Play, RotateCcw, Save, Sparkles, Zap } from "lucide-react";
 
 interface EditorToolbarProps {

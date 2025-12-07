@@ -1,10 +1,9 @@
-import { defaultQuery } from "@/lib/mockData";
 import { Tab } from "@/types/database";
 import { useCallback, useState } from "react";
 
 interface TabState {
   tabs: Tab[];
-  activeTabId: string;
+  activeTabId: string | null;
 }
 
 function getNextTabNumber(tabs: Tab[]): number {
@@ -16,20 +15,22 @@ function getNextTabNumber(tabs: Tab[]): number {
 
 export function useQueryTabs() {
   const [state, setState] = useState<TabState>({
-    tabs: [{ id: "tab-1", name: "Query 1", content: defaultQuery, saved: true }],
-    activeTabId: "tab-1",
+    tabs: [],
+    activeTabId: null,
   });
 
-  const activeTab = state.tabs.find((t) => t.id === state.activeTabId) ?? state.tabs[0];
+  const activeTab = state.activeTabId
+    ? state.tabs.find((t) => t.id === state.activeTabId) ?? null
+    : null;
 
-  const createTab = useCallback(() => {
+  const createTab = useCallback((content?: string, name?: string) => {
     setState((prev) => {
       const newCount = getNextTabNumber(prev.tabs);
       const newTab: Tab = {
         id: `tab-${newCount}`,
-        name: `Query ${newCount}`,
-        content: defaultQuery,
-        saved: true,
+        name: name ?? `Query ${newCount}`,
+        content: content ?? "",
+        saved: false,
       };
       return {
         tabs: [...prev.tabs, newTab],
@@ -42,17 +43,16 @@ export function useQueryTabs() {
     setState((prev) => {
       const filtered = prev.tabs.filter((t) => t.id !== tabId);
 
+      // Allow closing all tabs - show empty state
       if (filtered.length === 0) {
-        const newCount = getNextTabNumber(prev.tabs);
-        const newTab = { id: `tab-${newCount}`, name: `Query ${newCount}`, content: "", saved: false };
-        return { tabs: [newTab], activeTabId: newTab.id };
+        return { tabs: [], activeTabId: null };
       }
 
       let newActiveTabId = prev.activeTabId;
       if (prev.activeTabId === tabId) {
         const currentIndex = prev.tabs.findIndex((t) => t.id === tabId);
         const newIndex = Math.min(currentIndex, filtered.length - 1);
-        newActiveTabId = filtered[newIndex]?.id ?? filtered[0]?.id;
+        newActiveTabId = filtered[newIndex]?.id ?? filtered[0]?.id ?? null;
       }
 
       return { tabs: filtered, activeTabId: newActiveTabId };
@@ -90,6 +90,17 @@ export function useQueryTabs() {
     }));
   }, []);
 
+  const closeOthers = useCallback((tabId: string) => {
+    setState((prev) => ({
+      tabs: prev.tabs.filter((t) => t.id === tabId),
+      activeTabId: tabId,
+    }));
+  }, []);
+
+  const closeAll = useCallback(() => {
+    setState({ tabs: [], activeTabId: null });
+  }, []);
+
   return {
     tabs: state.tabs,
     activeTab,
@@ -100,5 +111,7 @@ export function useQueryTabs() {
     updateTabContent,
     saveTab,
     renameTab,
+    closeOthers,
+    closeAll,
   };
 }

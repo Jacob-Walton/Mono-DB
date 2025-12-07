@@ -3,7 +3,7 @@
 import { useRef, useCallback } from "react";
 import Editor, { OnMount, OnChange } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
-import styles from "@/styles/components/QueryEditor.module.css";
+import styles from "./QueryEditor.module.css";
 
 interface QueryEditorProps {
   value: string;

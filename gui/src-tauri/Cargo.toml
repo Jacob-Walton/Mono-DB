@@ -25,4 +25,9 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1.47", features = ["full"] }
+
+# Local crates
+monodb-client = { path = "../../crates/monodb-client" }
+monodb-common = { path = "../../crates/monodb-common" }
 

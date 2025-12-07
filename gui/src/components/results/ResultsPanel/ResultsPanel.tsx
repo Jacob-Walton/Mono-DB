@@ -1,6 +1,6 @@
 "use client";
 
-import styles from "@/styles/components/ResultsPanel.module.css";
+import styles from "./ResultsPanel.module.css";
 import { AlertCircle, Check, Copy, Download, MoreHorizontal, TableProperties } from "lucide-react";
 import { useState } from "react";
 import { QueryResult } from "@/types/database";
