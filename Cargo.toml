@@ -5,7 +5,6 @@ members = [
     "crates/monodb-server", # Server daemon
     "crates/monodb-client", # Rust client library
     "crates/monodb-repl",   # TUI REPL similar to psql
-    "crates/monodb-admin", # GUI frontend similar to pgadmin
     "crates/testing",       # Test playground
 ]
 
@@ -72,6 +71,3 @@ overflow-checks = true
 incremental = true
 codegen-units = 128
 panic = "unwind"
-
-[profile.release.package.monodb-admin]
-opt-level = "s"
