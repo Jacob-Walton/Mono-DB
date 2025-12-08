@@ -29,7 +29,6 @@ jobs:
             libayatana-appindicator-dev \
             librsvg-dev \
             harfbuzz-dev \
-            atk-dev \
             libsoup3-dev \
             zlib-dev \
             libgcc
