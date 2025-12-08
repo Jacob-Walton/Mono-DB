@@ -7,48 +7,72 @@ on:
 
 jobs:
   build:
-  
     runs-on: amd64
 
     steps:
-      - name: Install System Dependencies
-        run: |
-          if command -v apk &> /dev/null; then
-            apk add --no-cache nodejs curl
-          elif command -v apt-get &> /dev/null; then
-            apt-get update
-            apt-get install -y nodejs curl
-          fi
-
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install System Dependencies
+        run: |
+          apk add --no-cache \
+            nodejs npm \
+            python3 py3-pip \
+            gcc python3-dev musl-dev linux-headers \
+            curl git
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
+      - name: Cache Yarn
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/yarn
+            node_modules
+          key: yarn-${{ hashFiles('**/yarn.lock') }}
+          restore-keys: |
+            yarn-
+
       - name: Install Yarn
         run: npm install -g yarn
 
-      - name: Install Python, pipx, invoke
+      - name: Install JS Dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Cache pipx
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.local/pipx
+            ~/.cache/pipx
+          key: pipx-${{ hashFiles('**/pyproject.toml', '**/requirements.txt') }}
+          restore-keys: |
+            pipx-
+
+      - name: Install pipx and invoke
         run: |
-          if command -v apk &> /dev/null; then
-            apk add --no-cache python3 py3-pip gcc python3-dev musl-dev linux-headers
-            python3 -m pip install pipx --break-system-packages || python3 -m pip install pipx
-          elif command -v apt-get &> /dev/null; then
-            apt-get update
-            apt-get install -y python3 python3-pip pipx
-          fi
-          
-          export PATH="$PATH:$HOME/.local/bin"
+          python3 -m pip install --break-system-packages pipx || python3 -m pip install pipx
           pipx ensurepath
           pipx install invoke
           pipx inject invoke colorama psutil
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
+      - name: Cache Cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-
+
       - name: Install Rust and Cargo
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Run CI task
+      - name: Run CI
         run: invoke ci
