@@ -127,57 +127,74 @@ First byte: **kind tag** (`u8`). Then variant-specific payload.
 - `String` (`6`): `String` (u32 len + bytes)
 - `Binary` (`7`): `Bytes` (u32 len + bytes)
 - `DateTime` (`8`):
+
   ```text
   [unix_micros    : i64 LE] - microseconds since Unix epoch (UTC)
   [offset_minutes : i32 LE] - timezone offset from UTC in minutes
   ```
+
 - `Date` (`9`):
+
   ```text
   [year  : i32 LE]
   [month : u8    ] - 1-12
   [day   : u8    ] - 1-31
   ```
+
 - `Time` (`10`):
+
   ```text
   [hour   : u8] - 0-23
   [minute : u8] - 0-59
   [second : u8] - 0-59
   [micros : u32 LE] - 0-999_999
   ```
+
 - `Uuid` (`11`): `[16 bytes]` (RFC 4122 BE format)
 - `ObjectId` (`12`): `[12 bytes]` (MongoDB-style raw bytes)
 - `Array` (`13`):
+
   ```text
   [len : u32 LE]
   [Value_0][Value_1]...[Value_{len-1}]
   ```
+
 - `Object` (`14`): (`BTreeMap<String, Value>`; order not significant)
+
   ```text
   [len : u32 LE]
   repeat len times:
     [key   : String]
     [value : Value]
   ```
+
 - `Set` (`15`): (`HashSet<String>`)
+
   ```text
   [len : u32 LE]
   repeat len times:
     [item : String]
   ```
+
 - `Row` (`16`): (`IndexMap<String, Value>`; order significant) write format identical to `Object`, but order is preserved.
 - `SortedSet` (`17`): (`Vec<(f64, String)>`)
+
   ```text
   [len : u32 LE]
   repeat len times:
     [score : f64 LE]
     [item  : String]
   ```
+
 - `GeoPoint` (`18`):
+
   ```text
   [latitude  : f64 LE]
   [longitude : f64 LE]
   ```
+
 - `Reference` (`19`):
+
   ```text
   [collection : String]
   [id         : Value] - typically Int32, Int64, or ObjectId
@@ -339,8 +356,9 @@ Wire:
 ExecutionResult:
   [tag : u8]
   if tag == 0:  // Ok
-      [data             : Value]
-      [time             : u64 LE]
+      [len              : u32 LE        ]
+      [data             : Value         ]
+      [time             : u64 LE        ]
       [commit_timestamp : Option<u64 LE>]
       [time_elapsed     : Option<u64 LE>]
       [row_count        : Option<u64 LE>]

@@ -26,3 +26,4 @@ indexmap = { version = "2.11.4", features = ["serde"] }
 base64 = "0.22.1"
 bytes.workspace = true
 rkyv = "0.8.12"
+tracing.workspace = true

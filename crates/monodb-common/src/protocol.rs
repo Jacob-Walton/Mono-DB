@@ -164,7 +164,23 @@ pub enum ErrorCode {
     InternalError = 9999,
 }
 
+impl From<u16> for ErrorCode {
+    fn from(code: u16) -> Self {
+        match code {
+            1001 => ErrorCode::ParseError,
+            1002 => ErrorCode::ExecutionError,
+            1003 => ErrorCode::NotFound,
+            1004 => ErrorCode::AlreadyExists,
+            1005 => ErrorCode::TypeError,
+            1006 => ErrorCode::TransactionError,
+            1007 => ErrorCode::NetworkError,
+            _ => ErrorCode::InternalError,
+        }
+    }
+}
+
 /// Transaction isolation levels
+#[repr(u8)]
 #[derive(Debug, Clone, PartialEq, Copy, Serialize, Deserialize)]
 pub enum IsolationLevel {
     ReadUncommitted,
@@ -260,7 +276,7 @@ impl ProtocolCodec {
         put_u32(&mut header, 0); // 0 for correlation id for now
 
         let mut buf = BytesMut::with_capacity(4 + header.len() + body.len());
-        buf.put_u32((header.len() + body.len()) as u32);
+        buf.put_u32_le((header.len() + body.len()) as u32);  // Make sure this is _le too
         buf.put_slice(&header);
         buf.put_slice(&body);
 
@@ -283,7 +299,11 @@ impl ProtocolCodec {
         }
 
         // Get header
-        let len = (&buf[..4]).get_u32() as usize;
+        let len = (&buf[..4]).get_u32_le() as usize;
+        
+        #[cfg(debug_assertions)]
+        tracing::debug!("decode_request: frame_len={}, buf.len()={}", len, buf.len());
+        
         if buf.len() < 4 + len {
             return Ok(None);
         }
@@ -291,22 +311,29 @@ impl ProtocolCodec {
         let data = buf.split_to(len);
         let mut data_buf = BytesMut::from(&data[..]);
 
-        // Parse header
+        // Parse header - CORRECTED ORDER
         let version = data_buf.get_u8();
+        let kind = data_buf.get_u8();
+        let command = data_buf.get_u8();
+        let _flags = data_buf.get_u8();
+        let _correlation_id = data_buf.get_u32_le();
+        
+        #[cfg(debug_assertions)]
+        tracing::debug!(
+            "decode_request: version={}, kind={}, command={}, remaining={}",
+            version, kind, command, data_buf.len()
+        );
+        
         if version != VERSION {
             return Err(MonoError::Network(format!(
                 "Unsupported protocol version: {version}"
             )));
         }
-        let msg_type = data_buf.get_u8();
-        if msg_type != 0x00 {
+        if kind != 0x00 {
             return Err(MonoError::Network(format!(
-                "Invalid message type for request: {msg_type}"
+                "Invalid message type for request: {kind}"
             )));
         }
-        let command = data_buf.get_u8();
-        let _flags = data_buf.get_u8(); // Skip flags
-        let _correlation_id = data_buf.get_u32_le(); // Skip correlation id
 
         let req = match command {
             // Connect
@@ -447,7 +474,10 @@ impl ProtocolCodec {
                             commit_timestamp,
                             row_count,
                         } => {
-                            body.put_slice(&data.to_bytes());
+                            body.put_u8(0); // Tag
+                            let value_bytes = data.to_bytes();
+                            body.put_u32_le(value_bytes.len() as u32);
+                            body.put_slice(&value_bytes);
                             body.put_u64_le(*time);
                             put_opt_u64(&mut body, commit_timestamp);
                             put_opt_u64(&mut body, time_elapsed);
@@ -457,7 +487,9 @@ impl ProtocolCodec {
                             time,
                             commit_timestamp,
                         } => {
+                            body.put_u8(1); // Tag
                             body.put_u64_le(*time);
+                            // commit_timestamp is Option<u64>, not u64
                             put_opt_u64(&mut body, commit_timestamp);
                         }
                         ExecutionResult::Modified {
@@ -465,6 +497,7 @@ impl ProtocolCodec {
                             commit_timestamp,
                             rows_affected,
                         } => {
+                            body.put_u8(2); // Tag
                             body.put_u64_le(*time);
                             put_opt_u64(&mut body, commit_timestamp);
                             put_opt_u64(&mut body, rows_affected);
@@ -491,7 +524,7 @@ impl ProtocolCodec {
         put_u32(&mut header, 0); // 0 for correlation id for now
 
         let mut buf = BytesMut::with_capacity(4 + header.len() + body.len());
-        buf.put_u32((header.len() + body.len()) as u32);
+        buf.put_u32_le((header.len() + body.len()) as u32);  // Make sure this is _le too
         buf.put_slice(&header);
         buf.put_slice(&body);
 
@@ -514,7 +547,7 @@ impl ProtocolCodec {
         }
 
         // Get header
-        let len = (&buf[..4]).get_u32() as usize;
+        let len = (&buf[..4]).get_u32_le() as usize;
         if buf.len() < 4 + len {
             return Ok(None);
         }
@@ -522,24 +555,25 @@ impl ProtocolCodec {
         let data = buf.split_to(len);
         let mut data_buf = BytesMut::from(&data[..]);
 
-        // Parse header
+        // Parse header - CORRECTED ORDER
         let version = data_buf.get_u8();
         if version != VERSION {
             return Err(MonoError::Network(format!(
                 "Unsupported protocol version: {version}"
             )));
         }
-        let msg_type = data_buf.get_u8();
-        if msg_type != 0x01 {
+        let kind = data_buf.get_u8();  // Read kind (was missing!)
+        if kind != 0x01 {
             return Err(MonoError::Network(format!(
-                "Invalid message type for response: {msg_type}"
+                "Invalid message type for response: {kind}"
             )));
         }
-        let command = data_buf.get_u8();
+        let command = data_buf.get_u8();  // This is msg_type
         let _flags = data_buf.get_u8(); // Skip flags
         let _correlation_id = data_buf.get_u32_le(); // Skip correlation id
 
         let resp = match command {
+            // ConnectAck
             0x01 => {
                 let protocol_version = data_buf.get_u8();
                 let server_timestamp = get_opt_u64(&mut data_buf);
@@ -547,6 +581,8 @@ impl ProtocolCodec {
                 let mut user_permissions: Option<Vec<String>> = None;
                 if permissions_present {
                     user_permissions = Some(Vec::new());
+                    
+                    let len = data_buf.get_u32_le() as usize;
 
                     for _ in 0..len {
                         let string = get_string(&mut data_buf)?;
@@ -557,48 +593,70 @@ impl ProtocolCodec {
                 Response::ConnectAck {
                     protocol_version,
                     server_timestamp,
-                    user_permissions
+                    user_permissions,
                 }
-            },
+            }
+            // Sucess
             0x02 => {
                 let result_len = data_buf.get_u32_le() as usize;
                 let mut result = Vec::with_capacity(result_len);
                 for _ in 0..result_len {
-                    // For simplicity, assuming all results are ExecutionResult::Ok
-                    let data = {
-                        let val_len = data_buf.get_u32_le() as usize;
-                        let val_bytes = data_buf.split_to(val_len).to_vec();
-                        let val = Value::from_bytes(&val_bytes)
-                            .map_err(|e| MonoError::Network(format!("Decode error: {e}")))?;
-                        val.0
-                    };
-                    let time = data_buf.get_u64_le();
-                    let commit_timestamp = if data_buf.get_u8() == 1 {
-                        Some(data_buf.get_u64_le())
-                    } else {
-                        None
-                    };
-                    let time_elapsed = if data_buf.get_u8() == 1 {
-                        Some(data_buf.get_u64_le())
-                    } else {
-                        None
-                    };
-                    let row_count = if data_buf.get_u8() == 1 {
-                        Some(data_buf.get_u64_le())
-                    } else {
-                        None
-                    };
+                    let tag = data_buf.get_u8();
+                    match tag {
+                        0 => {
+                            let len = data_buf.get_u32_le();
+                            let value_bytes = data_buf.split_to(len as usize).to_vec();
+                            let data = Value::from_bytes(&value_bytes)
+                                .map_err(|e| MonoError::Network(format!("Decode error: {e}")))?;
+                            let time = data_buf.get_u64_le();
+                            let commit_timestamp = get_opt_u64(&mut data_buf);
+                            let time_elapsed = get_opt_u64(&mut data_buf);
+                            let row_count = get_opt_u64(&mut data_buf);
 
-                    result.push(ExecutionResult::Ok {
-                        data,
-                        time,
-                        commit_timestamp,
-                        time_elapsed,
-                        row_count,
-                    });
+                            result.push(ExecutionResult::Ok {
+                                data: data.0,
+                                time,
+                                commit_timestamp,
+                                time_elapsed,
+                                row_count,
+                            });
+                        }
+                        1 => {
+                            let time = data_buf.get_u64_le();
+                            let commit_timestamp = get_opt_u64(&mut data_buf);
+
+                            result.push(ExecutionResult::Created {
+                                time,
+                                commit_timestamp,
+                            });
+                        }
+                        2 => {
+                            let time = data_buf.get_u64_le();
+                            let commit_timestamp = get_opt_u64(&mut data_buf);
+                            let rows_affected = get_opt_u64(&mut data_buf);
+
+                            result.push(ExecutionResult::Modified {
+                                time,
+                                commit_timestamp,
+                                rows_affected,
+                            });
+                        }
+                        _ => return Err(MonoError::Network(format!("Unknown execution result tag: {tag}"))),
+                    }
                 }
                 Response::Success { result }
             }
+            // Error
+            0x03 => {
+                let code: ErrorCode = data_buf.get_u16_le().into();
+                let message = get_string(&mut data_buf)?;
+
+                Response::Error { code, message }
+            }
+            // Stream
+            0x04 => Response::Stream {},
+            // Ack
+            0x05 => Response::Ack {},
             _ => return Err(MonoError::Network(format!("Unknown command: {command}"))),
         };
 
@@ -658,7 +716,7 @@ fn put_opt_string(buf: &mut BytesMut, v: &Option<String>) {
 }
 
 fn get_string(buf: &mut BytesMut) -> crate::Result<String> {
-    let str_len = buf.get_u32() as usize;
+    let str_len = buf.get_u32_le() as usize;
     let s = String::from_utf8(buf.split_to(str_len).to_vec())
         .map_err(|e| MonoError::Network(format!("Decode error: {e}")))?;
     Ok(s)
@@ -669,7 +727,7 @@ fn get_opt_string(buf: &mut BytesMut) -> crate::Result<Option<String>> {
     if flag == 0 {
         Ok(None)
     } else {
-        let str_len = buf.get_u32() as usize;
+        let str_len = buf.get_u32_le() as usize;
         let s = String::from_utf8(buf.split_to(str_len).to_vec())
             .map_err(|e| MonoError::Network(format!("Decode error: {e}")))?;
         Ok(Some(s))
@@ -678,5 +736,5 @@ fn get_opt_string(buf: &mut BytesMut) -> crate::Result<Option<String>> {
 
 fn get_opt_u64(buf: &mut BytesMut) -> Option<u64> {
     let flag = buf.get_u8();
-    if flag == 0 { None } else { Some(buf.get_u64()) }
+    if flag == 0 { None } else { Some(buf.get_u64_le()) }
 }

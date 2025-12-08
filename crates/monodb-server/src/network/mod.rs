@@ -44,6 +44,7 @@ pub async fn handle_connection(
                 match read_result {
                     Ok(0) => break, // EOF
                     Ok(_) => {
+                        tracing::debug!("Read {} bytes from connection", buffer.len());
                         // Try to decode requests from the buffer
                         while let Some(request) = ProtocolCodec::decode_request(&mut buffer)? {
                             #[cfg(debug_assertions)]
