@@ -65,13 +65,60 @@
 //     Ok(())
 // }
 
-use monodb_common::protocol::{ProtocolCodec, Request};
+use bytes::BytesMut;
+use monodb_common::{
+    Value,
+    protocol::{ProtocolCodec, Request},
+};
+
+fn example_requests() -> Vec<Request> {
+    vec![
+        Request::Connect {
+            protocol_version: 1,
+            auth_token: None,
+        },
+        Request::Connect {
+            protocol_version: 1,
+            auth_token: Some("example_auth_token".into()),
+        },
+        Request::Connect {
+            protocol_version: 2,
+            auth_token: None,
+        },
+        Request::Execute {
+            query: "get from users".to_string(),
+            params: Vec::new(),
+            snapshot_timestamp: None,
+            user_id: None,
+        },
+        Request::Execute {
+            query: "get from users where\n\tfirst_name = $1".to_string(),
+            params: vec![Value::String("Jacob".into())],
+            snapshot_timestamp: None,
+            user_id: None,
+        },
+        Request::Execute {
+            query: "get from users".to_string(),
+            params: Vec::new(),
+            snapshot_timestamp: Some(1),
+            user_id: None,
+        },
+        Request::Execute {
+            query: "get from users".to_string(),
+            params: Vec::new(),
+            snapshot_timestamp: None,
+            user_id: Some("example_id".into()),
+        },
+    ]
+}
 
 fn main() {
-    let request_bytes = ProtocolCodec::encode_request(&Request::List {}).unwrap();
-
-    for byte in request_bytes {
-        print!("{:02X} ", byte);
+    for request in example_requests() {
+        let bytes = ProtocolCodec::encode_request(&request).expect("Failed to encode request");
+        let decoded_request = ProtocolCodec::decode_request(&mut BytesMut::from(&bytes[..]))
+            .expect("Failed to decode request")
+            .expect("Decoded request was None");
+        assert_eq!(request, decoded_request);
+        println!("Successfully encoded and decoded request: {:?}", request);
     }
-    println!();
 }
