@@ -22,7 +22,7 @@ jobs:
             python3 py3-pip \
             gcc python3-dev musl-dev linux-headers \
             curl git openssl-dev pkgconfig \
-            gtk+3-dev glib-dev gdk-pixbuf-dev cairo-dev pango-dev webkit2gtk3-dev
+            gtk+3-dev glib-dev gdk-pixbuf-dev cairo-dev pango-dev
 
       - name: Cache Yarn
         uses: actions/cache@v3
