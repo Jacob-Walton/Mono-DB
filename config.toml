@@ -30,7 +30,7 @@ port = 7899
 data_dir = "./data"
 
 # Buffer pool size (pages) for B-Tree storage.
-# Memory used ≈ buffer_pool_size × page_size.
+# Memory used ≈ buffer_pool_size x page_size.
 # With the default 16KB pages, 8192 pages ≈ 128MB.
 buffer_pool_size = 8192
 
@@ -51,7 +51,7 @@ page_size = 16384
 [storage.lsm]
 # Memory table size (bytes) before flushing to disk.
 # Larger values reduce I/O (fewer flushes) but use more RAM.
-# On small machines, reduce to 64–128 MiB.
+# On small machines, reduce to 64-128 MiB.
 memtable_size = 536870912
 
 # Number of level-0 files that trigger compaction.
