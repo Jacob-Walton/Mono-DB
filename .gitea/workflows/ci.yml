@@ -1,26 +1,23 @@
 name: CI Runner
-
 on:
   push:
     branches: [main]
   pull_request:
-
 jobs:
   build:
     runs-on: amd64
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
-
+          
       - name: Install System Dependencies
         run: |
           apk add --no-cache \
             nodejs npm \
             python3 py3-pip \
-            gcc python3-dev musl-dev linux-headers \
+            gcc g++ python3-dev musl-dev linux-headers \
             curl git openssl-dev pkgconfig \
             build-base \
             webkit2gtk-4.1-dev \
@@ -30,8 +27,13 @@ jobs:
             cairo-dev \
             pango-dev \
             libayatana-appindicator-dev \
-            librsvg-dev
-
+            librsvg-dev \
+            harfbuzz-dev \
+            atk-dev \
+            libsoup3-dev \
+            zlib-dev \
+            libgcc
+            
       - name: Cache Yarn
         uses: actions/cache@v3
         with:
@@ -41,13 +43,13 @@ jobs:
           key: yarn-${{ hashFiles('**/yarn.lock') }}
           restore-keys: |
             yarn-
-
+            
       - name: Install Yarn
         run: npm install -g yarn
-
+        
       - name: Install JS Dependencies
         run: yarn install --frozen-lockfile
-
+        
       - name: Cache pipx
         uses: actions/cache@v3
         with:
@@ -57,7 +59,7 @@ jobs:
           key: pipx-${{ hashFiles('**/pyproject.toml', '**/requirements.txt') }}
           restore-keys: |
             pipx-
-
+            
       - name: Install pipx and invoke
         run: |
           python3 -m pip install --break-system-packages pipx || python3 -m pip install pipx
@@ -65,7 +67,7 @@ jobs:
           pipx install invoke
           pipx inject invoke colorama psutil
           echo "$HOME/.local/bin" >> $GITHUB_PATH
-
+          
       - name: Cache Cargo
         uses: actions/cache@v3
         with:
@@ -76,9 +78,11 @@ jobs:
           key: cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             cargo-
-
+            
       - name: Install Rust and Cargo
         uses: dtolnay/rust-toolchain@stable
-
+        
       - name: Run CI
+        env:
+          RUSTFLAGS: '-C target-feature=-crt-static'
         run: invoke ci
