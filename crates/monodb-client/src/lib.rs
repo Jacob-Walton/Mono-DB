@@ -17,7 +17,7 @@ impl Client {
 
         // Test the connection
         pool.test_connection().await?;
-        
+
         Ok(Self { pool })
     }
 
