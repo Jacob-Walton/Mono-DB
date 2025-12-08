@@ -221,6 +221,7 @@ def docs(c):
 def ci(c):
     """Run CI checks (lint, test, build)."""
     print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Running CI checks...")
+    deps(c)
     lint(c)
     test(c)
     build(c)
