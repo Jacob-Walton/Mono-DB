@@ -5,6 +5,7 @@ use std::{
 };
 
 use base64::Engine;
+use chrono::{Datelike, Timelike};
 use indexmap::IndexMap;
 use rand::{TryRngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
@@ -428,6 +429,416 @@ impl Value {
     /// Check if the value is null
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
+    }
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+
+        match self {
+            Value::Null => {
+                bytes.push(0);
+            }
+
+            Value::Bool(b) => {
+                bytes.push(1);
+                bytes.push(if *b { 1 } else { 0 });
+            }
+
+            Value::Int32(i) => {
+                bytes.push(2);
+                bytes.extend(&i.to_le_bytes());
+            }
+
+            Value::Int64(i) => {
+                bytes.push(3);
+                bytes.extend(&i.to_le_bytes());
+            }
+
+            Value::Float32(f) => {
+                bytes.push(4);
+                bytes.extend(&f.to_bits().to_le_bytes());
+            }
+
+            Value::Float64(f) => {
+                bytes.push(5);
+                bytes.extend(&f.to_bits().to_le_bytes());
+            }
+
+            Value::String(s) => {
+                bytes.push(6);
+                let b = s.as_bytes();
+                let len = b.len() as u32;
+                bytes.extend(&len.to_le_bytes());
+                bytes.extend(b);
+            }
+
+            Value::Binary(b) => {
+                bytes.push(7);
+                let len = b.len() as u32;
+                bytes.extend(&len.to_le_bytes());
+                bytes.extend(b);
+            }
+
+            Value::DateTime(dt) => {
+                bytes.push(8);
+                let unix_micros = dt.timestamp_micros();
+                let offset_minutes = dt.offset().local_minus_utc() / 60;
+                bytes.extend(&unix_micros.to_le_bytes());
+                bytes.extend(&(offset_minutes as i32).to_le_bytes());
+            }
+
+            Value::Date(d) => {
+                bytes.push(9);
+                bytes.extend(&(d.year() as i32).to_le_bytes());
+                bytes.push(d.month() as u8);
+                bytes.push(d.day() as u8);
+            }
+
+            Value::Time(t) => {
+                bytes.push(10);
+                bytes.push(t.hour() as u8);
+                bytes.push(t.minute() as u8);
+                bytes.push(t.second() as u8);
+                let micros = t.nanosecond() / 1000;
+                bytes.extend(&(micros as u32).to_le_bytes());
+            }
+
+            Value::Uuid(u) => {
+                bytes.push(11);
+                bytes.extend(u.as_bytes());
+            }
+
+            Value::ObjectId(oid) => {
+                bytes.push(12);
+                bytes.extend(oid.bytes());
+            }
+
+            Value::Array(arr) => {
+                bytes.push(13);
+                bytes.extend(&(arr.len() as u32).to_le_bytes());
+                for v in arr {
+                    bytes.extend(v.to_bytes());
+                }
+            }
+
+            Value::Object(map) => {
+                bytes.push(14);
+                bytes.extend(&(map.len() as u32).to_le_bytes());
+                for (k, v) in map {
+                    let kb = k.as_bytes();
+                    bytes.extend(&(kb.len() as u32).to_le_bytes());
+                    bytes.extend(kb);
+                    bytes.extend(v.to_bytes());
+                }
+            }
+
+            Value::Set(set) => {
+                bytes.push(15);
+                bytes.extend(&(set.len() as u32).to_le_bytes());
+                for item in set {
+                    let b = item.as_bytes();
+                    bytes.extend(&(b.len() as u32).to_le_bytes());
+                    bytes.extend(b);
+                }
+            }
+
+            Value::Row(row) => {
+                bytes.push(16);
+                bytes.extend(&(row.len() as u32).to_le_bytes());
+                for (k, v) in row {
+                    let kb = k.as_bytes();
+                    bytes.extend(&(kb.len() as u32).to_le_bytes());
+                    bytes.extend(kb);
+                    bytes.extend(v.to_bytes());
+                }
+            }
+
+            Value::SortedSet(items) => {
+                bytes.push(17);
+                bytes.extend(&(items.len() as u32).to_le_bytes());
+                for (score, member) in items {
+                    bytes.extend(&score.to_bits().to_le_bytes());
+                    let mb = member.as_bytes();
+                    bytes.extend(&(mb.len() as u32).to_le_bytes());
+                    bytes.extend(mb);
+                }
+            }
+
+            Value::GeoPoint { lat, lng } => {
+                bytes.push(18);
+                bytes.extend(&lat.to_bits().to_le_bytes());
+                bytes.extend(&lng.to_bits().to_le_bytes());
+            }
+
+            Value::Reference { collection, id } => {
+                bytes.push(19);
+
+                // collection : String
+                let cb = collection.as_bytes();
+                bytes.extend(&(cb.len() as u32).to_le_bytes());
+                bytes.extend(cb);
+
+                // id : Value
+                bytes.extend(id.to_bytes());
+            }
+        }
+
+        bytes
+    }
+
+    pub fn from_bytes(buf: &[u8]) -> crate::Result<(Value, usize)> {
+        if buf.is_empty() {
+            return Err(MonoError::Parse("Empty buffer".into()));
+        }
+
+        let kind = buf[0];
+        let mut offset = 1;
+
+        macro_rules! need {
+            ($n:expr) => {
+                if buf.len() < offset + $n {
+                    return Err(MonoError::Parse("Unexpected EOF".into()));
+                }
+            };
+        }
+
+        macro_rules! read_u32 {
+            () => {{
+                need!(4);
+                let v = u32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap());
+                offset += 4;
+                v
+            }};
+        }
+
+        macro_rules! read_u64 {
+            () => {{
+                need!(8);
+                let v = u64::from_le_bytes(buf[offset..offset + 8].try_into().unwrap());
+                offset += 8;
+                v
+            }};
+        }
+
+        macro_rules! read_i32 {
+            () => {{
+                need!(4);
+                let v = i32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap());
+                offset += 4;
+                v
+            }};
+        }
+
+        macro_rules! read_i64 {
+            () => {{
+                need!(8);
+                let v = i64::from_le_bytes(buf[offset..offset + 8].try_into().unwrap());
+                offset += 8;
+                v
+            }};
+        }
+
+        macro_rules! read_f32 {
+            () => {{
+                f32::from_bits(read_u32!())
+            }};
+        }
+
+        macro_rules! read_f64 {
+            () => {{
+                f64::from_bits(read_u64!())
+            }};
+        }
+
+        macro_rules! read_string {
+            () => {{
+                let len = read_u32!() as usize;
+                need!(len);
+                let s = std::str::from_utf8(&buf[offset..offset + len])
+                    .map_err(|e| MonoError::Parse(format!("utf8 error: {e}")))?;
+                offset += len;
+                s.to_owned()
+            }};
+        }
+
+        macro_rules! read_bytes {
+            () => {{
+                let len = read_u32!() as usize;
+                need!(len);
+                let v = buf[offset..offset + len].to_vec();
+                offset += len;
+                v
+            }};
+        }
+
+        let value = match kind {
+            0 => Value::Null,
+
+            1 => {
+                need!(1);
+                let b = buf[offset] != 0;
+                offset += 1;
+                Value::Bool(b)
+            }
+
+            2 => Value::Int32(read_i32!()),
+
+            3 => Value::Int64(read_i64!()),
+
+            4 => Value::Float32(read_f32!()),
+
+            5 => Value::Float64(read_f64!()),
+
+            6 => Value::String(read_string!()),
+
+            7 => Value::Binary(read_bytes!()),
+
+            8 => {
+                let micros = read_i64!();
+                let offset_minutes = read_i32!();
+
+                let secs = micros / 1_000_000;
+                let nsecs = ((micros % 1_000_000) * 1000) as u32;
+                let naive_dt = chrono::NaiveDateTime::from_timestamp_opt(secs, nsecs)
+                    .ok_or_else(|| MonoError::Parse("Invalid timestamp".into()))?;
+                let offset = chrono::FixedOffset::east_opt(offset_minutes * 60)
+                    .ok_or_else(|| MonoError::Parse("Invalid offset".into()))?;
+                let dt = chrono::DateTime::from_naive_utc_and_offset(naive_dt, offset);
+
+                Value::DateTime(dt)
+            }
+
+            9 => {
+                let year = read_i32!();
+                need!(2);
+                let month = buf[offset]; offset += 1;
+                let day   = buf[offset]; offset += 1;
+
+                let date = chrono::NaiveDate::from_ymd_opt(year, month as u32, day as u32)
+                    .ok_or_else(|| MonoError::Parse("Invalid date".into()))?;
+
+                Value::Date(date)
+            }
+
+            10 => {
+                need!(3);
+                let hour = buf[offset];   offset += 1;
+                let minute = buf[offset]; offset += 1;
+                let second = buf[offset]; offset += 1;
+                let micros = read_u32!();
+
+                let t = chrono::NaiveTime::from_hms_micro_opt(
+                    hour as u32, minute as u32, second as u32, micros
+                )
+                .ok_or_else(|| MonoError::Parse("Invalid time".into()))?;
+
+                Value::Time(t)
+            }
+
+            11 => {
+                need!(16);
+                let mut b = [0u8; 16];
+                b.copy_from_slice(&buf[offset..offset + 16]);
+                offset += 16;
+                Value::Uuid(uuid::Uuid::from_bytes(b))
+            }
+
+            12 => {
+                need!(12);
+                let mut b = [0u8; 12];
+                b.copy_from_slice(&buf[offset..offset + 12]);
+                offset += 12;
+                Value::ObjectId(ObjectId::from_bytes(b))
+            }
+
+            13 => {
+                let len = read_u32!() as usize;
+                let mut v = Vec::with_capacity(len);
+
+                for _ in 0..len {
+                    let (item, used) = Value::from_bytes(&buf[offset..])?;
+                    offset += used;
+                    v.push(item);
+                }
+
+                Value::Array(v)
+            }
+
+            14 => {
+                let len = read_u32!() as usize;
+                let mut map = BTreeMap::new();
+
+                for _ in 0..len {
+                    let key = read_string!();
+                    let (val, used) = Value::from_bytes(&buf[offset..])?;
+                    offset += used;
+                    map.insert(key, val);
+                }
+
+                Value::Object(map)
+            }
+
+            15 => {
+                let len = read_u32!() as usize;
+                let mut set = HashSet::new();
+
+                for _ in 0..len {
+                    let s = read_string!();
+                    set.insert(s);
+                }
+
+                Value::Set(set)
+            }
+
+            16 => {
+                let len = read_u32!() as usize;
+                let mut row = IndexMap::new();
+
+                for _ in 0..len {
+                    let key = read_string!();
+                    let (val, used) = Value::from_bytes(&buf[offset..])?;
+                    offset += used;
+                    row.insert(key, val);
+                }
+
+                Value::Row(row)
+            }
+
+            17 => {
+                let len = read_u32!() as usize;
+                let mut v = Vec::with_capacity(len);
+
+                for _ in 0..len {
+                    let score = read_f64!();
+                    let member = read_string!();
+                    v.push((score, member));
+                }
+
+                Value::SortedSet(v)
+            }
+
+            18 => {
+                let lat = read_f64!();
+                let lng = read_f64!();
+                Value::GeoPoint { lat, lng }
+            }
+
+            19 => {
+                let collection = read_string!();
+                let (id, used) = Value::from_bytes(&buf[offset..])?;
+                offset += used;
+
+                Value::Reference {
+                    collection,
+                    id: Box::new(id),
+                }
+            }
+
+            _ => {
+                return Err(MonoError::Parse(format!("Unknown Value tag: {kind}")));
+            }
+        };
+
+        Ok((value, offset))
     }
 }
 
@@ -1019,6 +1430,10 @@ impl ObjectId {
                 .map_err(|_| MonoError::Parse("Invalid ObjectId hex string".into()))?;
         }
         Ok(Self(bytes))
+    }
+
+    pub fn from_bytes(bytes: [u8; 12]) -> Self {
+        Self(bytes)
     }
 }
 

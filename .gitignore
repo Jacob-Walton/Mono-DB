@@ -11,3 +11,4 @@ Temp/
 .monodb_history
 nul
 .DS_Store
+build/

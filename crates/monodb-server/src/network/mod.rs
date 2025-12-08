@@ -221,38 +221,45 @@ async fn handle_request(
         Request::List { .. } => {
             let schemas = storage_engine.schemas();
 
-            let tables: Vec<(String, String)> = schemas
+            let tables: Vec<Value> = schemas
                 .iter()
                 .map(|schema| match &**schema {
-                    Schema::Table { name, .. } => ("Table".to_string(), name.clone()),
-                    Schema::Collection { name, .. } => ("Collection".to_string(), name.clone()),
-                    Schema::KeySpace { name, .. } => ("KeySpace".to_string(), name.clone()),
+                    Schema::Table { name, .. } => {
+                        Value::Array(vec![
+                            Value::String("table".to_string()),
+                            Value::String(name.clone()),
+                        ])
+                    }
+                    Schema::Collection { name, .. } => {
+                        Value::Array(vec![
+                            Value::String("collection".to_string()),
+                            Value::String(name.clone()),
+                        ])
+                    }
+                    Schema::KeySpace { name, .. } => {
+                        Value::Array(vec![
+                            Value::String("keyspace".to_string()),
+                            Value::String(name.clone()),
+                        ])
+                    }
                 })
                 .collect();
 
-            let data = Value::Array(
-                tables
-                    .iter()
-                    .map(|(kind, name)| {
-                        Value::Array(vec![
-                            Value::String(kind.clone()),
-                            Value::String(name.clone()),
-                        ])
-                    })
-                    .collect(),
-            );
+            let data = Value::Array(tables);
 
             let time = std::time::SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_millis() as u64;
 
+            let row_count = data.as_array().map(|arr| arr.len() as u64);
+
             Ok(Response::Success {
                 result: vec![ExecutionResult::Ok {
                     data,
                     time,
                     time_elapsed: None,
-                    row_count: Some(tables.len() as u64),
+                    row_count,
                     commit_timestamp: None,
                 }],
             })

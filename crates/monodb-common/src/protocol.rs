@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{MonoError, Value};
 
+const VERSION: u8 = 1;
+
 /// Wire protocol messages
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Request {
@@ -193,12 +195,58 @@ impl ProtocolCodec {
     /// let encoded = ProtocolCodec::encode_request(&req).unwrap();
     /// ```
     pub fn encode_request(req: &Request) -> crate::Result<Bytes> {
-        let data = bincode::serialize(req)
-            .map_err(|e| MonoError::Network(format!("Encode error: {e}")))?;
+        let mut header = BytesMut::new();
+        let mut body = BytesMut::new();
+        put_u8(&mut header, VERSION);
+        put_u8(&mut header, 0x00); // 0 = Request
 
-        let mut buf = BytesMut::with_capacity(4 + data.len());
-        buf.put_u32(data.len() as u32);
-        buf.put_slice(&data);
+        match req {
+            Request::Connect { protocol_version, auth_token } => {
+                put_u8(&mut header, 0x01);
+                put_u8(&mut body, *protocol_version); // protocol_version
+                put_opt_string(&mut body, auth_token); // auth_token
+            },
+            Request::Execute { query, params, snapshot_timestamp, user_id } => {
+                put_u8(&mut header, 0x02);
+                put_string(&mut body, &query);
+                put_u32(&mut body, params.len() as u32);
+                for param in params {
+                    put_bytes(&mut body, &param.to_bytes().as_slice());
+                }
+                put_opt_u64(&mut body, snapshot_timestamp);
+                put_opt_string(&mut body, user_id);
+            },
+            Request::List { } => {
+                put_u8(&mut header, 0x03);
+            },
+            Request::BeginTx { isolation, user_id, read_timestamp } => {
+                put_u8(&mut header, 0x04);
+                match isolation {
+                    IsolationLevel::ReadUncommitted => put_u8(&mut body, 0x01),
+                    IsolationLevel::ReadCommitted => put_u8(&mut body, 0x02),
+                    IsolationLevel::RepeatableRead => put_u8(&mut body, 0x03),
+                    IsolationLevel::Serializable => put_u8(&mut body, 0x04),
+                }
+                put_opt_string(&mut body, user_id);
+                put_opt_u64(&mut body, read_timestamp);
+            },
+            Request::CommitTx { tx_id } => {
+                put_u8(&mut header, 0x05);
+                put_u64(&mut body, *tx_id);
+            },
+            Request::RollbackTx { tx_id } => {
+                put_u8(&mut header, 0x06);
+                put_u64(&mut body, *tx_id);
+            }
+        }
+
+        put_u8(&mut header, 0); // Empty flags for now
+        put_u32(&mut header, 0); // 0 for correlation id for now
+
+        let mut buf = BytesMut::with_capacity(4 + header.len() + body.len());
+        buf.put_u32((header.len() + body.len()) as u32);
+        buf.put_slice(&header);
+        buf.put_slice(&body);
 
         Ok(buf.freeze())
     }
@@ -281,5 +329,38 @@ impl ProtocolCodec {
             .map_err(|e| MonoError::Network(format!("Decode error: {e}")))?;
 
         Ok(Some(resp))
+    }
+}
+
+// Primitive helpers
+
+fn put_u8(buf: &mut BytesMut, v: u8) { buf.put_u8(v); }
+fn put_u16(buf: &mut BytesMut, v: u16) { buf.put_u16_le(v); }
+fn put_u32(buf: &mut BytesMut, v: u32) { buf.put_u32_le(v); }
+fn put_u64(buf: &mut BytesMut, v: u64) { buf.put_u64_le(v); }
+fn put_i32(buf: &mut BytesMut, v: i32) { buf.put_i32_le(v); }
+fn put_i64(buf: &mut BytesMut, v: i64) { buf.put_i64_le(v); }
+
+fn put_string(buf: &mut BytesMut, s: &str) {
+    put_u32(buf, s.len() as u32);
+    buf.put_slice(s.as_bytes());
+}
+
+fn put_bytes(buf: &mut BytesMut, b: &[u8]) {
+    put_u32(buf, b.len() as u32);
+    buf.put_slice(b);
+}
+
+fn put_opt_u64(buf: &mut BytesMut, v: &Option<u64>) {
+    match v {
+        None => put_u8(buf, 0),
+        Some(x) => { put_u8(buf, 1); put_u64(buf, *x); }
+    }
+}
+
+fn put_opt_string(buf: &mut BytesMut, v: &Option<String>) {
+    match v {
+        None => put_u8(buf, 0),
+        Some(s) => { put_u8(buf, 1); put_string(buf, s); }
     }
 }
