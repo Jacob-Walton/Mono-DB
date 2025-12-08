@@ -151,6 +151,7 @@ impl fmt::Display for ExecutionResult {
 }
 
 /// Error codes for responses
+#[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum ErrorCode {
     ParseError = 1001,
@@ -407,12 +408,92 @@ impl ProtocolCodec {
     /// # Returns
     /// A `Result` containing the encoded bytes or an error
     pub fn encode_response(resp: &Response) -> crate::Result<Bytes> {
-        let data = bincode::serialize(resp)
-            .map_err(|e| MonoError::Network(format!("Encode error: {e}")))?;
+        let mut header = BytesMut::new();
+        let mut body = BytesMut::new();
+        put_u8(&mut header, VERSION);
+        put_u8(&mut header, 0x01); // 1 = Response
 
-        let mut buf = BytesMut::with_capacity(4 + data.len());
-        buf.put_u32(data.len() as u32);
-        buf.put_slice(&data);
+        match resp {
+            Response::ConnectAck {
+                protocol_version,
+                server_timestamp,
+                user_permissions,
+            } => {
+                header.put_u8(0x01);
+                body.put_u8(*protocol_version);
+                put_opt_u64(&mut body, server_timestamp);
+
+                if user_permissions.is_some() {
+                    body.put_u8(1);
+                    let unwrapped = user_permissions.as_ref().unwrap();
+                    body.put_u32_le(unwrapped.len() as u32);
+                    for item in unwrapped {
+                        put_string(&mut body, item);
+                    }
+                } else {
+                    body.put_u8(0);
+                }
+            }
+            Response::Success { result } => {
+                header.put_u8(0x02);
+
+                body.put_u32_le(result.len() as u32);
+                for res in result {
+                    match res {
+                        ExecutionResult::Ok {
+                            data,
+                            time,
+                            time_elapsed,
+                            commit_timestamp,
+                            row_count,
+                        } => {
+                            body.put_slice(&data.to_bytes());
+                            body.put_u64_le(*time);
+                            put_opt_u64(&mut body, commit_timestamp);
+                            put_opt_u64(&mut body, time_elapsed);
+                            put_opt_u64(&mut body, row_count);
+                        }
+                        ExecutionResult::Created {
+                            time,
+                            commit_timestamp,
+                        } => {
+                            body.put_u64_le(*time);
+                            put_opt_u64(&mut body, commit_timestamp);
+                        }
+                        ExecutionResult::Modified {
+                            time,
+                            commit_timestamp,
+                            rows_affected,
+                        } => {
+                            body.put_u64_le(*time);
+                            put_opt_u64(&mut body, commit_timestamp);
+                            put_opt_u64(&mut body, rows_affected);
+                        }
+                    }
+                }
+            }
+            Response::Error { code, message } => {
+                header.put_u8(0x03);
+
+                body.put_u16_le((*code) as u16);
+                put_string(&mut body, &message);
+            }
+            Response::Stream { .. } => {
+                header.put_u8(0x04);
+            }
+            Response::Ack { .. } => {
+                header.put_u8(0x05);
+            }
+            _ => return Err(MonoError::Network("Unknown response type".into())),
+        }
+
+        put_u8(&mut header, 0); // Empty flags for now
+        put_u32(&mut header, 0); // 0 for correlation id for now
+
+        let mut buf = BytesMut::with_capacity(4 + header.len() + body.len());
+        buf.put_u32((header.len() + body.len()) as u32);
+        buf.put_slice(&header);
+        buf.put_slice(&body);
 
         Ok(buf.freeze())
     }
@@ -432,17 +513,94 @@ impl ProtocolCodec {
             return Ok(None);
         }
 
+        // Get header
         let len = (&buf[..4]).get_u32() as usize;
-
         if buf.len() < 4 + len {
             return Ok(None);
         }
-
         buf.advance(4);
         let data = buf.split_to(len);
+        let mut data_buf = BytesMut::from(&data[..]);
 
-        let resp = bincode::deserialize(&data)
-            .map_err(|e| MonoError::Network(format!("Decode error: {e}")))?;
+        // Parse header
+        let version = data_buf.get_u8();
+        if version != VERSION {
+            return Err(MonoError::Network(format!(
+                "Unsupported protocol version: {version}"
+            )));
+        }
+        let msg_type = data_buf.get_u8();
+        if msg_type != 0x01 {
+            return Err(MonoError::Network(format!(
+                "Invalid message type for response: {msg_type}"
+            )));
+        }
+        let command = data_buf.get_u8();
+        let _flags = data_buf.get_u8(); // Skip flags
+        let _correlation_id = data_buf.get_u32_le(); // Skip correlation id
+
+        let resp = match command {
+            0x01 => {
+                let protocol_version = data_buf.get_u8();
+                let server_timestamp = get_opt_u64(&mut data_buf);
+                let permissions_present = data_buf.get_u8() == 1;
+                let mut user_permissions: Option<Vec<String>> = None;
+                if permissions_present {
+                    user_permissions = Some(Vec::new());
+
+                    for _ in 0..len {
+                        let string = get_string(&mut data_buf)?;
+                        user_permissions.as_mut().unwrap().push(string);
+                    }
+                }
+
+                Response::ConnectAck {
+                    protocol_version,
+                    server_timestamp,
+                    user_permissions
+                }
+            },
+            0x02 => {
+                let result_len = data_buf.get_u32_le() as usize;
+                let mut result = Vec::with_capacity(result_len);
+                for _ in 0..result_len {
+                    // For simplicity, assuming all results are ExecutionResult::Ok
+                    let data = {
+                        let val_len = data_buf.get_u32_le() as usize;
+                        let val_bytes = data_buf.split_to(val_len).to_vec();
+                        let val = Value::from_bytes(&val_bytes)
+                            .map_err(|e| MonoError::Network(format!("Decode error: {e}")))?;
+                        val.0
+                    };
+                    let time = data_buf.get_u64_le();
+                    let commit_timestamp = if data_buf.get_u8() == 1 {
+                        Some(data_buf.get_u64_le())
+                    } else {
+                        None
+                    };
+                    let time_elapsed = if data_buf.get_u8() == 1 {
+                        Some(data_buf.get_u64_le())
+                    } else {
+                        None
+                    };
+                    let row_count = if data_buf.get_u8() == 1 {
+                        Some(data_buf.get_u64_le())
+                    } else {
+                        None
+                    };
+
+                    result.push(ExecutionResult::Ok {
+                        data,
+                        time,
+                        commit_timestamp,
+                        time_elapsed,
+                        row_count,
+                    });
+                }
+                Response::Success { result }
+            }
+            _ => return Err(MonoError::Network(format!("Unknown command: {command}"))),
+        };
 
         Ok(Some(resp))
     }
@@ -497,6 +655,13 @@ fn put_opt_string(buf: &mut BytesMut, v: &Option<String>) {
             put_string(buf, s);
         }
     }
+}
+
+fn get_string(buf: &mut BytesMut) -> crate::Result<String> {
+    let str_len = buf.get_u32() as usize;
+    let s = String::from_utf8(buf.split_to(str_len).to_vec())
+        .map_err(|e| MonoError::Network(format!("Decode error: {e}")))?;
+    Ok(s)
 }
 
 fn get_opt_string(buf: &mut BytesMut) -> crate::Result<Option<String>> {
