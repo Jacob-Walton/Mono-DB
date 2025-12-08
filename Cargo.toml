@@ -71,3 +71,6 @@ overflow-checks = true
 incremental = true
 codegen-units = 128
 panic = "unwind"
+
+[profile.test]
+inherits = "release"
