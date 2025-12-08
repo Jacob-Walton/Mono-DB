@@ -187,7 +187,6 @@ def test(c):
     """Run tests."""
     print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Running tests...")
     run_cmd(c, "cargo test")
-    run_cmd(c, "cargo tarpaulin --out Html")
     print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Tests complete.")
 
 
