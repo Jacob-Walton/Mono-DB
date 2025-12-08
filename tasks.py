@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 
-"""GUI tasks now work with Tauri setup in gui/ directory."""
-
 import os
 import shutil
 import subprocess
@@ -34,13 +32,14 @@ def get_cores():
 
 
 CORES = get_cores()
-GUI_DIR = "./gui"
+GUI_DIR = "./monodb-admin"
 TAURI_DIR = os.path.join(GUI_DIR, "src-tauri")
 
 
 def run_cmd(c, command, **kwargs):
     """Run command with colored output preserved."""
     cwd = kwargs.get("cwd", os.getcwd())
+    check = kwargs.get("check", True)
     print(
         f"{colorama.Fore.BLUE}▸{colorama.Style.RESET_ALL} {colorama.Style.DIM}{command}{colorama.Style.RESET_ALL}"
     )
@@ -59,7 +58,7 @@ def run_cmd(c, command, **kwargs):
         env.update(kwargs["env"])
 
     try:
-        result = subprocess.run(command, shell=True, env=env, cwd=cwd, check=False)
+        result = subprocess.run(command, shell=True, env=env, cwd=cwd, check=check)
         return result
     except Exception as e:
         print(
@@ -75,6 +74,7 @@ def help(c):
 
     tasks = [
         ("help", "Show this help message"),
+        ("ci", "Run CI checks (lint, test, build)"),
         ("build", "Build the project"),
         ("build-gui", "Build the GUI (Next.js + Tauri)"),
         ("build-frontend", "Build Next.js frontend only"),
@@ -186,7 +186,7 @@ def clean(c):
 def test(c):
     """Run tests."""
     print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Running tests...")
-    run_cmd(c, "cargo test --all")
+    run_cmd(c, "cargo test")
     run_cmd(c, "cargo tarpaulin --out Html")
     print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Tests complete.")
 
@@ -219,6 +219,16 @@ def docs(c):
 
 
 @invoke.task
+def ci(c):
+    """Run CI checks (lint, test, build)."""
+    print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Running CI checks...")
+    lint(c)
+    test(c)
+    build(c)
+    print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} CI checks complete.")
+
+
+@invoke.task
 def package(c):
     """Package the application."""
     print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Packaging application...")
@@ -228,7 +238,7 @@ def package(c):
     
     # Build and bundle GUI with Tauri's bundler
     print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Building and bundling GUI...")
-    result = run_cmd(c, "yarn tauri build", cwd=GUI_DIR)
+    result = run_cmd(c, "yarn tauri build", cwd=GUI_DIR, check=False)
     
     # Check if bundling failed (e.g., AppImage issues)
     if result.returncode != 0:

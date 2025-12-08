@@ -1,0 +1,54 @@
+name: CI Runner
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: amd64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Update apt
+        run: sudo apt-get update
+
+      # Install system dependencies
+
+      - name: Install base tools (python3, pipx, node, yarn, cargo prereqs)
+        run: |
+          sudo apt-get install -y \
+            python3 python3-pip pipx \
+            curl git build-essential
+        
+      # Rust / Cargo setup
+
+      - name: Install Rust toolchain (rustup + cargo)
+        run: |
+          curl https://sh.rustup.rs -sSf | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> $GITEA_ACTION_PATH
+          export PATH="$HOME/.cargo/bin:$PATH"
+        shell: bash
+
+      # Install Node + Yarn
+      - name: Install Node.js 22 and Yarn
+        run: |
+          curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+          sudo apt-get install -y nodejs
+          sudo npm install -g yarn
+
+      # Install python tooling
+      - name: Ensure pipx is on PATH
+        run: |
+          pipx ensurepath
+          echo "$HOME/.local/bin" >> $GITEA_ACTION_PATH
+          export PATH="$HOME/.local/bin:$PATH"
+
+      - name: Install invoke via pipx
+        run: pipx install invoke && pipx inject invoke colorama psutil
+
+      # Run ci task
+      - name: Run CI task
+        run: inv ci
