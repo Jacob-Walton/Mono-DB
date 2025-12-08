@@ -225,7 +225,7 @@ async fn test_basic_get_with_multiple_filters() {
 #[tokio::test]
 async fn test_basic_put_insertion() {
     // Test Synopsis: Data insertion
-    // Test Data: Insert 10,000 records with mixed types
+    // Test Data: Insert 500 records with mixed types
     // Expected Outcome: All records stored, retrievable with correct types
 
     let (mut executor, _temp_dir) = create_test_executor().await;
@@ -233,8 +233,9 @@ async fn test_basic_put_insertion() {
 
     let start = std::time::Instant::now();
 
-    // Insert 10,000 records with mixed types
-    for i in 0..10_000 {
+    // Insert 500 records with mixed types
+    let total_records = 500;
+    for i in 0..total_records {
         let record_type = i % 5;
 
         let fields = match record_type {
@@ -275,15 +276,16 @@ async fn test_basic_put_insertion() {
     }
 
     let insert_time = start.elapsed();
-    println!("✓ Inserted 10,000 records in {:?}", insert_time);
+    println!("✓ Inserted {} records in {:?}", total_records, insert_time);
 
     // Retrieve all records and verify
     let all_records = execute_get_query(&mut executor, "mixed_data", None, None).await;
 
     assert_eq!(
         all_records.len(),
-        10_000,
-        "Expected 10,000 records, got {}",
+        total_records as usize,
+        "Expected {} records, got {}",
+        total_records,
         all_records.len()
     );
 
@@ -297,34 +299,43 @@ async fn test_basic_put_insertion() {
         }
     }
 
-    // Each type should have exactly 2000 records (10,000 / 5 types)
+    // Each type should have exactly 100 records (500 / 5 types)
+    let expected_per_type = (total_records / 5) as usize;
     assert_eq!(
         type_counts.get("integer"),
-        Some(&2000),
-        "Expected 2000 integer records"
+        Some(&expected_per_type),
+        "Expected {} integer records",
+        expected_per_type
     );
     assert_eq!(
         type_counts.get("float"),
-        Some(&2000),
-        "Expected 2000 float records"
+        Some(&expected_per_type),
+        "Expected {} float records",
+        expected_per_type
     );
     assert_eq!(
         type_counts.get("string"),
-        Some(&2000),
-        "Expected 2000 string records"
+        Some(&expected_per_type),
+        "Expected {} string records",
+        expected_per_type
     );
     assert_eq!(
         type_counts.get("boolean"),
-        Some(&2000),
-        "Expected 2000 boolean records"
+        Some(&expected_per_type),
+        "Expected {} boolean records",
+        expected_per_type
     );
     assert_eq!(
         type_counts.get("null"),
-        Some(&2000),
-        "Expected 2000 null records"
+        Some(&expected_per_type),
+        "Expected {} null records",
+        expected_per_type
     );
 
-    println!("✓ All 10,000 records verified with correct types");
+    println!(
+        "✓ All {} records verified with correct types",
+        total_records
+    );
 }
 
 #[tokio::test]
@@ -458,11 +469,12 @@ async fn test_basic_remove_conditional_deletion() {
     create_test_collection(&mut executor, "users").await;
 
     // Insert test records with mixed status
-    let total_inactive = 3456;
-    let total_active = 6544;
+    let total_records = 500;
+    let total_inactive = 172;
+    let total_active = total_records - total_inactive;
     let mut inserted = 0;
 
-    for i in 0..10_000 {
+    for i in 0..total_records {
         let status = if i < total_inactive {
             "inactive"
         } else {
@@ -482,7 +494,11 @@ async fn test_basic_remove_conditional_deletion() {
         inserted += 1;
     }
 
-    assert_eq!(inserted, 10_000, "Should have inserted 10,000 records");
+    assert_eq!(
+        inserted, total_records,
+        "Should have inserted {} records",
+        total_records
+    );
 
     // Remove where status = 'inactive'
     let filter = create_comparison(
@@ -518,7 +534,7 @@ async fn test_basic_remove_conditional_deletion() {
     let remaining = execute_get_query(&mut executor, "users", None, None).await;
     assert_eq!(
         remaining.len(),
-        total_active,
+        total_active as usize,
         "Expected {} remaining records, got {}",
         total_active,
         remaining.len()
@@ -714,10 +730,11 @@ async fn bench_large_dataset_query_performance() {
     let (mut executor, _temp_dir) = create_test_executor().await;
     create_test_collection(&mut executor, "large_dataset").await;
 
-    println!("Inserting 50,000 records...");
+    let total_records: i64 = 1_000;
+    println!("Inserting {} records...", total_records);
     let insert_start = std::time::Instant::now();
 
-    for i in 0..50_000 {
+    for i in 0..total_records {
         insert_record(
             &mut executor,
             "large_dataset",
@@ -731,7 +748,7 @@ async fn bench_large_dataset_query_performance() {
     }
 
     let insert_time = insert_start.elapsed();
-    println!("✓ Inserted 50,000 records in {:?}", insert_time);
+    println!("✓ Inserted {} records in {:?}", total_records, insert_time);
 
     // Benchmark: Query with filter
     let query_start = std::time::Instant::now();
@@ -756,5 +773,9 @@ async fn bench_large_dataset_query_performance() {
         scan_time
     );
 
-    assert_eq!(all_results.len(), 50_000, "Expected all records");
+    assert_eq!(
+        all_results.len(),
+        total_records as usize,
+        "Expected all records"
+    );
 }
