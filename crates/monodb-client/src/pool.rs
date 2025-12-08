@@ -71,4 +71,10 @@ impl ConnectionPool {
         self.connections.lock().clear();
         Ok(())
     }
+
+    pub async fn test_connection(&self) -> Result<()> {
+        let conn = self.get().await?;
+        self.return_connection(conn);
+        Ok(())
+    }
 }

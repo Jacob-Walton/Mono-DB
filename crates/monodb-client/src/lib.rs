@@ -14,6 +14,10 @@ impl Client {
     /// Create a new client with default settings
     pub async fn connect(addr: &str) -> Result<Self> {
         let pool = ConnectionPool::new(addr.to_string(), Default::default());
+
+        // Test the connection
+        pool.test_connection().await?;
+        
         Ok(Self { pool })
     }
 
