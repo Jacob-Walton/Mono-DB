@@ -1,3 +1,6 @@
+#ifndef VALUE_H
+#define VALUE_H
+
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -155,3 +158,7 @@ Value value_new_geopoint(double lat, double lng);
 Value value_new_reference(const char *collection, const Value *id);
 bool value_equals(const Value *a, const Value *b);
 bool value_is_truthy(const Value *value);
+uint8_t *value_to_bytes(const Value *value, uint8_t *buffer, uint64_t *length);
+Value *value_from_bytes(const uint8_t *buffer, uint64_t length, uint64_t *consumed_length);
+
+#endif

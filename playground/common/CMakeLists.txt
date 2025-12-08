@@ -11,10 +11,12 @@ set(CMAKE_C_EXTENSIONS OFF)
 
 set(COMMON_HEADERS
     include/value.h
+    include/protocol.h
 )
 
 set(COMMON_SOURCES
     src/value.c
+    src/protocol.c
 )
 
 option(VALUE_BUILD_SHARED "Build shared library" ON)
