@@ -7,48 +7,48 @@ on:
 
 jobs:
   build:
+  
     runs-on: amd64
+
     steps:
+      - name: Install System Dependencies
+        run: |
+          if command -v apk &> /dev/null; then
+            apk add --no-cache nodejs curl
+          elif command -v apt-get &> /dev/null; then
+            apt-get update
+            apt-get install -y nodejs curl
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Update apt
-        run: sudo apt-get update
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
-      # Install system dependencies
+      - name: Install Yarn
+        run: npm install -g yarn
 
-      - name: Install base tools (python3, pipx, node, yarn, cargo prereqs)
+      - name: Install Python, pipx, invoke
         run: |
-          sudo apt-get install -y \
-            python3 python3-pip pipx \
-            curl git build-essential
-        
-      # Rust / Cargo setup
-
-      - name: Install Rust toolchain (rustup + cargo)
-        run: |
-          curl https://sh.rustup.rs -sSf | sh -s -- -y
-          echo "$HOME/.cargo/bin" >> $GITEA_ACTION_PATH
-          export PATH="$HOME/.cargo/bin:$PATH"
-        shell: bash
-
-      # Install Node + Yarn
-      - name: Install Node.js 22 and Yarn
-        run: |
-          curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-          sudo apt-get install -y nodejs
-          sudo npm install -g yarn
-
-      # Install python tooling
-      - name: Ensure pipx is on PATH
-        run: |
+          if command -v apk &> /dev/null; then
+            apk add --no-cache python3 py3-pip gcc python3-dev musl-dev linux-headers
+            python3 -m pip install pipx --break-system-packages || python3 -m pip install pipx
+          elif command -v apt-get &> /dev/null; then
+            apt-get update
+            apt-get install -y python3 python3-pip pipx
+          fi
+          
+          export PATH="$PATH:$HOME/.local/bin"
           pipx ensurepath
-          echo "$HOME/.local/bin" >> $GITEA_ACTION_PATH
-          export PATH="$HOME/.local/bin:$PATH"
+          pipx install invoke
+          pipx inject invoke colorama psutil
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
 
-      - name: Install invoke via pipx
-        run: pipx install invoke && pipx inject invoke colorama psutil
+      - name: Install Rust and Cargo
+        uses: dtolnay/rust-toolchain@stable
 
-      # Run ci task
       - name: Run CI task
-        run: inv ci
+        run: invoke ci
