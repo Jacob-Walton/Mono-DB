@@ -21,7 +21,7 @@ jobs:
             nodejs npm \
             python3 py3-pip \
             gcc python3-dev musl-dev linux-headers \
-            curl git
+            curl git openssl-dev pkgconfig
 
       - name: Cache Yarn
         uses: actions/cache@v3

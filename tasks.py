@@ -108,7 +108,6 @@ def deps(c):
     print(
         f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Installing dependencies..."
     )
-    run_cmd(c, "cargo install cargo-audit cargo-tarpaulin")
     print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Installing GUI dependencies...")
     run_cmd(c, "yarn install", cwd=GUI_DIR)
     print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Dependencies installed.")
