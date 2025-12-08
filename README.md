@@ -23,8 +23,11 @@ You'll need Node.js version 22.0.0 or higher. Download and run the installer fro
 ### Install project dependencies
 
 ```bash
+# Install yarn package manager over npm
+npm install -g yarn
+
 # Install node modules for the GUI
-cd gui && npm install
+cd gui && yarn
 cd ..
 
 # Install Rust dependencies
