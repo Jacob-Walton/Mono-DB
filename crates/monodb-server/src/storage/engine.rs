@@ -24,6 +24,7 @@ pub struct StorageEngine {
     btrees: Arc<DashMap<String, Arc<BTree>>>,
     lsm_trees: Arc<DashMap<String, Arc<LsmTree>>>,
     buffer_pool: Option<Arc<BufferPool>>,
+    #[allow(dead_code)]
     disk_manager: Option<Arc<DiskManager>>,
     schemas: Arc<DashMap<String, Schema>>,
     memory_keyspaces: Arc<DashMap<String, Arc<DashMap<String, MonoValue>>>>,
@@ -163,30 +164,27 @@ impl StorageEngine {
 
     /// Validate keyspace value size constraints
     fn validate_keyspace_value(&self, max_size: &Option<usize>, value: &[u8]) -> Result<()> {
-        if let Some(max) = max_size {
-            if value.len() > *max {
-                return Err(MonoError::InvalidOperation(format!(
-                    "Value size {} exceeds maximum size {}",
-                    value.len(),
-                    max
-                )));
-            }
+        if let Some(max) = max_size
+            && value.len() > *max
+        {
+            return Err(MonoError::InvalidOperation(format!(
+                "Value size {} exceeds maximum size {}",
+                value.len(),
+                max
+            )));
         }
         Ok(())
     }
 
     /// Validate value-specific constraints
     fn validate_value_constraints(&self, value: &MonoValue, field_name: &str) -> Result<()> {
-        match value {
-            MonoValue::String(s) => {
-                // Example: Check for empty strings in certain fields
-                if s.is_empty() && field_name.ends_with("_id") {
-                    return Err(MonoError::InvalidOperation(format!(
-                        "Field '{field_name}' cannot be empty"
-                    )));
-                }
+        if let MonoValue::String(s) = value {
+            // Example: Check for empty strings in certain fields
+            if s.is_empty() && field_name.ends_with("_id") {
+                return Err(MonoError::InvalidOperation(format!(
+                    "Field '{field_name}' cannot be empty"
+                )));
             }
-            _ => {}
         }
         Ok(())
     }
@@ -230,15 +228,14 @@ impl StorageEngine {
                         let existing_rows = self.find(collection, query).await?;
 
                         for row_val in existing_rows {
-                            if let MonoValue::Object(map) = &row_val {
-                                if let Some(existing_val) = map.get(field_name) {
-                                    if existing_val == inserted_value {
-                                        return Err(MonoError::InvalidOperation(format!(
-                                            "Unique constraint violation on field '{}'",
-                                            field_name
-                                        )));
-                                    }
-                                }
+                            if let MonoValue::Object(map) = &row_val
+                                && let Some(existing_val) = map.get(field_name)
+                                && existing_val == inserted_value
+                            {
+                                return Err(MonoError::InvalidOperation(format!(
+                                    "Unique constraint violation on field '{}'",
+                                    field_name
+                                )));
                             }
                         }
                     }
@@ -272,7 +269,7 @@ impl StorageEngine {
         let collection_indexes = self
             .secondary_indexes
             .entry(collection.to_string())
-            .or_insert_with(DashMap::new);
+            .or_default();
 
         let secondary_index = collection_indexes
             .entry(index.name.clone())
@@ -366,7 +363,7 @@ impl StorageEngine {
         let collection_indexes = self
             .secondary_indexes
             .entry(collection.to_string())
-            .or_insert_with(DashMap::new);
+            .or_default();
 
         // Update each index
         for index in indexes {
@@ -380,7 +377,7 @@ impl StorageEngine {
 
             secondary_index
                 .entry(index_key)
-                .or_insert_with(HashSet::new)
+                .or_default()
                 .insert(primary_key.to_vec());
         }
 
@@ -428,17 +425,15 @@ impl StorageEngine {
             .await?;
 
         // Memory keyspace short-circuit
-        if let Some(schema) = self.schemas.get(collection) {
-            if let Schema::KeySpace {
+        if let Some(schema) = self.schemas.get(collection)
+            && let Schema::KeySpace {
                 persistence: KeySpacePersistence::Memory,
                 ..
             } = schema.value()
-            {
-                if let Some(store) = self.memory_keyspaces.get(collection) {
-                    store.remove(key);
-                    return Ok(());
-                }
-            }
+            && let Some(store) = self.memory_keyspaces.get(collection)
+        {
+            store.remove(key);
+            return Ok(());
         }
 
         // Delete from storage
@@ -493,12 +488,12 @@ impl StorageEngine {
                     .filter_map(|v| {
                         v.as_object()
                             .and_then(|m| m.get("_id"))
-                            .and_then(|id_val| match id_val {
-                                MonoValue::ObjectId(oid) => Some(oid.to_hex()),
-                                MonoValue::String(s) => Some(s.clone()),
-                                MonoValue::Int32(i) => Some(i.to_string()),
-                                MonoValue::Int64(i) => Some(i.to_string()),
-                                _ => Some(format!("{id_val}")),
+                            .map(|id_val| match id_val {
+                                MonoValue::ObjectId(oid) => oid.to_hex(),
+                                MonoValue::String(s) => s.clone(),
+                                MonoValue::Int32(i) => i.to_string(),
+                                MonoValue::Int64(i) => i.to_string(),
+                                _ => format!("{id_val}"),
                             })
                     })
                     .collect()
@@ -524,11 +519,11 @@ impl StorageEngine {
                         .filter_map(|v| {
                             v.as_object()
                                 .and_then(|m| m.get(pk_name))
-                                .and_then(|pk_val| match pk_val {
-                                    MonoValue::String(s) => Some(s.clone()),
-                                    MonoValue::Int32(i) => Some(i.to_string()),
-                                    MonoValue::Int64(i) => Some(i.to_string()),
-                                    _ => Some(format!("{pk_val}")),
+                                .map(|pk_val| match pk_val {
+                                    MonoValue::String(s) => s.clone(),
+                                    MonoValue::Int32(i) => i.to_string(),
+                                    MonoValue::Int64(i) => i.to_string(),
+                                    _ => format!("{pk_val}"),
                                 })
                         })
                         .collect()
@@ -681,13 +676,9 @@ impl StorageEngine {
                 key.to_vec()
             }
             (Schema::Collection { .. }, Data::Document(doc)) => {
-                let key = self.insert_document(collection_name, doc).await?;
-                key
+                self.insert_document(collection_name, doc).await?
             }
-            (Schema::Table { .. }, Data::Row(row)) => {
-                let key = self.insert_row(collection_name, row).await?;
-                key
-            }
+            (Schema::Table { .. }, Data::Row(row)) => self.insert_row(collection_name, row).await?,
             (Schema::KeySpace { .. }, Data::Row(row)) => {
                 let key = row.get("key").ok_or_else(|| {
                     MonoError::InvalidOperation("Keyspace requires 'key' field".to_string())
@@ -710,8 +701,8 @@ impl StorageEngine {
                     row.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
                 let document = MonoValue::Object(doc_map);
-                let key = self.insert_document(collection_name, &document).await?;
-                key
+
+                self.insert_document(collection_name, &document).await?
             }
             (schema, data) => {
                 return Err(MonoError::TypeError {
@@ -760,14 +751,12 @@ impl StorageEngine {
                     "collection '{collection}' not found"
                 )));
             }
+        } else if let Some(btree) = self.btrees.get(collection) {
+            btree.insert(&key, &serialized_value).await?;
         } else {
-            if let Some(btree) = self.btrees.get(collection) {
-                btree.insert(&key, &serialized_value).await?;
-            } else {
-                return Err(MonoError::NotFound(format!(
-                    "collection '{collection}' not found"
-                )));
-            }
+            return Err(MonoError::NotFound(format!(
+                "collection '{collection}' not found"
+            )));
         }
 
         Ok(())
@@ -806,14 +795,12 @@ impl StorageEngine {
                     "collection '{collection}' not found"
                 )));
             }
+        } else if let Some(btree) = self.btrees.get(collection) {
+            btree.insert(&key_vec, &val_vec).await?;
         } else {
-            if let Some(btree) = self.btrees.get(collection) {
-                btree.insert(&key_vec, &val_vec).await?;
-            } else {
-                return Err(MonoError::NotFound(format!(
-                    "collection '{collection}' not found"
-                )));
-            }
+            return Err(MonoError::NotFound(format!(
+                "collection '{collection}' not found"
+            )));
         }
 
         Ok(())
@@ -860,14 +847,12 @@ impl StorageEngine {
                     "collection '{collection}' not found"
                 )));
             }
+        } else if let Some(btree) = self.btrees.get(collection) {
+            btree.insert(&key_bytes, &value_bytes).await?;
         } else {
-            if let Some(btree) = self.btrees.get(collection) {
-                btree.insert(&key_bytes, &value_bytes).await?;
-            } else {
-                return Err(MonoError::NotFound(format!(
-                    "collection '{collection}' not found"
-                )));
-            }
+            return Err(MonoError::NotFound(format!(
+                "collection '{collection}' not found"
+            )));
         }
 
         Ok(key_bytes)
@@ -879,12 +864,7 @@ impl StorageEngine {
         row: &HashMap<String, MonoValue>,
     ) -> Result<Vec<u8>> {
         let schema = self.schemas.get(collection).unwrap();
-        if let Schema::Table {
-            columns,
-            primary_key,
-            ..
-        } = schema.value()
-        {
+        if let Schema::Table { primary_key, .. } = schema.value() {
             // Validation already done in insert() method
 
             if primary_key.is_empty() {
@@ -896,8 +876,8 @@ impl StorageEngine {
             let mut pk_values = Vec::new();
             for pk_field in primary_key {
                 let value = row.get(pk_field);
-                if value.is_some() {
-                    pk_values.push(value.unwrap().to_string());
+                if let Some(v) = value {
+                    pk_values.push(v.to_string());
                 } else {
                     return Err(MonoError::InvalidOperation(format!(
                         "primary key '{pk_field}' does not exist in '{collection}'"
@@ -919,14 +899,12 @@ impl StorageEngine {
                         "collection '{collection}' not found"
                     )));
                 }
+            } else if let Some(btree) = self.btrees.get(collection) {
+                btree.insert(&key_bytes, &value_bytes).await?;
             } else {
-                if let Some(btree) = self.btrees.get(collection) {
-                    btree.insert(&key_bytes, &value_bytes).await?;
-                } else {
-                    return Err(MonoError::NotFound(format!(
-                        "collection '{collection}' not found"
-                    )));
-                }
+                return Err(MonoError::NotFound(format!(
+                    "collection '{collection}' not found"
+                )));
             }
 
             Ok(key_bytes)
@@ -1106,6 +1084,7 @@ impl StorageEngine {
         Ok(Arc::new(btree))
     }
 
+    #[allow(dead_code)]
     async fn recover_btree_from_wal(
         &self,
         collection_name: &str,
@@ -1134,7 +1113,7 @@ impl StorageEngine {
                 WalEntryType::Checkpoint => {}
             }
             processed += 1;
-            if processed % 100 == 0 {
+            if processed.is_multiple_of(100) {
                 tracing::info!(
                     "Recovering '{}' from WAL: processed {} entries",
                     collection_name,
@@ -1253,22 +1232,20 @@ impl StorageEngine {
                     "collection {collection} not found"
                 )));
             }
-        } else {
-            if let Some(btree) = self.btrees.get(collection) {
-                if let Some(prefix) = namespace_prefix {
-                    let start = format!("{prefix}:").into_bytes();
-                    let mut end = start.clone();
-                    end.extend(std::iter::repeat(0xFFu8).take(64));
-                    btree.scan(&start, &end).await?
-                } else {
-                    let end = vec![0xFFu8; 64];
-                    btree.scan(&[], &end).await?
-                }
+        } else if let Some(btree) = self.btrees.get(collection) {
+            if let Some(prefix) = namespace_prefix {
+                let start = format!("{prefix}:").into_bytes();
+                let mut end = start.clone();
+                end.extend(std::iter::repeat_n(0xFFu8, 64));
+                btree.scan(&start, &end).await?
             } else {
-                return Err(MonoError::NotFound(format!(
-                    "collection {collection} not found"
-                )));
+                let end = vec![0xFFu8; 64];
+                btree.scan(&[], &end).await?
             }
+        } else {
+            return Err(MonoError::NotFound(format!(
+                "collection {collection} not found"
+            )));
         };
 
         let mut values: Vec<MonoValue> = Vec::with_capacity(pairs.len());
@@ -1347,10 +1324,10 @@ impl StorageEngine {
             .iter()
             .filter_map(|entry| {
                 let key = entry.key();
-                if let Some(ref prefix) = namespace_prefix {
-                    if !key.starts_with(&format!("{prefix}:")) {
-                        return None;
-                    }
+                if let Some(ref prefix) = namespace_prefix
+                    && !key.starts_with(&format!("{prefix}:"))
+                {
+                    return None;
                 }
                 let value = entry.value();
                 let obj = if let MonoValue::Object(map) = value.clone() {
@@ -1405,15 +1382,13 @@ impl StorageEngine {
                     "collection {collection} not found"
                 )));
             }
+        } else if let Some(btree) = self.btrees.get(collection) {
+            let end = vec![0xFFu8; 64];
+            btree.scan(&[], &end).await?
         } else {
-            if let Some(btree) = self.btrees.get(collection) {
-                let end = vec![0xFFu8; 64];
-                btree.scan(&[], &end).await?
-            } else {
-                return Err(MonoError::NotFound(format!(
-                    "collection {collection} not found"
-                )));
-            }
+            return Err(MonoError::NotFound(format!(
+                "collection {collection} not found"
+            )));
         };
 
         let mut values: Vec<MonoValue> = Vec::with_capacity(pairs.len());
@@ -1477,51 +1452,39 @@ impl StorageEngine {
         }
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn apply_filter(&self, row: &MonoValue, filter: &crate::storage::models::Filter) -> bool {
         use crate::storage::models::Filter as F;
         match filter {
-            F::Eq(field, v) => row
-                .as_object()
-                .and_then(|m| m.get(field))
-                .map_or(false, |x| x == v),
+            F::Eq(field, v) => row.as_object().and_then(|m| m.get(field)) == Some(v),
             F::Neq(field, v) => row
                 .as_object()
                 .and_then(|m| m.get(field))
-                .map_or(false, |x| x != v),
+                .is_some_and(|x| x != v),
             F::Gt(field, v) => row
                 .as_object()
                 .and_then(|m| m.get(field))
-                .map_or(false, |x| {
-                    Self::compare_values(x, v) == std::cmp::Ordering::Greater
-                }),
-            F::Gte(field, v) => row
-                .as_object()
-                .and_then(|m| m.get(field))
-                .map_or(false, |x| {
-                    matches!(
-                        Self::compare_values(x, v),
-                        std::cmp::Ordering::Greater | std::cmp::Ordering::Equal
-                    )
-                }),
+                .is_some_and(|x| Self::compare_values(x, v) == std::cmp::Ordering::Greater),
+            F::Gte(field, v) => row.as_object().and_then(|m| m.get(field)).is_some_and(|x| {
+                matches!(
+                    Self::compare_values(x, v),
+                    std::cmp::Ordering::Greater | std::cmp::Ordering::Equal
+                )
+            }),
             F::Lt(field, v) => row
                 .as_object()
                 .and_then(|m| m.get(field))
-                .map_or(false, |x| {
-                    Self::compare_values(x, v) == std::cmp::Ordering::Less
-                }),
-            F::Lte(field, v) => row
-                .as_object()
-                .and_then(|m| m.get(field))
-                .map_or(false, |x| {
-                    matches!(
-                        Self::compare_values(x, v),
-                        std::cmp::Ordering::Less | std::cmp::Ordering::Equal
-                    )
-                }),
+                .is_some_and(|x| Self::compare_values(x, v) == std::cmp::Ordering::Less),
+            F::Lte(field, v) => row.as_object().and_then(|m| m.get(field)).is_some_and(|x| {
+                matches!(
+                    Self::compare_values(x, v),
+                    std::cmp::Ordering::Less | std::cmp::Ordering::Equal
+                )
+            }),
             F::Contains(field, v) => {
                 row.as_object()
                     .and_then(|m| m.get(field))
-                    .map_or(false, |x| match x {
+                    .is_some_and(|x| match x {
                         MonoValue::Array(a) => a.iter().any(|e| e == v),
                         MonoValue::String(s) => {
                             v.as_string().map(|pat| s.contains(pat)).unwrap_or(false)
@@ -1723,6 +1686,7 @@ pub struct Transaction {
 }
 
 impl Transaction {
+    #[allow(dead_code)]
     fn new() -> Self {
         static CTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {

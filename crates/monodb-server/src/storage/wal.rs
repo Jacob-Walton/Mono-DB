@@ -68,6 +68,7 @@ const HEADER_SIZE: usize = 32;
 #[derive(Debug, Clone)]
 pub struct WalEntry {
     pub sequence: u64,
+    #[allow(dead_code)]
     pub timestamp: u64,
     pub entry_type: WalEntryType,
     pub key: Vec<u8>,
@@ -130,6 +131,7 @@ impl From<std::io::Error> for WalError {
 
 impl Wal {
     /// Create a new WAL
+    #[allow(dead_code)]
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
         Self::with_config(path, WalConfig::default())
     }
@@ -259,17 +261,16 @@ impl Wal {
                             pending_bytes += buf.len() as u64;
                             if sync_on_write {
                                 let mut do_sync = false;
-                                if let Some(threshold) = sync_every_bytes {
-                                    if pending_bytes >= threshold {
-                                        do_sync = true;
-                                    }
+                                if let Some(threshold) = sync_every_bytes
+                                    && pending_bytes >= threshold
+                                {
+                                    do_sync = true;
                                 }
-                                if !do_sync {
-                                    if let Some(iv) = sync_interval_ms.map(Duration::from_millis) {
-                                        if last_sync.elapsed() >= iv {
-                                            do_sync = true;
-                                        }
-                                    }
+                                if !do_sync
+                                    && let Some(iv) = sync_interval_ms.map(Duration::from_millis)
+                                    && last_sync.elapsed() >= iv
+                                {
+                                    do_sync = true;
                                 }
                                 if per_write_sync || do_sync {
                                     let _ = writer.flush();
@@ -460,17 +461,16 @@ impl Wal {
         if self.sync_on_write {
             self.bytes_since_sync += buf.len() as u64;
             let mut do_sync = false;
-            if let Some(threshold) = self.sync_every_bytes {
-                if self.bytes_since_sync >= threshold {
-                    do_sync = true;
-                }
+            if let Some(threshold) = self.sync_every_bytes
+                && self.bytes_since_sync >= threshold
+            {
+                do_sync = true;
             }
-            if !do_sync {
-                if let Some(iv) = self.sync_interval {
-                    if self.last_sync.elapsed() >= iv {
-                        do_sync = true;
-                    }
-                }
+            if !do_sync
+                && let Some(iv) = self.sync_interval
+                && self.last_sync.elapsed() >= iv
+            {
+                do_sync = true;
             }
             if do_sync || (self.sync_every_bytes.is_none() && self.sync_interval.is_none()) {
                 self.writer.flush()?;
@@ -901,6 +901,7 @@ impl Wal {
     }
 
     /// Get the last checkpoint information
+    #[allow(dead_code)]
     pub fn last_checkpoint(&self) -> Option<&CheckpointInfo> {
         self.last_checkpoint.as_ref()
     }

@@ -483,12 +483,12 @@ impl Value {
                 let unix_micros = dt.timestamp_micros();
                 let offset_minutes = dt.offset().local_minus_utc() / 60;
                 bytes.extend(&unix_micros.to_le_bytes());
-                bytes.extend(&(offset_minutes as i32).to_le_bytes());
+                bytes.extend(&offset_minutes.to_le_bytes());
             }
 
             Value::Date(d) => {
                 bytes.push(9);
-                bytes.extend(&(d.year() as i32).to_le_bytes());
+                bytes.extend(&d.year().to_le_bytes());
                 bytes.push(d.month() as u8);
                 bytes.push(d.day() as u8);
             }
@@ -499,7 +499,7 @@ impl Value {
                 bytes.push(t.minute() as u8);
                 bytes.push(t.second() as u8);
                 let micros = t.nanosecond() / 1000;
-                bytes.extend(&(micros as u32).to_le_bytes());
+                bytes.extend(&micros.to_le_bytes());
             }
 
             Value::Uuid(u) => {
@@ -638,15 +638,11 @@ impl Value {
         }
 
         macro_rules! read_f32 {
-            () => {{
-                f32::from_bits(read_u32!())
-            }};
+            () => {{ f32::from_bits(read_u32!()) }};
         }
 
         macro_rules! read_f64 {
-            () => {{
-                f64::from_bits(read_u64!())
-            }};
+            () => {{ f64::from_bits(read_u64!()) }};
         }
 
         macro_rules! read_string {
@@ -695,23 +691,23 @@ impl Value {
             8 => {
                 let micros = read_i64!();
                 let offset_minutes = read_i32!();
-
                 let secs = micros / 1_000_000;
                 let nsecs = ((micros % 1_000_000) * 1000) as u32;
-                let naive_dt = chrono::NaiveDateTime::from_timestamp_opt(secs, nsecs)
-                    .ok_or_else(|| MonoError::Parse("Invalid timestamp".into()))?;
                 let offset = chrono::FixedOffset::east_opt(offset_minutes * 60)
                     .ok_or_else(|| MonoError::Parse("Invalid offset".into()))?;
-                let dt = chrono::DateTime::from_naive_utc_and_offset(naive_dt, offset);
-
+                let dt = chrono::DateTime::from_timestamp(secs, nsecs)
+                    .ok_or_else(|| MonoError::Parse("Invalid timestamp".into()))?
+                    .with_timezone(&offset);
                 Value::DateTime(dt)
             }
 
             9 => {
                 let year = read_i32!();
                 need!(2);
-                let month = buf[offset]; offset += 1;
-                let day   = buf[offset]; offset += 1;
+                let month = buf[offset];
+                offset += 1;
+                let day = buf[offset];
+                offset += 1;
 
                 let date = chrono::NaiveDate::from_ymd_opt(year, month as u32, day as u32)
                     .ok_or_else(|| MonoError::Parse("Invalid date".into()))?;
@@ -721,13 +717,19 @@ impl Value {
 
             10 => {
                 need!(3);
-                let hour = buf[offset];   offset += 1;
-                let minute = buf[offset]; offset += 1;
-                let second = buf[offset]; offset += 1;
+                let hour = buf[offset];
+                offset += 1;
+                let minute = buf[offset];
+                offset += 1;
+                let second = buf[offset];
+                offset += 1;
                 let micros = read_u32!();
 
                 let t = chrono::NaiveTime::from_hms_micro_opt(
-                    hour as u32, minute as u32, second as u32, micros
+                    hour as u32,
+                    minute as u32,
+                    second as u32,
+                    micros,
                 )
                 .ok_or_else(|| MonoError::Parse("Invalid time".into()))?;
 

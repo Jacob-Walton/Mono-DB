@@ -23,6 +23,7 @@ pub struct Connection {
     /// Buffer for reading data from the server
     buffer: BytesMut,
     /// Request ID counter for matching requests and responses
+    #[allow(dead_code)]
     request_id: u64,
 }
 

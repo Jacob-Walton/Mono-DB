@@ -124,9 +124,7 @@ fn example_responses() -> Vec<Response> {
             server_timestamp: Some(1735689600),
             user_permissions: Some(vec!["read".into(), "write".into()]),
         },
-        Response::Success {
-            result: vec![],
-        },
+        Response::Success { result: vec![] },
         Response::Success {
             result: vec![
                 ExecutionResult::Ok {
@@ -144,8 +142,8 @@ fn example_responses() -> Vec<Response> {
                     time: 1735689610,
                     commit_timestamp: None,
                     rows_affected: Some(50),
-                }
-            ]
+                },
+            ],
         },
         Response::Error {
             code: 1001.into(),

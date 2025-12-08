@@ -236,10 +236,10 @@ impl ProtocolCodec {
                 user_id,
             } => {
                 put_u8(&mut header, 0x02);
-                put_string(&mut body, &query);
+                put_string(&mut body, query);
                 put_u32(&mut body, params.len() as u32);
                 for param in params {
-                    put_bytes(&mut body, &param.to_bytes().as_slice());
+                    put_bytes(&mut body, param.to_bytes().as_slice());
                 }
                 put_opt_u64(&mut body, snapshot_timestamp);
                 put_opt_string(&mut body, user_id);
@@ -276,7 +276,7 @@ impl ProtocolCodec {
         put_u32(&mut header, 0); // 0 for correlation id for now
 
         let mut buf = BytesMut::with_capacity(4 + header.len() + body.len());
-        buf.put_u32_le((header.len() + body.len()) as u32);  // Make sure this is _le too
+        buf.put_u32_le((header.len() + body.len()) as u32); // Make sure this is _le too
         buf.put_slice(&header);
         buf.put_slice(&body);
 
@@ -300,10 +300,10 @@ impl ProtocolCodec {
 
         // Get header
         let len = (&buf[..4]).get_u32_le() as usize;
-        
+
         #[cfg(debug_assertions)]
         tracing::debug!("decode_request: frame_len={}, buf.len()={}", len, buf.len());
-        
+
         if buf.len() < 4 + len {
             return Ok(None);
         }
@@ -317,13 +317,16 @@ impl ProtocolCodec {
         let command = data_buf.get_u8();
         let _flags = data_buf.get_u8();
         let _correlation_id = data_buf.get_u32_le();
-        
+
         #[cfg(debug_assertions)]
         tracing::debug!(
             "decode_request: version={}, kind={}, command={}, remaining={}",
-            version, kind, command, data_buf.len()
+            version,
+            kind,
+            command,
+            data_buf.len()
         );
-        
+
         if version != VERSION {
             return Err(MonoError::Network(format!(
                 "Unsupported protocol version: {version}"
@@ -509,22 +512,21 @@ impl ProtocolCodec {
                 header.put_u8(0x03);
 
                 body.put_u16_le((*code) as u16);
-                put_string(&mut body, &message);
+                put_string(&mut body, message);
             }
-            Response::Stream { .. } => {
+            Response::Stream => {
                 header.put_u8(0x04);
             }
-            Response::Ack { .. } => {
+            Response::Ack => {
                 header.put_u8(0x05);
             }
-            _ => return Err(MonoError::Network("Unknown response type".into())),
         }
 
         put_u8(&mut header, 0); // Empty flags for now
         put_u32(&mut header, 0); // 0 for correlation id for now
 
         let mut buf = BytesMut::with_capacity(4 + header.len() + body.len());
-        buf.put_u32_le((header.len() + body.len()) as u32);  // Make sure this is _le too
+        buf.put_u32_le((header.len() + body.len()) as u32); // Make sure this is _le too
         buf.put_slice(&header);
         buf.put_slice(&body);
 
@@ -562,13 +564,13 @@ impl ProtocolCodec {
                 "Unsupported protocol version: {version}"
             )));
         }
-        let kind = data_buf.get_u8();  // Read kind (was missing!)
+        let kind = data_buf.get_u8(); // Read kind (was missing!)
         if kind != 0x01 {
             return Err(MonoError::Network(format!(
                 "Invalid message type for response: {kind}"
             )));
         }
-        let command = data_buf.get_u8();  // This is msg_type
+        let command = data_buf.get_u8(); // This is msg_type
         let _flags = data_buf.get_u8(); // Skip flags
         let _correlation_id = data_buf.get_u32_le(); // Skip correlation id
 
@@ -581,7 +583,7 @@ impl ProtocolCodec {
                 let mut user_permissions: Option<Vec<String>> = None;
                 if permissions_present {
                     user_permissions = Some(Vec::new());
-                    
+
                     let len = data_buf.get_u32_le() as usize;
 
                     for _ in 0..len {
@@ -641,7 +643,11 @@ impl ProtocolCodec {
                                 rows_affected,
                             });
                         }
-                        _ => return Err(MonoError::Network(format!("Unknown execution result tag: {tag}"))),
+                        _ => {
+                            return Err(MonoError::Network(format!(
+                                "Unknown execution result tag: {tag}"
+                            )));
+                        }
                     }
                 }
                 Response::Success { result }
@@ -666,35 +672,53 @@ impl ProtocolCodec {
 
 // Primitive helpers
 
+#[inline]
+#[allow(unused)]
 fn put_u8(buf: &mut BytesMut, v: u8) {
     buf.put_u8(v);
 }
+#[inline]
+#[allow(unused)]
 fn put_u16(buf: &mut BytesMut, v: u16) {
     buf.put_u16_le(v);
 }
+#[inline]
+#[allow(unused)]
 fn put_u32(buf: &mut BytesMut, v: u32) {
     buf.put_u32_le(v);
 }
+#[inline]
+#[allow(unused)]
 fn put_u64(buf: &mut BytesMut, v: u64) {
     buf.put_u64_le(v);
 }
+#[inline]
+#[allow(unused)]
 fn put_i32(buf: &mut BytesMut, v: i32) {
     buf.put_i32_le(v);
 }
+#[inline]
+#[allow(unused)]
 fn put_i64(buf: &mut BytesMut, v: i64) {
     buf.put_i64_le(v);
 }
 
+#[inline]
+#[allow(unused)]
 fn put_string(buf: &mut BytesMut, s: &str) {
     put_u32(buf, s.len() as u32);
     buf.put_slice(s.as_bytes());
 }
 
+#[inline]
+#[allow(unused)]
 fn put_bytes(buf: &mut BytesMut, b: &[u8]) {
     put_u32(buf, b.len() as u32);
     buf.put_slice(b);
 }
 
+#[inline]
+#[allow(unused)]
 fn put_opt_u64(buf: &mut BytesMut, v: &Option<u64>) {
     match v {
         None => put_u8(buf, 0),
@@ -705,6 +729,8 @@ fn put_opt_u64(buf: &mut BytesMut, v: &Option<u64>) {
     }
 }
 
+#[inline]
+#[allow(unused)]
 fn put_opt_string(buf: &mut BytesMut, v: &Option<String>) {
     match v {
         None => put_u8(buf, 0),
@@ -715,6 +741,8 @@ fn put_opt_string(buf: &mut BytesMut, v: &Option<String>) {
     }
 }
 
+#[inline]
+#[allow(unused)]
 fn get_string(buf: &mut BytesMut) -> crate::Result<String> {
     let str_len = buf.get_u32_le() as usize;
     let s = String::from_utf8(buf.split_to(str_len).to_vec())
@@ -722,6 +750,8 @@ fn get_string(buf: &mut BytesMut) -> crate::Result<String> {
     Ok(s)
 }
 
+#[inline]
+#[allow(unused)]
 fn get_opt_string(buf: &mut BytesMut) -> crate::Result<Option<String>> {
     let flag = buf.get_u8();
     if flag == 0 {
@@ -734,7 +764,13 @@ fn get_opt_string(buf: &mut BytesMut) -> crate::Result<Option<String>> {
     }
 }
 
+#[inline]
+#[allow(unused)]
 fn get_opt_u64(buf: &mut BytesMut) -> Option<u64> {
     let flag = buf.get_u8();
-    if flag == 0 { None } else { Some(buf.get_u64_le()) }
+    if flag == 0 {
+        None
+    } else {
+        Some(buf.get_u64_le())
+    }
 }

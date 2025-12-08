@@ -273,7 +273,7 @@ impl LsmTree {
             .sum()
     }
 
-    pub async fn put(&self, mut key: Vec<u8>, mut value: Vec<u8>) -> Result<()> {
+    pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
         // Write to WAL first for durability
         let sequence = {
             let wal_r = self.wal.read();
@@ -323,6 +323,7 @@ impl LsmTree {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         // Check memtable
         if let Some(entry) = self.memtable.read().get(key) {
@@ -451,7 +452,7 @@ impl LsmTree {
     }
 
     /// Delete a key-value pair (writes a tombstone).
-    pub async fn delete(&self, mut key: Vec<u8>) -> Result<()> {
+    pub async fn delete(&self, key: Vec<u8>) -> Result<()> {
         // Write delete entry to WAL first
         let sequence = {
             let wal_r = self.wal.read();
@@ -603,6 +604,7 @@ impl LsmTree {
     }
 
     /// Clear the WAL after successful compaction
+    #[allow(dead_code)]
     pub async fn clear_wal_after_compaction(&self) -> Result<()> {
         // This should only be called after a successful full compaction
         // when all WAL entries have been written to SSTables
@@ -654,9 +656,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_memtable_flush_trigger() {
         let dir = temp_dir("flush_test");
-        let mut config = LsmConfig::default();
-        // Use small memtable size so inserts trigger flush
-        config.memtable_size = 10 * 1024; // 10KB instead of 512MB
+        let config = LsmConfig {
+            memtable_size: 10 * 1024, // 10KB
+            ..Default::default()
+        };
 
         let lsm = Arc::new(LsmTree::new(&dir, config, WAL_CONFIG).unwrap());
 
@@ -681,9 +684,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_compaction_level_trigger() {
         let dir = temp_dir("compaction_test");
-        let mut cfg = LsmConfig::default();
-        cfg.memtable_size = 1024;
-        cfg.level0_file_num_compaction_trigger = 4;
+        let cfg = LsmConfig {
+            memtable_size: 1024,
+            level0_file_num_compaction_trigger: 4,
+            ..Default::default()
+        };
 
         let lsm = Arc::new(LsmTree::new(&dir, cfg, WAL_CONFIG).unwrap());
 

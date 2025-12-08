@@ -9,7 +9,6 @@ use std::io::{BufReader, ErrorKind, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
-use tokio::io::AsyncWriteExt;
 
 const SST_MAGIC: u32 = 0x53535431; // "SST1"
 const SST_HEADER_BYTES: u64 = 16;
@@ -32,6 +31,7 @@ pub struct SsTable {
 #[derive(Clone)]
 pub struct SsTableIndex {
     pub entries: Vec<IndexEntry>,
+    #[allow(dead_code)]
     pub block_size: usize,
 }
 
@@ -148,6 +148,7 @@ impl SsTableBuilder {
     }
 
     /// Best-effort estimated in-memory size of buffered entries.
+    #[allow(dead_code)]
     pub fn estimated_size(&self) -> usize {
         self.estimated_size
     }
@@ -309,16 +310,16 @@ impl SsTable {
         let mut max_key = Vec::new();
         let mut num_entries = 0;
 
-        if let Ok(mut iter) = SsTableIterator::new(&path) {
-            if let Some(Ok((first_key, _))) = iter.next() {
-                min_key = first_key.clone();
-                max_key = first_key;
-                num_entries = 1;
+        if let Ok(mut iter) = SsTableIterator::new(&path)
+            && let Some(Ok((first_key, _))) = iter.next()
+        {
+            min_key = first_key.clone();
+            max_key = first_key;
+            num_entries = 1;
 
-                while let Some(Ok((k, _))) = iter.next() {
-                    max_key = k;
-                    num_entries += 1;
-                }
+            while let Some(Ok((k, _))) = iter.next() {
+                max_key = k;
+                num_entries += 1;
             }
         }
 

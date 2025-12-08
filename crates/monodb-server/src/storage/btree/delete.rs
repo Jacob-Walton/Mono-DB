@@ -70,18 +70,17 @@ fn delete_from_page(
                         )?;
 
                         // Update left sibling's right_sibling to skip the removed page
-                        if idx_in_parent > 0 {
-                            if let Some(left_id) = left_sibling_id(btree, parent_id, idx_in_parent)?
-                            {
-                                // Avoid creating self-loops or redundant links
-                                if left_id != right_sibling && left_id != page_id {
-                                    let left_page = btree.buffer_pool().fetch_page(left_id)?;
-                                    {
-                                        let mut g = left_page.write();
-                                        g.header.right_sibling = right_sibling;
-                                    }
-                                    btree.buffer_pool().unpin_page(left_id, true)?;
+                        if idx_in_parent > 0
+                            && let Some(left_id) = left_sibling_id(btree, parent_id, idx_in_parent)?
+                        {
+                            // Avoid creating self-loops or redundant links
+                            if left_id != right_sibling && left_id != page_id {
+                                let left_page = btree.buffer_pool().fetch_page(left_id)?;
+                                {
+                                    let mut g = left_page.write();
+                                    g.header.right_sibling = right_sibling;
                                 }
+                                btree.buffer_pool().unpin_page(left_id, true)?;
                             }
                         }
 

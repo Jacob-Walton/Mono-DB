@@ -23,12 +23,11 @@ pub struct BTree {
     root_page_id: Arc<RwLock<Option<PageId>>>,
     buffer_pool: Arc<BufferPool>,
     wal: Option<Arc<RwLock<Wal>>>,
-    name: String,
 }
 
 impl BTree {
     /// Create a new B-tree with the given name and buffer pool
-    pub fn new(name: String, buffer_pool: Arc<BufferPool>) -> Self {
+    pub fn new(_name: String, buffer_pool: Arc<BufferPool>) -> Self {
         let root_from_disk = buffer_pool.get_root_page_id();
         let root = Arc::new(RwLock::new(root_from_disk));
 
@@ -36,7 +35,6 @@ impl BTree {
             root_page_id: root,
             buffer_pool,
             wal: None,
-            name,
         }
     }
 
@@ -74,6 +72,7 @@ impl BTree {
     /// Search for a key in the tree.
     ///
     /// Returns `Ok(Some(value))` if found, `Ok(None)` if not present.
+    #[allow(dead_code)]
     pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         search::get(self, key).await
     }
@@ -129,10 +128,5 @@ impl BTree {
     /// Get the buffer pool reference (for internal use)
     pub(crate) fn buffer_pool(&self) -> &Arc<BufferPool> {
         &self.buffer_pool
-    }
-
-    /// Get the tree name
-    pub fn name(&self) -> &str {
-        &self.name
     }
 }

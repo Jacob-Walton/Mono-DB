@@ -225,24 +225,18 @@ async fn handle_request(
             let tables: Vec<Value> = schemas
                 .iter()
                 .map(|schema| match &**schema {
-                    Schema::Table { name, .. } => {
-                        Value::Array(vec![
-                            Value::String("table".to_string()),
-                            Value::String(name.clone()),
-                        ])
-                    }
-                    Schema::Collection { name, .. } => {
-                        Value::Array(vec![
-                            Value::String("collection".to_string()),
-                            Value::String(name.clone()),
-                        ])
-                    }
-                    Schema::KeySpace { name, .. } => {
-                        Value::Array(vec![
-                            Value::String("keyspace".to_string()),
-                            Value::String(name.clone()),
-                        ])
-                    }
+                    Schema::Table { name, .. } => Value::Array(vec![
+                        Value::String("table".to_string()),
+                        Value::String(name.clone()),
+                    ]),
+                    Schema::Collection { name, .. } => Value::Array(vec![
+                        Value::String("collection".to_string()),
+                        Value::String(name.clone()),
+                    ]),
+                    Schema::KeySpace { name, .. } => Value::Array(vec![
+                        Value::String("keyspace".to_string()),
+                        Value::String(name.clone()),
+                    ]),
                 })
                 .collect();
 

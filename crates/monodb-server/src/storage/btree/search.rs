@@ -8,6 +8,7 @@ use monodb_common::{MonoError, Result};
 use std::collections::HashSet;
 
 /// Search for a key in the B-tree
+#[allow(dead_code)]
 pub async fn get(btree: &BTree, key: &[u8]) -> Result<Option<Vec<u8>>> {
     let root_page_id = btree.root_page_id();
     let root_guard = root_page_id.read();
@@ -22,6 +23,7 @@ pub async fn get(btree: &BTree, key: &[u8]) -> Result<Option<Vec<u8>>> {
 }
 
 /// Recursive search through the tree
+#[allow(dead_code)]
 fn search_recursive(btree: &BTree, page_id: PageId, key: &[u8]) -> Result<Option<Vec<u8>>> {
     let page = btree.buffer_pool().fetch_page(page_id)?;
     let page_guard = page.read();
@@ -37,6 +39,7 @@ fn search_recursive(btree: &BTree, page_id: PageId, key: &[u8]) -> Result<Option
 }
 
 /// Search within a leaf node using binary scan
+#[allow(dead_code)]
 fn search_leaf(
     page_guard: &Page,
     btree: &BTree,
@@ -64,6 +67,7 @@ fn search_leaf(
 }
 
 /// Search within an interior node by finding the correct child to descend into
+#[allow(dead_code)]
 fn search_interior(
     page_guard: &Page,
     btree: &BTree,

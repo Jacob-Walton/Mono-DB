@@ -184,7 +184,7 @@ async fn get_tables(client: &Client) {
                                                             Value::String("unknown".to_string());
 
                                                         let table_type =
-                                                            table.get(0).unwrap_or(&fallback);
+                                                            table.first().unwrap_or(&fallback);
                                                         let table_name =
                                                             table.get(1).unwrap_or(&fallback);
 

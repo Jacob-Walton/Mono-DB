@@ -1,6 +1,6 @@
 use crate::config::StorageConfig;
 use crate::query_engine::{
-    ast::{Assignment, BinaryOp, Expr, FieldDef, Statement, TableType},
+    ast::{Assignment, BinaryOp, Expr, Statement, TableType},
     executor::QueryExecutor,
 };
 use crate::storage::engine::StorageEngine;
@@ -46,19 +46,6 @@ async fn create_test_collection(executor: &mut QueryExecutor, name: &str) {
         "Failed to create collection: {:?}",
         result.err()
     );
-}
-
-/// Helper to create a relational table with schema
-async fn create_test_table(executor: &mut QueryExecutor, name: &str, fields: Vec<FieldDef>) {
-    let make_stmt = Statement::Make {
-        table_type: TableType::Relational,
-        name: name.to_string(),
-        schema: Some(fields),
-        properties: vec![],
-    };
-
-    let result = executor.execute(make_stmt).await;
-    assert!(result.is_ok(), "Failed to create table: {:?}", result.err());
 }
 
 /// Helper to insert a single record
@@ -142,7 +129,7 @@ async fn test_basic_get_simple_query() {
             vec![
                 ("name", Value::String(name)),
                 ("email", Value::String(email)),
-                ("age", Value::Int32(age as i32)),
+                ("age", Value::Int32(age)),
             ],
         )
         .await;
@@ -156,7 +143,7 @@ async fn test_basic_get_simple_query() {
 
     // Verify results
     assert!(
-        results.len() > 0,
+        !results.is_empty(),
         "Expected matching rows, got empty result"
     );
 
@@ -224,7 +211,7 @@ async fn test_basic_get_with_multiple_filters() {
 
     let results = execute_get_query(&mut executor, "users", Some(filter), None).await;
 
-    assert!(results.len() > 0, "Expected matching rows");
+    assert!(!results.is_empty(), "Expected matching rows");
     println!(
         "✓ Multiple filters test passed: {} rows matched",
         results.len()
@@ -253,7 +240,7 @@ async fn test_basic_put_insertion() {
         let fields = match record_type {
             0 => vec![
                 ("type", Value::String("integer".to_string())),
-                ("value", Value::Int32(i as i32)),
+                ("value", Value::Int32(i)),
                 ("index", Value::Int64(i as i64)),
             ],
             1 => vec![
@@ -303,10 +290,10 @@ async fn test_basic_put_insertion() {
     // Verify type distribution
     let mut type_counts = HashMap::new();
     for record in &all_records {
-        if let Value::Object(obj) = record {
-            if let Some(Value::String(type_str)) = obj.get("type") {
-                *type_counts.entry(type_str.clone()).or_insert(0) += 1;
-            }
+        if let Value::Object(obj) = record
+            && let Some(Value::String(type_str)) = obj.get("type")
+        {
+            *type_counts.entry(type_str.clone()).or_insert(0) += 1;
         }
     }
 
@@ -391,7 +378,7 @@ async fn test_basic_change_bulk_updates() {
             &mut executor,
             "users",
             vec![
-                ("id", Value::Int32(i as i32)),
+                ("id", Value::Int32(i)),
                 ("status", Value::String("active".to_string())),
                 ("score", Value::Int32(0)),
             ],
@@ -538,10 +525,10 @@ async fn test_basic_remove_conditional_deletion() {
 
     // Verify all remaining have status="active"
     for record in remaining {
-        if let Value::Object(obj) = record {
-            if let Some(Value::String(status)) = obj.get("status") {
-                assert_eq!(status, "active", "Remaining record should be active");
-            }
+        if let Value::Object(obj) = record
+            && let Some(Value::String(status)) = obj.get("status")
+        {
+            assert_eq!(status, "active", "Remaining record should be active");
         }
     }
 

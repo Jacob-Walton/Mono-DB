@@ -235,8 +235,10 @@ fn parser_number_parsing_int_and_float() {
     }
 
     // 3.14 -> Float64
+    #[allow(clippy::approx_constant)]
     let e2 = parse_single_get_where_expr("3.14");
     match e2 {
+        #[allow(clippy::approx_constant)]
         Expr::Literal(Value::Float64(f)) => assert!((f - 3.14).abs() < 1e-12),
         other => panic!("unexpected: {other:?}"),
     }

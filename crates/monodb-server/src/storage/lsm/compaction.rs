@@ -141,14 +141,14 @@ async fn merge_sstables(
         }
 
         for r in to_advance {
-            if let Some(it) = iters.get_mut(r) {
-                if let Some(Ok((k2, v2))) = it.next() {
-                    heap.push(HeapEntry {
-                        key: k2,
-                        value: v2,
-                        sstable_source_index: r,
-                    });
-                }
+            if let Some(it) = iters.get_mut(r)
+                && let Some(Ok((k2, v2))) = it.next()
+            {
+                heap.push(HeapEntry {
+                    key: k2,
+                    value: v2,
+                    sstable_source_index: r,
+                });
             }
         }
     }

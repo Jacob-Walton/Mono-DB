@@ -57,7 +57,7 @@ impl PageHeader {
     }
 
     // Serialize header into a fixed 64-byte layout with checksum at bytes 60..64 (LE)
-    fn to_bytes(&self) -> [u8; PAGE_HEADER_SIZE] {
+    fn to_bytes(self) -> [u8; PAGE_HEADER_SIZE] {
         let mut buf = [0u8; PAGE_HEADER_SIZE];
         // 0..4 magic
         buf[0..4].copy_from_slice(&self.magic.to_le_bytes());
@@ -464,6 +464,7 @@ impl Page {
     }
 
     /// Compact the page to reclaim fragmented space from deleted cells
+    #[allow(dead_code)]
     pub fn compact(&mut self) -> Result<()> {
         if self.header.cell_count == 0 {
             // No cells to compact
@@ -474,10 +475,10 @@ impl Page {
         // Collect all valid cells
         let mut valid_cells = Vec::new();
         for i in 0..self.header.cell_count {
-            if let Ok(offset) = self.get_cell_offset(i) {
-                if let Ok((key, value)) = self.get_cell(offset) {
-                    valid_cells.push((key, value));
-                }
+            if let Ok(offset) = self.get_cell_offset(i)
+                && let Ok((key, value)) = self.get_cell(offset)
+            {
+                valid_cells.push((key, value));
             }
         }
 
@@ -488,16 +489,14 @@ impl Page {
 
         // Re-add all valid cells
         for (key, value) in valid_cells {
-            if let Err(e) = self.add_cell(&key, &value) {
-                // If we can't re-add a cell, we have a serious problem
-                return Err(e);
-            }
+            self.add_cell(&key, &value)?;
         }
 
         Ok(())
     }
 
     /// Get the fragmentation ratio (0.0 = no fragmentation, 1.0 = completely fragmented)
+    #[allow(dead_code)]
     pub fn fragmentation_ratio(&self) -> f64 {
         if self.header.cell_count == 0 {
             return 0.0;
@@ -511,10 +510,10 @@ impl Page {
         // Calculate what the used space would be if compacted
         let mut compacted_size = 0u16;
         for i in 0..self.header.cell_count {
-            if let Ok(offset) = self.get_cell_offset(i) {
-                if let Ok((key, value)) = self.get_cell(offset) {
-                    compacted_size += 4 + key.len() as u16 + 4 + value.len() as u16; // lengths + data
-                }
+            if let Ok(offset) = self.get_cell_offset(i)
+                && let Ok((key, value)) = self.get_cell(offset)
+            {
+                compacted_size += 4 + key.len() as u16 + 4 + value.len() as u16; // lengths + data
             }
         }
         compacted_size += self.header.cell_count * 2; // directory entries
@@ -524,6 +523,6 @@ impl Page {
         }
 
         let fragmentation = (actual_used_space - compacted_size) as f64 / actual_used_space as f64;
-        fragmentation.max(0.0).min(1.0)
+        fragmentation.clamp(0.0, 1.0)
     }
 }

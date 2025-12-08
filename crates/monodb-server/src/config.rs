@@ -89,19 +89,10 @@ impl Default for StorageConfig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct Config {
     pub server: ServerConfig,
     pub storage: StorageConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            server: ServerConfig::default(),
-            storage: StorageConfig::default(),
-        }
-    }
 }
 
 impl Config {
@@ -133,10 +124,10 @@ impl Config {
         if let Ok(v) = env::var("MONODB_HOST") {
             self.server.host = v;
         }
-        if let Ok(v) = env::var("MONODB_PORT") {
-            if let Ok(p) = v.parse::<u16>() {
-                self.server.port = p;
-            }
+        if let Ok(v) = env::var("MONODB_PORT")
+            && let Ok(p) = v.parse::<u16>()
+        {
+            self.server.port = p;
         }
         // if let Ok(v) = env::var("MONODB_MAX_CONNECTIONS") {
         //     if let Ok(n) = v.parse::<usize>() {
@@ -146,25 +137,25 @@ impl Config {
         if let Ok(v) = env::var("MONODB_DATA_DIR") {
             self.storage.data_dir = v;
         }
-        if let Ok(v) = env::var("MONODB_BUFFER_POOL_SIZE") {
-            if let Ok(n) = v.parse::<usize>() {
-                self.storage.buffer_pool_size = n;
-            }
+        if let Ok(v) = env::var("MONODB_BUFFER_POOL_SIZE")
+            && let Ok(n) = v.parse::<usize>()
+        {
+            self.storage.buffer_pool_size = n;
         }
-        if let Ok(v) = env::var("MONODB_USE_LSM") {
-            if let Ok(b) = v.parse::<bool>() {
-                self.storage.use_lsm = b;
-            }
+        if let Ok(v) = env::var("MONODB_USE_LSM")
+            && let Ok(b) = v.parse::<bool>()
+        {
+            self.storage.use_lsm = b;
         }
-        if let Ok(v) = env::var("MONODB_PAGE_SIZE") {
-            if let Ok(n) = v.parse::<usize>() {
-                self.storage.page_size = n;
-            }
+        if let Ok(v) = env::var("MONODB_PAGE_SIZE")
+            && let Ok(n) = v.parse::<usize>()
+        {
+            self.storage.page_size = n;
         }
-        if let Ok(v) = env::var("MONODB_MEMTABLE_SIZE") {
-            if let Ok(n) = v.parse::<usize>() {
-                self.storage.lsm.memtable_size = n;
-            }
+        if let Ok(v) = env::var("MONODB_MEMTABLE_SIZE")
+            && let Ok(n) = v.parse::<usize>()
+        {
+            self.storage.lsm.memtable_size = n;
         }
         // Additional overrides will be added
     }

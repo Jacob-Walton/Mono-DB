@@ -2,7 +2,7 @@ use std::{collections::HashMap, fmt, pin::Pin, sync::Arc, time::UNIX_EPOCH};
 
 use chrono::{DateTime, FixedOffset, Utc};
 use monodb_common::{
-    MonoError, ObjectId, Value, ValueType,
+    MonoError, Value, ValueType,
     protocol::ExecutionResult,
     schema::{KeySpacePersistence, Schema, TableColumn},
 };
@@ -267,8 +267,12 @@ impl QueryExecutor {
                     ConditionalType::IfFailed => false,
                 };
 
-                if should_fallback && fallback.is_some() {
-                    Box::pin(self.execute(fallback.unwrap())).await
+                if let Some(fallback) = fallback {
+                    if should_fallback {
+                        Box::pin(self.execute(fallback)).await
+                    } else {
+                        Ok(result)
+                    }
                 } else {
                     Ok(result)
                 }
@@ -359,8 +363,8 @@ impl QueryExecutor {
                     data_type: f.field_type.clone(),
                     nullable: f.default.is_none(),
                     default: f.default.clone(),
-                    is_primary: f.is_primary.clone(),
-                    is_unique: f.is_unique.clone(),
+                    is_primary: f.is_primary,
+                    is_unique: f.is_unique,
                 })
                 .collect()
         } else {
@@ -489,57 +493,52 @@ impl QueryExecutor {
         );
 
         // Relational path: Auto-generate primary key if needed
-        if is_relational {
-            if let Some(schema) = &schema_opt {
-                if let Schema::Table {
-                    columns,
-                    primary_key,
-                    ..
-                } = schema.as_ref()
+        if is_relational
+            && let Some(schema) = &schema_opt
+            && let Schema::Table {
+                columns,
+                primary_key,
+                ..
+            } = schema.as_ref()
+        {
+            // Auto-generate primary key value if it's missing and is numeric
+            // Only handle single-column primary keys for auto-increment
+            if primary_key.len() == 1 {
+                let pk_name = &primary_key[0];
+                if !row.contains_key(pk_name)
+                    && let Some(col) = columns.iter().find(|c| &c.name == pk_name)
+                    && matches!(col.data_type, ValueType::Int32 | ValueType::Int64)
                 {
-                    // Auto-generate primary key value if it's missing and is numeric
-                    // Only handle single-column primary keys for auto-increment
-                    if primary_key.len() == 1 {
-                        let pk_name = &primary_key[0];
-                        if !row.contains_key(pk_name) {
-                            if let Some(col) = columns.iter().find(|c| &c.name == pk_name) {
-                                if matches!(col.data_type, ValueType::Int32 | ValueType::Int64) {
-                                    let next = self
-                                        .storage
-                                        .next_sequence_value(&target, pk_name)
-                                        .await
-                                        .map_err(|e| {
-                                            ExecutorError::InvalidOperation(e.to_string())
-                                        })?;
+                    let next = self
+                        .storage
+                        .next_sequence_value(&target, pk_name)
+                        .await
+                        .map_err(|e| ExecutorError::InvalidOperation(e.to_string()))?;
 
-                                    row.insert(
-                                        pk_name.clone(),
-                                        if col.data_type == ValueType::Int64 {
-                                            Value::Int64(next as i64)
-                                        } else {
-                                            Value::Int32(next as i32)
-                                        },
-                                    );
-                                }
-                            }
-                        }
-                    }
+                    row.insert(
+                        pk_name.clone(),
+                        if col.data_type == ValueType::Int64 {
+                            Value::Int64(next as i64)
+                        } else {
+                            Value::Int32(next as i32)
+                        },
+                    );
                 }
             }
         }
 
         // Validation
-        if let Some(schema) = &schema_opt {
-            if let Schema::Table { columns, .. } = schema.as_ref() {
-                for (key, expr) in values.iter().map(|v| (v.key.clone(), v.value.clone())) {
-                    if let Some(col) = columns.iter().find(|c| c.name == key) {
-                        self.validate_column_value(col, &expr)?;
-                    } else {
-                        return Err(ExecutorError::InvalidOperation(format!(
-                            "Unknown column '{}'",
-                            key
-                        )));
-                    }
+        if let Some(schema) = &schema_opt
+            && let Schema::Table { columns, .. } = schema.as_ref()
+        {
+            for (key, expr) in values.iter().map(|v| (v.key.clone(), v.value.clone())) {
+                if let Some(col) = columns.iter().find(|c| c.name == key) {
+                    self.validate_column_value(col, &expr)?;
+                } else {
+                    return Err(ExecutorError::InvalidOperation(format!(
+                        "Unknown column '{}'",
+                        key
+                    )));
                 }
             }
         }
@@ -590,8 +589,8 @@ impl QueryExecutor {
         }
 
         // String coercions for common typed fields
-        if resolved_type == ValueType::String {
-            if matches!(
+        if resolved_type == ValueType::String
+            && matches!(
                 expected,
                 ValueType::DateTime
                     | ValueType::Date
@@ -599,9 +598,9 @@ impl QueryExecutor {
                     | ValueType::Uuid
                     | ValueType::ObjectId
                     | ValueType::Reference
-            ) {
-                return Ok(());
-            }
+            )
+        {
+            return Ok(());
         }
 
         Err(ExecutorError::InvalidOperation(format!(

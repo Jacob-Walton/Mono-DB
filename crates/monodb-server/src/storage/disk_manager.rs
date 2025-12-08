@@ -101,7 +101,7 @@ impl DiskManager {
         }
 
         // Allocate new page
-        let (mut page_id, mut new_next_id) = {
+        let (page_id, new_next_id) = {
             let mut next_id = self.next_page_id.write();
             let mut page_id = *next_id;
             // Ensure page id 0 is never handed out; start from 1

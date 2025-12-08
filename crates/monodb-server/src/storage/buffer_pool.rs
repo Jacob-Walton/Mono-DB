@@ -205,31 +205,32 @@ impl BufferPool {
     ///
     /// # Arguments
     /// * `page_id` - ID of the page to flush
+    #[allow(dead_code)]
     pub fn flush_page(&self, page_id: PageId) -> Result<()> {
         let page_table = self.page_table.read();
 
         if let Some(&frame_idx) = page_table.get(&page_id) {
             let frame = self.frames[frame_idx].clone();
-            let mut frame_guard = frame.write();
+            let frame_guard = frame.write();
 
-            if frame_guard.is_dirty {
-                if let Some(page) = &frame_guard.page {
-                    // Clone the Arc to avoid borrow issues
-                    let page_arc = Arc::clone(page);
-                    // Drop frame_guard temporarily to avoid holding lock during I/O
-                    drop(frame_guard);
+            if frame_guard.is_dirty
+                && let Some(page) = &frame_guard.page
+            {
+                // Clone the Arc to avoid borrow issues
+                let page_arc = Arc::clone(page);
+                // Drop frame_guard temporarily to avoid holding lock during I/O
+                drop(frame_guard);
 
-                    // Write to disk (may take time, don't hold frame lock)
-                    let page_guard = page_arc.read();
-                    self.disk_manager.write_page(&page_guard)?;
-                    drop(page_guard);
+                // Write to disk (may take time, don't hold frame lock)
+                let page_guard = page_arc.read();
+                self.disk_manager.write_page(&page_guard)?;
+                drop(page_guard);
 
-                    // Re-acquire frame lock and mark as clean
-                    let mut frame_guard = frame.write();
-                    frame_guard.is_dirty = false;
+                // Re-acquire frame lock and mark as clean
+                let mut frame_guard = frame.write();
+                frame_guard.is_dirty = false;
 
-                    debug!("Flushed page {} to disk", page_id.0);
-                }
+                debug!("Flushed page {} to disk", page_id.0);
             }
         }
 
@@ -243,25 +244,25 @@ impl BufferPool {
 
         for &frame_idx in page_table.values() {
             let frame = self.frames[frame_idx].clone();
-            let mut frame_guard = frame.write();
+            let frame_guard = frame.write();
 
-            if frame_guard.is_dirty {
-                if let Some(page) = &frame_guard.page {
-                    // Clone the Arc to avoid borrow issues
-                    let page_arc = Arc::clone(page);
-                    // Drop frame_guard temporarily to avoid holding lock during I/O
-                    drop(frame_guard);
+            if frame_guard.is_dirty
+                && let Some(page) = &frame_guard.page
+            {
+                // Clone the Arc to avoid borrow issues
+                let page_arc = Arc::clone(page);
+                // Drop frame_guard temporarily to avoid holding lock during I/O
+                drop(frame_guard);
 
-                    // Write to disk
-                    let page_guard = page_arc.read();
-                    self.disk_manager.write_page(&page_guard)?;
-                    drop(page_guard);
+                // Write to disk
+                let page_guard = page_arc.read();
+                self.disk_manager.write_page(&page_guard)?;
+                drop(page_guard);
 
-                    // Re-acquire frame lock and mark as clean
-                    let mut frame_guard = frame.write();
-                    frame_guard.is_dirty = false;
-                    flushed += 1;
-                }
+                // Re-acquire frame lock and mark as clean
+                let mut frame_guard = frame.write();
+                frame_guard.is_dirty = false;
+                flushed += 1;
             }
         }
 

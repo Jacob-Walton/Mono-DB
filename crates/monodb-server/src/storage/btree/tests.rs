@@ -1,5 +1,5 @@
 use super::*;
-use crate::storage::{buffer_pool::BufferPool, disk_manager::DiskManager, page::PageType};
+use crate::storage::{buffer_pool::BufferPool, disk_manager::DiskManager};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -169,7 +169,7 @@ async fn test_btree_alternating_insert_delete() {
         let base = batch * 100;
         for i in 0..100 {
             let key = format!("key_{:05}", base + i).into_bytes();
-            if let Some(_) = btree.get(&key).await.expect("Get failed") {
+            if btree.get(&key).await.expect("Get failed").is_some() {
                 found_count += 1;
             }
         }
