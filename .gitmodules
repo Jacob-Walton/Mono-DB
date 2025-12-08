@@ -1,3 +1,7 @@
 [submodule "clients"]
 	path = clients
 	url = https://git.konpeki.co.uk/jacob/prototype_2_clients.git
+
+[submodule "monodb-admin"]
+	path = monodb-admin
+	url = https://git.konpeki.co.uk/jacob/prototype_2_monodb_admin.git
