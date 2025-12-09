@@ -13,4 +13,3 @@ nul
 .DS_Store
 build/
 crates/monodb-server/Temp*
-Cargo.lock

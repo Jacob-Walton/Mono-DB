@@ -51,9 +51,9 @@ jobs:
           path: |
             ~/.cache/yarn
             node_modules
-          key: yarn-${{ hashFiles('**/yarn.lock') }}
+          key: yarn-${{ runner.os }}-${{ hashFiles('yarn.lock', 'package.json') }}
           restore-keys: |
-            yarn-
+            yarn-${{ runner.os }}-
             
       - name: Install Yarn
         run: npm install -g yarn
@@ -67,9 +67,9 @@ jobs:
           path: |
             ~/.local/pipx
             ~/.cache/pipx
-          key: pipx-${{ hashFiles('**/pyproject.toml', '**/requirements.txt') }}
+          key: pipx-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements.txt') }}
           restore-keys: |
-            pipx-
+            pipx-${{ runner.os }}-
             
       - name: Install pipx and invoke
         run: |
@@ -86,9 +86,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            cargo-
+            cargo-${{ runner.os }}-
             
       - name: Install Rust and Cargo
         uses: dtolnay/rust-toolchain@stable
