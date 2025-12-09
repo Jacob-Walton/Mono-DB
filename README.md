@@ -2,6 +2,12 @@
 
 A modern, multi-paradigm database powered by Rust.
 
+## Repo Info
+
+**Canonical repository:** https://git.konpeki.co.uk/jacob/prototype_2
+
+**GitHub mirror:** https://github.com/Jacob-Walton/Mono-DB
+
 ## Development Setup
 
 To set this project up for development, you will first need to install some prerequisites:
