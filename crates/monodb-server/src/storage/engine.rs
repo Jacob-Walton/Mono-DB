@@ -1,3 +1,4 @@
+use indexmap::IndexMap;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -864,7 +865,7 @@ impl StorageEngine {
         row: &HashMap<String, MonoValue>,
     ) -> Result<Vec<u8>> {
         let schema = self.schemas.get(collection).unwrap();
-        if let Schema::Table { primary_key, .. } = schema.value() {
+        if let Schema::Table { primary_key, columns, .. } = schema.value() {
             // Validation already done in insert() method
 
             if primary_key.is_empty() {
@@ -886,8 +887,14 @@ impl StorageEngine {
             }
             let key_bytes = pk_values.join(":").as_bytes().to_vec();
 
-            let value_to_store =
-                MonoValue::Object(row.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+            // Store as Value::Row (IndexMap) to preserve column order from schema
+            let mut ordered_row: IndexMap<String, MonoValue> = IndexMap::new();
+            for col in columns {
+                if let Some(value) = row.get(&col.name) {
+                    ordered_row.insert(col.name.clone(), value.clone());
+                }
+            }
+            let value_to_store = MonoValue::Row(ordered_row);
             let value_bytes = bincode::serialize(&value_to_store)
                 .map_err(|e| MonoError::Storage(format!("serialize error: {e}")))?;
 
@@ -1452,45 +1459,45 @@ impl StorageEngine {
         }
     }
 
+    /// Get a field value from either Value::Row or Value::Object
+    fn get_field<'a>(value: &'a MonoValue, field: &str) -> Option<&'a MonoValue> {
+        match value {
+            MonoValue::Row(row) => row.get(field),
+            MonoValue::Object(obj) => obj.get(field),
+            _ => None,
+        }
+    }
+
     #[allow(clippy::only_used_in_recursion)]
     fn apply_filter(&self, row: &MonoValue, filter: &crate::storage::models::Filter) -> bool {
         use crate::storage::models::Filter as F;
         match filter {
-            F::Eq(field, v) => row.as_object().and_then(|m| m.get(field)) == Some(v),
-            F::Neq(field, v) => row
-                .as_object()
-                .and_then(|m| m.get(field))
-                .is_some_and(|x| x != v),
-            F::Gt(field, v) => row
-                .as_object()
-                .and_then(|m| m.get(field))
+            F::Eq(field, v) => Self::get_field(row, field) == Some(v),
+            F::Neq(field, v) => Self::get_field(row, field).is_some_and(|x| x != v),
+            F::Gt(field, v) => Self::get_field(row, field)
                 .is_some_and(|x| Self::compare_values(x, v) == std::cmp::Ordering::Greater),
-            F::Gte(field, v) => row.as_object().and_then(|m| m.get(field)).is_some_and(|x| {
+            F::Gte(field, v) => Self::get_field(row, field).is_some_and(|x| {
                 matches!(
                     Self::compare_values(x, v),
                     std::cmp::Ordering::Greater | std::cmp::Ordering::Equal
                 )
             }),
-            F::Lt(field, v) => row
-                .as_object()
-                .and_then(|m| m.get(field))
+            F::Lt(field, v) => Self::get_field(row, field)
                 .is_some_and(|x| Self::compare_values(x, v) == std::cmp::Ordering::Less),
-            F::Lte(field, v) => row.as_object().and_then(|m| m.get(field)).is_some_and(|x| {
+            F::Lte(field, v) => Self::get_field(row, field).is_some_and(|x| {
                 matches!(
                     Self::compare_values(x, v),
                     std::cmp::Ordering::Less | std::cmp::Ordering::Equal
                 )
             }),
             F::Contains(field, v) => {
-                row.as_object()
-                    .and_then(|m| m.get(field))
-                    .is_some_and(|x| match x {
-                        MonoValue::Array(a) => a.iter().any(|e| e == v),
-                        MonoValue::String(s) => {
-                            v.as_string().map(|pat| s.contains(pat)).unwrap_or(false)
-                        }
-                        other => other.to_string().contains(&v.to_string()),
-                    })
+                Self::get_field(row, field).is_some_and(|x| match x {
+                    MonoValue::Array(a) => a.iter().any(|e| e == v),
+                    MonoValue::String(s) => {
+                        v.as_string().map(|pat| s.contains(pat)).unwrap_or(false)
+                    }
+                    other => other.to_string().contains(&v.to_string()),
+                })
             }
             F::And(list) => list.iter().all(|f| self.apply_filter(row, f)),
             F::Or(list) => list.iter().any(|f| self.apply_filter(row, f)),

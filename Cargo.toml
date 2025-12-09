@@ -28,7 +28,7 @@ tokio = { version = "1.47", features = ["full"] }
 # Essential library for serialising and deserialising in Rust
 serde = { version = "1.0", features = ["derive"] }
 # Serde extension library allowing us to work with JSON data
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["preserve_order"] }
 # Error handling library reduces the amount of effort required
 # to work with results and errors
 anyhow = "1.0"

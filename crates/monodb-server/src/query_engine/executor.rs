@@ -196,12 +196,18 @@ impl QueryExecutor {
                 extensions,
             } => {
                 let data = self.execute_get(source, filter, fields, extensions).await?;
+                // Flatten the array so each row is a separate element in data
+                let rows = match data {
+                    Value::Array(arr) => arr,
+                    other => vec![other],
+                };
+                let row_count = rows.len() as u64;
                 ExecutionResult::Ok {
-                    data: vec![data], // FIXME: Temporary solution
+                    data: rows,
                     time: chrono::Utc::now().timestamp_millis() as u64,
                     commit_timestamp: None,
                     time_elapsed: Some(start.elapsed().as_millis() as u64),
-                    row_count: Some(1),
+                    row_count: Some(row_count),
                 }
             }
             _ => {
