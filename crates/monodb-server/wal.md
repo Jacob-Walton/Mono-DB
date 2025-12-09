@@ -2,14 +2,14 @@
 
 The Write-Ahead Log (WAL) is a critical component when it comes to ensuring data durability and consistency in MonoDB. This document outlines the binary format which is used to store the WAL entries on disk.
 
-## 0. Global Rules
+## §0 Global Rules
 
 - Endian: all integers are **little-endian**.
 - Alignment: headers are 32 bytes (half cache line).
 - CRC scope: covers header + key + value and only excludes itself.
 - Magic scanning: when scanning for entries, only the magic is checked.
 
-## 1. Entry Types
+## §1 Entry Types
 
 | Code | Name       | Description                        |
 | ---- | ---------- | ---------------------------------- |
@@ -21,7 +21,7 @@ The Write-Ahead Log (WAL) is a critical component when it comes to ensuring data
 | 0x06 | TxCommit   | Transaction commit                 |
 | 0x07 | TxAbort    | Transaction rollback               |
 
-## 2. Flags Field
+## §2 Flags Field
 
 | Bit  | Name       | Description                             |
 | ---- | ---------- | --------------------------------------- |
@@ -30,9 +30,9 @@ The Write-Ahead Log (WAL) is a critical component when it comes to ensuring data
 | 2    | EXTENDED   | Uses extended length fields             |
 | 3-15 | Reserved   | Must be zero                            |
 
-## 3. Record Format
+## §3 Record Format
 
-### 3.1 Standard Record (<= 254 byte key, <=65534 byte value)
+### §3.1 Standard Record (<= 254 byte key, <=65534 byte value)
 
 Used when the key length is less than or equal to 254 bytes and the value length is less than or equal to 65534 bytes.
 
@@ -55,7 +55,7 @@ Offset   Size   Field              Description
 Total: 32 + K + V bytes
 ```
 
-### 3.2 Extended Record (large key or value)
+### §3.2 Extended Record (large key or value)
 
 Used when `FLAGS & EXTENDED` is set (key > 254 bytes or value > 65534 bytes).
 
@@ -81,7 +81,7 @@ Offset   Size   Field                Description
 Total: 40 + K + V bytes
 ```
 
-## 4. Checkpoint Value Format
+## §4. Checkpoint Value Format
 
 When `ENTRY_TYPE = 0x04` (Checkpoint), the value contains:
 
@@ -97,9 +97,9 @@ FILE_ENTRY:
   [name_len : u16][name : UTF-8 bytes]
 ```
 
-## 5. Transaction Markers
+## §5 Transaction Markers
 
-### 6.1 TxBegin Value (0x05)
+### §6.1 TxBegin Value (0x05)
 
 ```text
 Offset  Size  Field             Description
@@ -112,7 +112,7 @@ Offset  Size  Field             Description
 total: 17 bytes
 ```
 
-### 6.2 TxCommit Value (0x06)
+### §6.2 TxCommit Value (0x06)
 
 ```text
 Offset  Size  Field             Description
@@ -123,7 +123,7 @@ Offset  Size  Field             Description
 total: 16 bytes
 ```
 
-### 6.3 TxAbort Value (0x07)
+### §6.3 TxAbort Value (0x07)
 
 ```text
 Offset  Size  Field             Description
@@ -133,7 +133,7 @@ Offset  Size  Field             Description
 total: 8 bytes
 ```
 
-## 7. CRC Calculation
+## §7 CRC Calculation
 
 The CRC32 (Castagnoli) checksum covers:
 
@@ -148,7 +148,7 @@ CRC32C(header[0..28] || [ext_key_len || ext_val_len]? || key || value)
 
 We use CRC32 because there's hardware acceleration for it on modern CPUs, making it fast to compute whilst still providing good error detection capabilities.
 
-## 8. Recovery Algorithm
+## §8 Recovery Algorithm
 
 ```text
 1. Open WAL file, seek to start
@@ -165,7 +165,7 @@ We use CRC32 because there's hardware acceleration for it on modern CPUs, making
 3. Truncate file to last BATCH_END position
 ```
 
-## 9. File Rotation
+## §9 File Rotation
 
 WAL files are rotated when:
 
@@ -175,6 +175,6 @@ WAL files are rotated when:
 
 Rotated files are named: `wal.{sequence}.log` where `{sequence}` is the first entry's sequence number in the file.
 
-## 10. Performance Considerations
+## §10 Performance Considerations
 
 We use a 32-byte header to align with CPU cache lines, minimizing read/write overhead. CRC before the payload allows us to validate the header before processing large key/value data, reducing unnecessary I/O. Variable length inline for 99% of keys, avoiding extra reads for small entries. BATCH_END flags allow grouping multiple entries into a single durable write, improving throughput. Magic at offset 0 allows quick scanning for recovery after crashes. Little-endian format matches most modern CPU architectures, reducing conversion overhead.

@@ -1123,6 +1123,9 @@ impl StorageEngine {
                     btree.delete_no_wal(&entry.key).await?;
                 }
                 WalEntryType::Checkpoint => {}
+                WalEntryType::TxBegin | WalEntryType::TxCommit | WalEntryType::TxRollback => {
+                    // Transaction markers are not applied during recovery
+                }
             }
             processed += 1;
             if processed.is_multiple_of(100) {

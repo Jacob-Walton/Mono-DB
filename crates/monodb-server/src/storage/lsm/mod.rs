@@ -167,6 +167,13 @@ impl LsmTree {
                 WalEntryType::Checkpoint => {
                     debug!("WAL: Found checkpoint at sequence {}", entry.sequence);
                 }
+                WalEntryType::TxBegin | WalEntryType::TxCommit | WalEntryType::TxRollback => {
+                    // Transaction markers are not applied to memtable during replay
+                    debug!(
+                        "WAL: Found transaction marker {:?} at sequence {}",
+                        entry.entry_type, entry.sequence
+                    );
+                }
             }
         }
 
