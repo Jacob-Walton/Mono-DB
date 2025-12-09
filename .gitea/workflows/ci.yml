@@ -2,7 +2,19 @@ name: CI Runner
 on:
   push:
     branches: [main]
+    paths:
+      - 'crates/**/*.rs'
+      - 'monodb-admin/**/*.rs'
+      - 'Cargo.toml'
+      - 'rust-toolchain.toml'
+
   pull_request:
+    paths:
+      - 'crates/**/*.rs'
+      - 'monodb-admin/**/*.rs'
+      - 'Cargo.toml'
+      - 'rust-toolchain.toml'
+
 jobs:
   build:
     runs-on: amd64

@@ -5,19 +5,20 @@
 - [x] Switch B-Tree to per-collection directories with their own `data.db`, `meta.db`, and `wal.log`.
 - [x] Add validation for constraints like uniqueness
 - [x] Persist/rehydrate B-Tree metadata (root page id, etc.) so trees reopen cleanly across restarts.
+- [x] Implement the rest of the tasks in `tasks.py`
 
 ## Started
 
+- [ ] There are multiple failing tests due to us rewriting the format of execution results.
+
 ## Not Started
 
-- [ ] Implement the rest of the tasks in `tasks.py`
 - [ ] Clean up lsm module
   - [ ] Clean up compaction, make logs debug! instead of info!
   - [ ] Remove unnecessary logs
   - [ ] Clean up comments
 - [ ] B-trees and LSM-trees's SSTables aren't reused from the disk
 - [ ] Error render should be client-side so we can send smaller data
-
 - [ ] Sharded storage for multi-core scaling (read first)
   - Goal: Scale write/flush/compaction across cores by sharding each collection into S shards (S = CPU cores).
   - Routing: Hash-based (e.g., xxhash) on key → shard id. Keep key order within a shard.
