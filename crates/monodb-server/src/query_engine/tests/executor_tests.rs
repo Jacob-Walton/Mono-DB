@@ -86,14 +86,7 @@ async fn execute_get_query(
     };
 
     match executor.execute(get_stmt).await {
-        Ok(ExecutionResult::Ok { data, .. }) => {
-            if data.len() == 1
-                && let Value::Array(arr) = &data[0]
-            {
-                return arr.clone();
-            } // FIXME: Temporary solution
-            panic!("Expected array result, got {:?}", data);
-        }
+        Ok(ExecutionResult::Ok { data, .. }) => data,
         Ok(other) => panic!("Expected Ok result, got {:?}", other),
         Err(e) => panic!("Query failed: {:?}", e),
     }

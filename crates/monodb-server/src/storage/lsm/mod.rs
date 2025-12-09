@@ -640,22 +640,35 @@ mod tests {
         sync_interval_ms: None,
     };
 
-    fn temp_dir(name: &str) -> PathBuf {
+    struct TempDirCleaner(PathBuf);
+    impl Drop for TempDirCleaner {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+            // Try to remove the parent Temp directory if it's empty
+            if let Some(parent) = self.0.parent() {
+                let _ = fs::remove_dir(parent);
+            }
+        }
+    }
+
+    fn temp_dir(name: &str) -> (PathBuf, TempDirCleaner) {
         let pid = std::process::id();
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .subsec_nanos();
-        let dir = PathBuf::from(format!("Temp\\lsm_test_{}_{}_{}", name, pid, nanos));
+        let dir = PathBuf::from(format!("Temp/lsm_test_{}_{}_{}", name, pid, nanos));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        dir
+
+        let cleaner = TempDirCleaner(dir.clone());
+        (dir, cleaner)
     }
 
     /// Verify that inserting entries beyond memtable limit triggers flush → SSTable creation.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_memtable_flush_trigger() {
-        let dir = temp_dir("flush_test");
+        let (dir, _cleanup) = temp_dir("flush_test");
         let config = LsmConfig {
             memtable_size: 10 * 1024, // 10KB
             ..Default::default()
@@ -683,7 +696,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_compaction_level_trigger() {
-        let dir = temp_dir("compaction_test");
+        let (dir, _cleanup) = temp_dir("compaction_test");
         let cfg = LsmConfig {
             memtable_size: 1024,
             level0_file_num_compaction_trigger: 4,
