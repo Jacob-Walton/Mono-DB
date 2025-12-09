@@ -197,7 +197,7 @@ impl QueryExecutor {
             } => {
                 let data = self.execute_get(source, filter, fields, extensions).await?;
                 ExecutionResult::Ok {
-                    data,
+                    data: vec![data], // FIXME: Temporary solution
                     time: chrono::Utc::now().timestamp_millis() as u64,
                     commit_timestamp: None,
                     time_elapsed: Some(start.elapsed().as_millis() as u64),
@@ -224,12 +224,16 @@ impl QueryExecutor {
         for statement in statements {
             let execution_result = Box::pin(self.execute(statement)).await?;
             if let ExecutionResult::Ok { data, .. } = execution_result {
-                last_result = data;
+                last_result = Value::Array(data);
             }
         }
 
         Ok(ExecutionResult::Ok {
-            data: last_result,
+            data: if last_result == Value::Null {
+                vec![]
+            } else {
+                vec![last_result]
+            }, // FIXME: Temporary solution
             time: std::time::SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -253,13 +257,14 @@ impl QueryExecutor {
                 let should_fallback = match condition {
                     ConditionalType::IfEmpty => {
                         if let ExecutionResult::Ok { ref data, .. } = result {
-                            match data {
-                                Value::Null => true,
-                                Value::String(s) => s.is_empty(),
-                                Value::Array(arr) => arr.is_empty(),
-                                Value::Object(obj) => obj.is_empty(),
-                                _ => false,
-                            }
+                            data.is_empty()
+                                || data.iter().all(|v| match v {
+                                    Value::Null => true,
+                                    Value::String(s) => s.is_empty(),
+                                    Value::Array(arr) => arr.is_empty(),
+                                    Value::Object(obj) => obj.is_empty(),
+                                    _ => false,
+                                }) // FIXME: Temporary solution
                         } else {
                             false
                         }
@@ -312,7 +317,7 @@ impl QueryExecutor {
         let result = Box::pin(self.execute(statement)).await?;
 
         if let ExecutionResult::Ok { ref data, .. } = result {
-            self.variables.insert(variable, data.clone());
+            self.variables.insert(variable, Value::Array(data.clone())); // FIXME: Temporary solution
         }
 
         Ok(result)

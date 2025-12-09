@@ -26,6 +26,7 @@ use crate::{MonoError, Result};
 ///     - SortedSet (Redis ZSET)
 ///     - GeoPoint (Geospatial)
 ///     - Reference (foreign key, document reference)
+#[repr(u8)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ValueType {
     // Primitive types

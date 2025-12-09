@@ -86,7 +86,7 @@ pub enum Response {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ExecutionResult {
     Ok {
-        data: Value,
+        data: Vec<Value>, // Either Value::Row, Value::Object, Value::Array, or Value::Null
         time: u64,
         #[serde(default)]
         commit_timestamp: Option<u64>,
@@ -477,10 +477,21 @@ impl ProtocolCodec {
                             commit_timestamp,
                             row_count,
                         } => {
+                            const VALID_TYPES: [&str; 3] = ["array", "object", "row"];
+
                             body.put_u8(0); // Tag
-                            let value_bytes = data.to_bytes();
-                            body.put_u32_le(value_bytes.len() as u32);
-                            body.put_slice(&value_bytes);
+                            body.put_u32_le(data.len() as u32);
+                            for value in data {
+                                if !VALID_TYPES.contains(&value.type_name()) {
+                                    return Err(MonoError::Network(format!(
+                                        "Invalid value type in ExecutionResult::Ok: {}",
+                                        value.type_name()
+                                    )));
+                                }
+                                let value_bytes = value.to_bytes();
+                                body.put_u32_le(value_bytes.len() as u32);
+                                body.put_slice(&value_bytes);
+                            }
                             body.put_u64_le(*time);
                             put_opt_u64(&mut body, commit_timestamp);
                             put_opt_u64(&mut body, time_elapsed);
@@ -607,16 +618,22 @@ impl ProtocolCodec {
                     match tag {
                         0 => {
                             let len = data_buf.get_u32_le();
-                            let value_bytes = data_buf.split_to(len as usize).to_vec();
-                            let data = Value::from_bytes(&value_bytes)
-                                .map_err(|e| MonoError::Network(format!("Decode error: {e}")))?;
+                            let mut data = Vec::with_capacity(len as usize);
+                            for _ in 0..len {
+                                let value_len = data_buf.get_u32_le() as usize;
+                                let value_bytes = data_buf.split_to(value_len).to_vec();
+                                let value = Value::from_bytes(&value_bytes).map_err(|e| {
+                                    MonoError::Network(format!("Decode error: {e}"))
+                                })?;
+                                data.push(value.0);
+                            }
                             let time = data_buf.get_u64_le();
                             let commit_timestamp = get_opt_u64(&mut data_buf);
                             let time_elapsed = get_opt_u64(&mut data_buf);
                             let row_count = get_opt_u64(&mut data_buf);
 
                             result.push(ExecutionResult::Ok {
-                                data: data.0,
+                                data,
                                 time,
                                 commit_timestamp,
                                 time_elapsed,

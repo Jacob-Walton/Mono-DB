@@ -16,7 +16,7 @@ Every message on the wire is a frame:
 
 ```text
 +-------------------------+
-| frame_len      : u32 LE | - total bytes after this field 
+| frame_len      : u32 LE | - total bytes after this field
 +-------------------------+
 | version        : u8     | - protocol version (currently 1)
 +-------------------------+
@@ -343,7 +343,7 @@ Where `ExecutionResult` is:
 
 ```rust
 enum ExecutionResult {
-    Ok { data: Value, time: u64, commit_timestamp: Option<u64>,
+    Ok { data: Vec<Value>, time: u64, commit_timestamp: Option<u64>,
          time_elapsed: Option<u64>, row_count: Option<u64> },
     Created { time: u64, commit_timestamp: Option<u64> },
     Modified { time: u64, commit_timestamp: Option<u64>, rows_affected: Option<u64> },
@@ -357,7 +357,9 @@ ExecutionResult:
   [tag : u8]
   if tag == 0:  // Ok
       [len              : u32 LE        ]
-      [data             : Value         ]
+      repeat len times:
+        [len            : u32 LE        ]
+        [Value                          ]
       [time             : u64 LE        ]
       [commit_timestamp : Option<u64 LE>]
       [time_elapsed     : Option<u64 LE>]

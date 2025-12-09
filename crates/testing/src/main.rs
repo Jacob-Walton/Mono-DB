@@ -66,6 +66,7 @@
 // }
 
 use bytes::BytesMut;
+use indexmap::IndexMap;
 use monodb_common::{
     Value,
     protocol::{ExecutionResult, ProtocolCodec, Request, Response},
@@ -128,7 +129,11 @@ fn example_responses() -> Vec<Response> {
         Response::Success {
             result: vec![
                 ExecutionResult::Ok {
-                    data: Value::Bool(true),
+                    data: vec![Value::Row({
+                        let mut map = IndexMap::new();
+                        map.insert("result".into(), Value::Bool(true));
+                        map
+                    })],
                     time: 1735689600,
                     time_elapsed: Some(5),
                     commit_timestamp: None,

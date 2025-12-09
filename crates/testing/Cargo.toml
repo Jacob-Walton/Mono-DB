@@ -17,3 +17,4 @@ tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 bytes.workspace = true
 annotate-snippets = "0.12.8"
+indexmap = "2.12.1"

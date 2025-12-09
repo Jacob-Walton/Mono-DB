@@ -240,18 +240,16 @@ async fn handle_request(
                 })
                 .collect();
 
-            let data = Value::Array(tables);
-
             let time = std::time::SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_millis() as u64;
 
-            let row_count = data.as_array().map(|arr| arr.len() as u64);
+            let row_count = Some(tables.len() as u64);
 
             Ok(Response::Success {
                 result: vec![ExecutionResult::Ok {
-                    data,
+                    data: vec![Value::Array(tables)],
                     time,
                     time_elapsed: None,
                     row_count,

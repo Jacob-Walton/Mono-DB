@@ -175,33 +175,42 @@ async fn get_tables(client: &Client) {
                         Response::Success { result } => {
                             for exec_result in result.iter() {
                                 match exec_result {
-                                    ExecutionResult::Ok { data, .. } => match data {
-                                        Value::Array(arr) => {
-                                            for item in arr {
-                                                match item {
-                                                    Value::Array(table) => {
-                                                        let fallback =
-                                                            Value::String("unknown".to_string());
+                                    // FIXME: Temporary solution
+                                    ExecutionResult::Ok { data, .. } => {
+                                        if data.len() == 1 {
+                                            if let Value::Array(arr) = &data[0] {
+                                                for item in arr {
+                                                    match item {
+                                                        Value::Array(table) => {
+                                                            let fallback = Value::String(
+                                                                "unknown".to_string(),
+                                                            );
 
-                                                        let table_type =
-                                                            table.first().unwrap_or(&fallback);
-                                                        let table_name =
-                                                            table.get(1).unwrap_or(&fallback);
+                                                            let table_type =
+                                                                table.first().unwrap_or(&fallback);
+                                                            let table_name =
+                                                                table.get(1).unwrap_or(&fallback);
 
-                                                        println!(
-                                                            "{}: {}",
-                                                            table_name.as_string().unwrap(),
-                                                            table_type.as_string().unwrap()
-                                                        );
+                                                            println!(
+                                                                "{}: {}",
+                                                                table_name.as_string().unwrap(),
+                                                                table_type.as_string().unwrap()
+                                                            );
+                                                        }
+                                                        _ => eprintln!(
+                                                            "Found unexpected type when getting tables"
+                                                        ),
                                                     }
-                                                    _ => eprintln!(
-                                                        "Found unexpected type when getting tables"
-                                                    ),
                                                 }
+                                            } else {
+                                                eprintln!(
+                                                    "Found unexpected type when getting tables"
+                                                );
                                             }
+                                        } else {
+                                            eprintln!("Found unexpected type when getting tables");
                                         }
-                                        _ => eprintln!("Found unexpected type when getting tables"),
-                                    },
+                                    }
                                     _ => eprintln!(
                                         "Got an unexpected type when attempting to list tables"
                                     ),
@@ -248,10 +257,13 @@ fn format_response(response: &Response, elapsed: std::time::Duration) {
 
 fn format_execution_result(result: &ExecutionResult) {
     match result {
+        // FIXME: Temporary solution
         ExecutionResult::Ok {
             data, row_count, ..
         } => {
-            format_value(data, 0);
+            for value in data {
+                format_value(value, 0);
+            }
 
             if let Some(count) = row_count {
                 println!("\n{} row{}", count, if *count == 1 { "" } else { "s" });

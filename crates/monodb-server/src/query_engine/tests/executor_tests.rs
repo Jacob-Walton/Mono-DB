@@ -86,10 +86,14 @@ async fn execute_get_query(
     };
 
     match executor.execute(get_stmt).await {
-        Ok(ExecutionResult::Ok { data, .. }) => match data {
-            Value::Array(rows) => rows,
-            _ => panic!("Expected array result, got {:?}", data),
-        },
+        Ok(ExecutionResult::Ok { data, .. }) => {
+            if data.len() == 1
+                && let Value::Array(arr) = &data[0]
+            {
+                return arr.clone();
+            } // FIXME: Temporary solution
+            panic!("Expected array result, got {:?}", data);
+        }
         Ok(other) => panic!("Expected Ok result, got {:?}", other),
         Err(e) => panic!("Query failed: {:?}", e),
     }
@@ -657,7 +661,7 @@ async fn test_aggregation_count_sum_avg() {
 
     match executor.execute(agg_stmt).await {
         Ok(ExecutionResult::Ok { data, .. }) => {
-            if let Value::Object(result) = data {
+            if let Some(Value::Object(result)) = data.first() {
                 // Verify count
                 if let Some(Value::Int64(count)) = result.get("count") {
                     assert_eq!(*count, expected_count as i64, "Count mismatch");
