@@ -277,8 +277,7 @@ impl StorageEngine {
             .or_insert_with(|| Arc::new(DashMap::new()));
 
         // Serialize the index key
-        let index_key = bincode::serialize(&index_values)
-            .map_err(|e| MonoError::Storage(format!("Failed to serialize index key: {e}")))?;
+        let index_key = Self::encode_composite_key(&index_values);
 
         // Check if this value already exists
         if let Some(existing_pks) = secondary_index.get(&index_key) {
@@ -369,8 +368,8 @@ impl StorageEngine {
         // Update each index
         for index in indexes {
             let index_values = self.extract_index_values(data, &index.columns)?;
-            let index_key = bincode::serialize(&index_values)
-                .map_err(|e| MonoError::Storage(format!("Failed to serialize index key: {e}")))?;
+            // Serialize index key
+            let index_key = Self::encode_composite_key(&index_values);
 
             let secondary_index = collection_indexes
                 .entry(index.name.clone())
@@ -741,8 +740,8 @@ impl StorageEngine {
         }
 
         let key = key.to_vec();
-        let serialized_value = bincode::serialize(value)
-            .map_err(|e| MonoError::Storage(format!("serialize error: {e}")))?;
+        // Serialize
+        let serialized_value = value.to_bytes();
 
         if self.config.use_lsm {
             if let Some(lsm) = self.lsm_trees.get(collection) {
@@ -837,8 +836,8 @@ impl StorageEngine {
             .unwrap_or_else(|| ObjectId::new().unwrap().to_string());
 
         let key_bytes = key.as_bytes().to_vec();
-        let value_bytes = bincode::serialize(doc)
-            .map_err(|e| MonoError::Storage(format!("Serialize error: {e}")))?;
+        // Serialize
+        let value_bytes = doc.to_bytes();
 
         if self.config.use_lsm {
             if let Some(lsm) = self.lsm_trees.get(collection) {
@@ -900,8 +899,8 @@ impl StorageEngine {
                 }
             }
             let value_to_store = MonoValue::Row(ordered_row);
-            let value_bytes = bincode::serialize(&value_to_store)
-                .map_err(|e| MonoError::Storage(format!("serialize error: {e}")))?;
+            // Serialize
+            let value_bytes = value_to_store.to_bytes();
 
             if self.config.use_lsm {
                 if let Some(lsm) = self.lsm_trees.get(collection) {
@@ -925,7 +924,7 @@ impl StorageEngine {
         }
     }
 
-    /// Persist schemas to disk atomically
+    /// Persist schemas to disk atomically using storage-format.md §3
     async fn persist_schemas(&self) -> Result<()> {
         let schemas_file = Path::new(&self.config.data_dir).join("schemas.bin");
 
@@ -935,8 +934,8 @@ impl StorageEngine {
             .map(|e| (e.key().clone(), e.value().clone()))
             .collect();
 
-        let serialized = bincode::serialize(&schemas_map)
-            .map_err(|e| MonoError::Storage(format!("schema serialization failed: {e}")))?;
+        // Serialize
+        let serialized = Self::serialize_schemas(&schemas_map)?;
 
         let tmp = schemas_file.with_extension("tmp");
         tokio::fs::write(&tmp, &serialized)
@@ -970,8 +969,8 @@ impl StorageEngine {
             .await
             .map_err(|e| MonoError::Io(e.to_string()))?;
 
-        let schemas: HashMap<String, Schema> = bincode::deserialize(&data)
-            .map_err(|e| MonoError::Parse(format!("schema deserialization failed: {e}")))?;
+        // Deserialize
+        let schemas: HashMap<String, Schema> = Self::deserialize_schemas(&data)?;
 
         let mut loaded_count = 0;
         for (name, schema) in schemas {
@@ -1266,8 +1265,9 @@ impl StorageEngine {
         let mut values: Vec<MonoValue> = Vec::with_capacity(pairs.len());
         for (k, v) in pairs {
             let key_str = String::from_utf8_lossy(&k).to_string();
-            match bincode::deserialize::<MonoValue>(&v) {
-                Ok(mut mv) => {
+            // Deserialize
+            match MonoValue::from_bytes(&v) {
+                Ok((mut mv, _bytes_read)) => {
                     if let MonoValue::Object(ref mut obj) = mv {
                         obj.insert("_key".to_string(), MonoValue::String(key_str.clone()));
                         obj.insert("key".to_string(), MonoValue::String(key_str));
@@ -1408,8 +1408,9 @@ impl StorageEngine {
 
         let mut values: Vec<MonoValue> = Vec::with_capacity(pairs.len());
         for (_k, v) in pairs {
-            match bincode::deserialize::<MonoValue>(&v) {
-                Ok(mv) => {
+            // Deserialize
+            match MonoValue::from_bytes(&v) {
+                Ok((mv, _bytes_read)) => {
                     values.push(mv);
                 }
                 Err(e) => {
@@ -1671,6 +1672,658 @@ impl StorageEngine {
         self.schemas
             .get(collection)
             .map(|entry| Arc::new(entry.clone()))
+    }
+
+    /// Encode a composite key
+    ///
+    /// CompositeKey format:
+    ///   [component_count : u8]
+    ///   [Component 0][Component 1]...[Component {component_count-1}]
+    ///
+    /// Each Component is encoded using Value::to_bytes()
+    fn encode_composite_key(values: &[MonoValue]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.push(values.len() as u8);
+        for value in values {
+            bytes.extend(value.to_bytes());
+        }
+        bytes
+    }
+
+    /// Decode a composite key
+    #[allow(dead_code)]
+    fn decode_composite_key(buf: &[u8]) -> Result<Vec<MonoValue>> {
+        if buf.is_empty() {
+            return Err(MonoError::Parse("Empty composite key buffer".into()));
+        }
+
+        let count = buf[0] as usize;
+        let mut offset = 1;
+        let mut values = Vec::with_capacity(count);
+
+        for _ in 0..count {
+            let (value, used) = MonoValue::from_bytes(&buf[offset..])?;
+            offset += used;
+            values.push(value);
+        }
+
+        Ok(values)
+    }
+
+    /// Serialize schemas
+    ///
+    /// File Layout:
+    ///   - Header (16 bytes)
+    ///   - Schema Entries ([count: u32][Schema 0][Schema 1]...)
+    ///   - Footer (8 bytes)
+    fn serialize_schemas(schemas: &HashMap<String, Schema>) -> Result<Vec<u8>> {
+        use crc32c::crc32c;
+
+        let mut bytes = Vec::new();
+
+        // §3.2 Header (16 bytes)
+        // MAGIC: 'SCHM' (0x5343484D)
+        bytes.extend(&0x5343484Du32.to_le_bytes());
+        // VERSION: u16 = 1
+        bytes.extend(&1u16.to_le_bytes());
+        // FLAGS: u16 = 0 (reserved)
+        bytes.extend(&0u16.to_le_bytes());
+        // SCHEMA_COUNT: u32
+        bytes.extend(&(schemas.len() as u32).to_le_bytes());
+        // RESERVED: u32 = 0
+        bytes.extend(&0u32.to_le_bytes());
+
+        // §3.3 Schema Entries
+        for schema in schemas.values() {
+            Self::serialize_schema_entry(&mut bytes, schema)?;
+        }
+
+        // §3.4 Footer (8 bytes)
+        // CRC32 of all preceding bytes
+        let crc = crc32c(&bytes);
+        bytes.extend(&crc.to_le_bytes());
+        // MAGIC: 'SCMF' (0x53434D46)
+        bytes.extend(&0x53434D46u32.to_le_bytes());
+
+        Ok(bytes)
+    }
+
+    /// Serialize a single schema entry according to storage-format.md §3.3
+    fn serialize_schema_entry(bytes: &mut Vec<u8>, schema: &Schema) -> Result<()> {
+        match schema {
+            Schema::Table {
+                name,
+                columns,
+                primary_key,
+                indexes,
+            } => {
+                // schema_type: u8 = 0 (Table)
+                bytes.push(0);
+                // name: String
+                Self::write_string(bytes, name);
+
+                // §3.3.1 Table Schema Payload
+                // column_count: u32
+                bytes.extend(&(columns.len() as u32).to_le_bytes());
+                // Columns
+                for col in columns {
+                    Self::serialize_column(bytes, col)?;
+                }
+                // pk_count: u32
+                bytes.extend(&(primary_key.len() as u32).to_le_bytes());
+                // pk_column_names: String (repeated)
+                for pk in primary_key {
+                    Self::write_string(bytes, pk);
+                }
+                // index_count: u32
+                bytes.extend(&(indexes.len() as u32).to_le_bytes());
+                // Indexes
+                for idx in indexes {
+                    Self::serialize_index(bytes, idx)?;
+                }
+            }
+            Schema::Collection {
+                name,
+                validation,
+                indexes,
+            } => {
+                // schema_type: u8 = 1 (Collection)
+                bytes.push(1);
+                // name: String
+                Self::write_string(bytes, name);
+
+                // §3.3.4 Collection Schema Payload
+                // has_validation: u8
+                if let Some(rule) = validation {
+                    bytes.push(1);
+                    Self::serialize_validation_rule(bytes, rule)?;
+                } else {
+                    bytes.push(0);
+                }
+                // index_count: u32
+                bytes.extend(&(indexes.len() as u32).to_le_bytes());
+                // Indexes
+                for idx in indexes {
+                    Self::serialize_index(bytes, idx)?;
+                }
+            }
+            Schema::KeySpace {
+                name,
+                ttl_enabled,
+                max_size,
+                persistence,
+            } => {
+                // schema_type: u8 = 2 (KeySpace)
+                bytes.push(2);
+                // name: String
+                Self::write_string(bytes, name);
+
+                // §3.3.6 KeySpace Schema Payload
+                // flags: u8 - bit 0: ttl_enabled, bit 1: persistent
+                let mut flags: u8 = 0;
+                if *ttl_enabled {
+                    flags |= 0b0000_0001;
+                }
+                if matches!(persistence, KeySpacePersistence::Persistent) {
+                    flags |= 0b0000_0010;
+                }
+                bytes.push(flags);
+
+                // has_max_size: u8
+                if let Some(size) = max_size {
+                    bytes.push(1);
+                    bytes.extend(&(*size as u64).to_le_bytes());
+                } else {
+                    bytes.push(0);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Serialize a column definition
+    fn serialize_column(
+        bytes: &mut Vec<u8>,
+        col: &monodb_common::schema::TableColumn,
+    ) -> Result<()> {
+        use monodb_common::ValueType;
+
+        // name: String
+        Self::write_string(bytes, &col.name);
+
+        // type: u8
+        let type_tag: u8 = match col.data_type {
+            ValueType::Null => 0,
+            ValueType::Bool => 1,
+            ValueType::Int32 => 2,
+            ValueType::Int64 => 3,
+            ValueType::Float32 => 4,
+            ValueType::Float64 => 5,
+            ValueType::String => 6,
+            ValueType::Binary => 7,
+            ValueType::DateTime => 8,
+            ValueType::Date => 9,
+            ValueType::Time => 10,
+            ValueType::Uuid => 11,
+            ValueType::ObjectId => 12,
+            ValueType::Array => 13,
+            ValueType::Object => 14,
+            ValueType::Set => 15,
+            ValueType::Row => 16,
+            ValueType::SortedSet => 17,
+            ValueType::GeoPoint => 18,
+            ValueType::Reference => 19,
+        };
+        bytes.push(type_tag);
+
+        // flags: u8 - bit 0: nullable, bit 1: is_primary, bit 2: is_unique
+        let mut flags: u8 = 0;
+        if col.nullable {
+            flags |= 0b0000_0001;
+        }
+        if col.is_primary {
+            flags |= 0b0000_0010;
+        }
+        if col.is_unique {
+            flags |= 0b0000_0100;
+        }
+        bytes.push(flags);
+
+        // has_default: u8, default: Value (if has_default == 1)
+        if let Some(default) = &col.default {
+            bytes.push(1);
+            bytes.extend(default.to_bytes());
+        } else {
+            bytes.push(0);
+        }
+
+        Ok(())
+    }
+
+    /// Serialize an index definition
+    fn serialize_index(bytes: &mut Vec<u8>, idx: &monodb_common::schema::Index) -> Result<()> {
+        use monodb_common::schema::IndexType;
+
+        // name: String
+        Self::write_string(bytes, &idx.name);
+        // column_count: u32
+        bytes.extend(&(idx.columns.len() as u32).to_le_bytes());
+        // column_names: String (repeated)
+        for col in &idx.columns {
+            Self::write_string(bytes, col);
+        }
+        // flags: u8 - bit 0: unique
+        let flags: u8 = if idx.unique { 0b0000_0001 } else { 0 };
+        bytes.push(flags);
+        // index_type: u8
+        let type_tag: u8 = match idx.index_type {
+            IndexType::BTree => 0,
+            IndexType::Hash => 1,
+            IndexType::FullText => 2,
+            IndexType::Spatial => 3,
+        };
+        bytes.push(type_tag);
+
+        Ok(())
+    }
+
+    /// Serialize a validation rule
+    fn serialize_validation_rule(
+        bytes: &mut Vec<u8>,
+        rule: &monodb_common::schema::ValidationRule,
+    ) -> Result<()> {
+        use monodb_common::schema::ValidationRule;
+
+        match rule {
+            ValidationRule::JsonSchema(schema_str) => {
+                bytes.push(0); // rule_type: 0 = JSONSchema
+                Self::write_string(bytes, schema_str);
+            }
+            ValidationRule::Custom(rule_str) => {
+                bytes.push(1); // rule_type: 1 = Custom
+                Self::write_string(bytes, rule_str);
+            }
+        }
+        Ok(())
+    }
+
+    /// Deserialize schemas
+    fn deserialize_schemas(data: &[u8]) -> Result<HashMap<String, Schema>> {
+        use crc32c::crc32c;
+
+        if data.len() < 24 {
+            // Minimum: 16 (header) + 8 (footer)
+            return Err(MonoError::Parse("Schema file too short".into()));
+        }
+
+        let mut offset = 0;
+
+        // §3.2 Header (16 bytes)
+        let magic = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+        offset += 4;
+        if magic != 0x5343484D {
+            return Err(MonoError::Parse(format!(
+                "Invalid schema magic: expected 0x5343484D, got 0x{:08X}",
+                magic
+            )));
+        }
+
+        let version = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap());
+        offset += 2;
+        if version != 1 {
+            return Err(MonoError::Parse(format!(
+                "Unsupported schema version: {}",
+                version
+            )));
+        }
+
+        let _flags = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap());
+        offset += 2;
+
+        let schema_count = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+        offset += 4;
+
+        let _reserved = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+        offset += 4;
+
+        // §3.4 Footer verification
+        let footer_start = data.len() - 8;
+        let stored_crc =
+            u32::from_le_bytes(data[footer_start..footer_start + 4].try_into().unwrap());
+        let footer_magic =
+            u32::from_le_bytes(data[footer_start + 4..footer_start + 8].try_into().unwrap());
+
+        if footer_magic != 0x53434D46 {
+            return Err(MonoError::Parse(format!(
+                "Invalid schema footer magic: expected 0x53434D46, got 0x{:08X}",
+                footer_magic
+            )));
+        }
+
+        let computed_crc = crc32c(&data[..footer_start]);
+        if computed_crc != stored_crc {
+            return Err(MonoError::Parse(format!(
+                "Schema CRC mismatch: expected 0x{:08X}, got 0x{:08X}",
+                stored_crc, computed_crc
+            )));
+        }
+
+        // §3.3 Schema Entries
+        let mut schemas = HashMap::new();
+        for _ in 0..schema_count {
+            let (schema, used) = Self::deserialize_schema_entry(&data[offset..footer_start])?;
+            offset += used;
+            let name = match &schema {
+                Schema::Table { name, .. }
+                | Schema::Collection { name, .. }
+                | Schema::KeySpace { name, .. } => name.clone(),
+            };
+            schemas.insert(name, schema);
+        }
+
+        Ok(schemas)
+    }
+
+    /// Deserialize a single schema entry
+    fn deserialize_schema_entry(data: &[u8]) -> Result<(Schema, usize)> {
+        if data.is_empty() {
+            return Err(MonoError::Parse("Empty schema entry".into()));
+        }
+
+        let mut offset = 0;
+        let schema_type = data[offset];
+        offset += 1;
+
+        let (name, used) = Self::read_string(&data[offset..])?;
+        offset += used;
+
+        let schema = match schema_type {
+            0 => {
+                // Table
+                let column_count =
+                    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+                offset += 4;
+
+                let mut columns = Vec::with_capacity(column_count);
+                for _ in 0..column_count {
+                    let (col, used) = Self::deserialize_column(&data[offset..])?;
+                    offset += used;
+                    columns.push(col);
+                }
+
+                let pk_count =
+                    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+                offset += 4;
+
+                let mut primary_key = Vec::with_capacity(pk_count);
+                for _ in 0..pk_count {
+                    let (pk, used) = Self::read_string(&data[offset..])?;
+                    offset += used;
+                    primary_key.push(pk);
+                }
+
+                let index_count =
+                    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+                offset += 4;
+
+                let mut indexes = Vec::with_capacity(index_count);
+                for _ in 0..index_count {
+                    let (idx, used) = Self::deserialize_index(&data[offset..])?;
+                    offset += used;
+                    indexes.push(idx);
+                }
+
+                Schema::Table {
+                    name,
+                    columns,
+                    primary_key,
+                    indexes,
+                }
+            }
+            1 => {
+                // Collection
+                let has_validation = data[offset];
+                offset += 1;
+
+                let validation = if has_validation == 1 {
+                    let (rule, used) = Self::deserialize_validation_rule(&data[offset..])?;
+                    offset += used;
+                    Some(rule)
+                } else {
+                    None
+                };
+
+                let index_count =
+                    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+                offset += 4;
+
+                let mut indexes = Vec::with_capacity(index_count);
+                for _ in 0..index_count {
+                    let (idx, used) = Self::deserialize_index(&data[offset..])?;
+                    offset += used;
+                    indexes.push(idx);
+                }
+
+                Schema::Collection {
+                    name,
+                    validation,
+                    indexes,
+                }
+            }
+            2 => {
+                // KeySpace
+                let flags = data[offset];
+                offset += 1;
+
+                let ttl_enabled = (flags & 0b0000_0001) != 0;
+                let is_persistent = (flags & 0b0000_0010) != 0;
+
+                let has_max_size = data[offset];
+                offset += 1;
+
+                let max_size = if has_max_size == 1 {
+                    let size = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
+                    offset += 8;
+                    Some(size as usize)
+                } else {
+                    None
+                };
+
+                let persistence = if is_persistent {
+                    KeySpacePersistence::Persistent
+                } else {
+                    KeySpacePersistence::Memory
+                };
+
+                Schema::KeySpace {
+                    name,
+                    ttl_enabled,
+                    max_size,
+                    persistence,
+                }
+            }
+            _ => {
+                return Err(MonoError::Parse(format!(
+                    "Unknown schema type: {}",
+                    schema_type
+                )));
+            }
+        };
+
+        Ok((schema, offset))
+    }
+
+    /// Deserialize a column definition
+    fn deserialize_column(data: &[u8]) -> Result<(monodb_common::schema::TableColumn, usize)> {
+        use monodb_common::ValueType;
+
+        let mut offset = 0;
+
+        let (name, used) = Self::read_string(&data[offset..])?;
+        offset += used;
+
+        let type_tag = data[offset];
+        offset += 1;
+
+        let data_type = match type_tag {
+            0 => ValueType::Null,
+            1 => ValueType::Bool,
+            2 => ValueType::Int32,
+            3 => ValueType::Int64,
+            4 => ValueType::Float32,
+            5 => ValueType::Float64,
+            6 => ValueType::String,
+            7 => ValueType::Binary,
+            8 => ValueType::DateTime,
+            9 => ValueType::Date,
+            10 => ValueType::Time,
+            11 => ValueType::Uuid,
+            12 => ValueType::ObjectId,
+            13 => ValueType::Array,
+            14 => ValueType::Object,
+            15 => ValueType::Set,
+            16 => ValueType::Row,
+            17 => ValueType::SortedSet,
+            18 => ValueType::GeoPoint,
+            19 => ValueType::Reference,
+            _ => {
+                return Err(MonoError::Parse(format!(
+                    "Unknown value type: {}",
+                    type_tag
+                )));
+            }
+        };
+
+        let flags = data[offset];
+        offset += 1;
+
+        let nullable = (flags & 0b0000_0001) != 0;
+        let is_primary = (flags & 0b0000_0010) != 0;
+        let is_unique = (flags & 0b0000_0100) != 0;
+
+        let has_default = data[offset];
+        offset += 1;
+
+        let default = if has_default == 1 {
+            let (val, used) = MonoValue::from_bytes(&data[offset..])?;
+            offset += used;
+            Some(val)
+        } else {
+            None
+        };
+
+        Ok((
+            monodb_common::schema::TableColumn {
+                name,
+                data_type,
+                nullable,
+                default,
+                is_primary,
+                is_unique,
+            },
+            offset,
+        ))
+    }
+
+    /// Deserialize an index definition
+    fn deserialize_index(data: &[u8]) -> Result<(monodb_common::schema::Index, usize)> {
+        use monodb_common::schema::IndexType;
+
+        let mut offset = 0;
+
+        let (name, used) = Self::read_string(&data[offset..])?;
+        offset += used;
+
+        let column_count =
+            u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4;
+
+        let mut columns = Vec::with_capacity(column_count);
+        for _ in 0..column_count {
+            let (col, used) = Self::read_string(&data[offset..])?;
+            offset += used;
+            columns.push(col);
+        }
+
+        let flags = data[offset];
+        offset += 1;
+        let unique = (flags & 0b0000_0001) != 0;
+
+        let type_tag = data[offset];
+        offset += 1;
+
+        let index_type = match type_tag {
+            0 => IndexType::BTree,
+            1 => IndexType::Hash,
+            2 => IndexType::FullText,
+            3 => IndexType::Spatial,
+            _ => {
+                return Err(MonoError::Parse(format!(
+                    "Unknown index type: {}",
+                    type_tag
+                )));
+            }
+        };
+
+        Ok((
+            monodb_common::schema::Index {
+                name,
+                columns,
+                unique,
+                index_type,
+            },
+            offset,
+        ))
+    }
+
+    /// Deserialize a validation rule
+    fn deserialize_validation_rule(
+        data: &[u8],
+    ) -> Result<(monodb_common::schema::ValidationRule, usize)> {
+        use monodb_common::schema::ValidationRule;
+
+        let mut offset = 0;
+        let rule_type = data[offset];
+        offset += 1;
+
+        let (rule_data, used) = Self::read_string(&data[offset..])?;
+        offset += used;
+
+        let rule = match rule_type {
+            0 => ValidationRule::JsonSchema(rule_data),
+            1 => ValidationRule::Custom(rule_data),
+            _ => {
+                return Err(MonoError::Parse(format!(
+                    "Unknown validation rule type: {}",
+                    rule_type
+                )));
+            }
+        };
+
+        Ok((rule, offset))
+    }
+
+    /// Helper to write a string in our format: [len: u32][UTF-8 bytes]
+    fn write_string(bytes: &mut Vec<u8>, s: &str) {
+        let b = s.as_bytes();
+        bytes.extend(&(b.len() as u32).to_le_bytes());
+        bytes.extend(b);
+    }
+
+    /// Helper to read a string in our format: [len: u32][UTF-8 bytes]
+    fn read_string(data: &[u8]) -> Result<(String, usize)> {
+        if data.len() < 4 {
+            return Err(MonoError::Parse(
+                "Buffer too short for string length".into(),
+            ));
+        }
+        let len = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+        if data.len() < 4 + len {
+            return Err(MonoError::Parse("Buffer too short for string data".into()));
+        }
+        let s = std::str::from_utf8(&data[4..4 + len])
+            .map_err(|e| MonoError::Parse(format!("Invalid UTF-8: {}", e)))?;
+        Ok((s.to_owned(), 4 + len))
     }
 
     /// Generate the next sequential integer value for a given table column.

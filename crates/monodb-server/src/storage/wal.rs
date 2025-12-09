@@ -33,6 +33,7 @@ const MAX_STANDARD_VALUE_LEN: usize = 65_534;
 // Flags
 
 /// Value payload is LZ4 compressed
+#[allow(dead_code)]
 const FLAG_COMPRESSED: u16 = 0b0000_0001;
 /// Last entry in a batch (safe sync point)
 const FLAG_BATCH_END: u16 = 0b0000_0010;
@@ -73,10 +74,12 @@ impl From<u8> for WalEntryType {
 #[derive(Debug, Clone)]
 pub struct WalEntry {
     pub sequence: u64,
+    #[allow(dead_code)]
     pub timestamp: u64,
     pub entry_type: WalEntryType,
     pub key: Vec<u8>,
     pub value: Vec<u8>,
+    #[allow(dead_code)]
     pub flags: u16,
 }
 
@@ -368,6 +371,7 @@ pub struct Wal {
 
 impl Wal {
     /// Create a new WAL with default configuration
+    #[allow(dead_code)]
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
         Self::with_config(path, WalConfig::default())
     }
@@ -477,11 +481,8 @@ impl Wal {
                                 .as_secs();
                             let archive = path_bg.with_extension(format!("wal.{}", ts));
                             let _ = std::fs::rename(&path_bg, &archive);
-                            if let Ok(f) = OpenOptions::new()
-                                .create(true)
-                                .write(true)
-                                .append(true)
-                                .open(&path_bg)
+                            if let Ok(f) =
+                                OpenOptions::new().create(true).append(true).open(&path_bg)
                             {
                                 writer = BufWriter::with_capacity(buffer_size, f);
                                 current_size_bg = 0;
@@ -506,19 +507,17 @@ impl Wal {
 
                         if sync_on_write {
                             let mut do_sync = per_write_sync;
-                            if !do_sync {
-                                if let Some(threshold) = sync_every_bytes {
-                                    if pending_bytes >= threshold {
-                                        do_sync = true;
-                                    }
-                                }
+                            if !do_sync
+                                && let Some(threshold) = sync_every_bytes
+                                && pending_bytes >= threshold
+                            {
+                                do_sync = true;
                             }
-                            if !do_sync {
-                                if let Some(iv) = sync_interval_ms.map(Duration::from_millis) {
-                                    if last_sync.elapsed() >= iv {
-                                        do_sync = true;
-                                    }
-                                }
+                            if !do_sync
+                                && let Some(iv) = sync_interval_ms.map(Duration::from_millis)
+                                && last_sync.elapsed() >= iv
+                            {
+                                do_sync = true;
                             }
                             if do_sync {
                                 let _ = writer.flush();
@@ -609,19 +608,17 @@ impl Wal {
             self.bytes_since_sync += buf.len() as u64;
             let mut do_sync = self.sync_every_bytes.is_none() && self.sync_interval.is_none();
 
-            if !do_sync {
-                if let Some(threshold) = self.sync_every_bytes {
-                    if self.bytes_since_sync >= threshold {
-                        do_sync = true;
-                    }
-                }
+            if !do_sync
+                && let Some(threshold) = self.sync_every_bytes
+                && self.bytes_since_sync >= threshold
+            {
+                do_sync = true;
             }
-            if !do_sync {
-                if let Some(iv) = self.sync_interval {
-                    if self.last_sync.elapsed() >= iv {
-                        do_sync = true;
-                    }
-                }
+            if !do_sync
+                && let Some(iv) = self.sync_interval
+                && self.last_sync.elapsed() >= iv
+            {
+                do_sync = true;
             }
 
             if do_sync {
@@ -805,7 +802,6 @@ impl Wal {
 
         let file = OpenOptions::new()
             .create(true)
-            .write(true)
             .append(true)
             .open(&self.file_path)?;
 
@@ -975,7 +971,6 @@ impl Wal {
 
         let file = OpenOptions::new()
             .create(true)
-            .write(true)
             .append(true)
             .open(&self.file_path)?;
 
@@ -998,6 +993,7 @@ impl Wal {
     }
 
     /// Get the last checkpoint information
+    #[allow(dead_code)]
     pub fn last_checkpoint(&self) -> Option<&CheckpointInfo> {
         self.last_checkpoint.as_ref()
     }

@@ -148,6 +148,7 @@ def build_gui(c, release=False):
 @invoke.task
 def dev_gui(c):
     """Run GUI in development mode."""
+    deps(c)
     print(f"{colorama.Fore.GREEN}▸{colorama.Style.RESET_ALL} Starting GUI in dev mode...")
     run_cmd(c, "yarn tauri dev", cwd=GUI_DIR)
 

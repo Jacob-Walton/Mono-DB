@@ -24,6 +24,7 @@ uuid.workspace = true
 monodb-common = { path = "../monodb-common" }
 serde = { workspace = true, features = ["derive"] }
 chrono = { workspace = true, features = ["serde"] }
+crc32c = "0.6.8"
 crc32fast = "1.5.0"
 xxhash-rust = { version = "0.8.15", features = ["xxh64"] }
 murmur3 = "0.5.2"
