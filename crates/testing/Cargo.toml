@@ -1,6 +1,6 @@
 [package]
 name = "testing"
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -16,5 +16,5 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 bytes.workspace = true
-annotate-snippets = "0.12.8"
-indexmap = "2.12.1"
+indexmap.workspace = true
+annotate-snippets.workspace = true

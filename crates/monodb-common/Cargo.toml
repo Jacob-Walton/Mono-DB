@@ -12,7 +12,6 @@ crate-type = ["rlib"] # Define as rust-lib only (no FFI)
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-bincode.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 hex.workspace = true
@@ -22,7 +21,7 @@ tokio.workspace = true
 thiserror = "2.0.17"
 # For quick hashes (similar to Git)
 sha1 = "0.10.6"
-indexmap = { version = "2.11.4", features = ["serde"] }
+indexmap.workspace = true
 base64 = "0.22.1"
 bytes.workspace = true
 rkyv = "0.8.12"
