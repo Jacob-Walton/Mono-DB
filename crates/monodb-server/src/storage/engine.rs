@@ -865,7 +865,12 @@ impl StorageEngine {
         row: &HashMap<String, MonoValue>,
     ) -> Result<Vec<u8>> {
         let schema = self.schemas.get(collection).unwrap();
-        if let Schema::Table { primary_key, columns, .. } = schema.value() {
+        if let Schema::Table {
+            primary_key,
+            columns,
+            ..
+        } = schema.value()
+        {
             // Validation already done in insert() method
 
             if primary_key.is_empty() {
@@ -1490,15 +1495,11 @@ impl StorageEngine {
                     std::cmp::Ordering::Less | std::cmp::Ordering::Equal
                 )
             }),
-            F::Contains(field, v) => {
-                Self::get_field(row, field).is_some_and(|x| match x {
-                    MonoValue::Array(a) => a.iter().any(|e| e == v),
-                    MonoValue::String(s) => {
-                        v.as_string().map(|pat| s.contains(pat)).unwrap_or(false)
-                    }
-                    other => other.to_string().contains(&v.to_string()),
-                })
-            }
+            F::Contains(field, v) => Self::get_field(row, field).is_some_and(|x| match x {
+                MonoValue::Array(a) => a.iter().any(|e| e == v),
+                MonoValue::String(s) => v.as_string().map(|pat| s.contains(pat)).unwrap_or(false),
+                other => other.to_string().contains(&v.to_string()),
+            }),
             F::And(list) => list.iter().all(|f| self.apply_filter(row, f)),
             F::Or(list) => list.iter().any(|f| self.apply_filter(row, f)),
         }
