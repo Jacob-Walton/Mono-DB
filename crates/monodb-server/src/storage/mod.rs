@@ -7,5 +7,8 @@ mod models;
 mod page;
 mod wal;
 
+#[cfg(test)]
+mod buffer_pool_tests;
+
 // Export models at module root for easier access
 pub use models::*;

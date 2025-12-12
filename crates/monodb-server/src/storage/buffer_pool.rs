@@ -2,7 +2,10 @@ use monodb_common::{MonoError, Result};
 use parking_lot::{Mutex, RwLock};
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{Arc, atomic::{AtomicU64, Ordering}},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use crate::storage::{
@@ -157,13 +160,13 @@ impl BufferPool {
     }
 
     /// Fetch a page from the buffer pool, loading from disk if necessary.
-    /// 
+    ///
     /// The returned page is pinned and must be unpinned when done.
     /// Each fetch records an access timestamp for LRU-K tracking.
-    /// 
+    ///
     /// # Arguments
     /// * `page_id` - ID of the page to fetch
-    /// 
+    ///
     /// # Returns
     /// An Arc to the page wrapped in RwLock
     pub fn fetch_page(&self, page_id: PageId) -> Result<Arc<RwLock<Page>>> {
@@ -290,21 +293,19 @@ impl BufferPool {
             let frame = self.frames[frame_idx].clone();
             let frame_guard = frame.write();
 
-            if frame_guard.is_dirty {
-                if let Some(page) = &frame_guard.page {
-                    let page_arc = Arc::clone(page);
-                    drop(frame_guard);
+            if frame_guard.is_dirty && frame_guard.page.is_some() {
+                let page_arc = Arc::clone(frame_guard.page.as_ref().unwrap());
+                drop(frame_guard);
 
-                    let page_guard = page_arc.read();
-                    self.disk_manager.write_page(&page_guard)?;
-                    drop(page_guard);
+                let page_guard = page_arc.read();
+                self.disk_manager.write_page(&page_guard)?;
+                drop(page_guard);
 
-                    let mut frame_guard = frame.write();
-                    frame_guard.is_dirty = false;
+                let mut frame_guard = frame.write();
+                frame_guard.is_dirty = false;
 
-                    #[cfg(debug_assertions)]
-                    tracing::trace!("Flushed page {} to disk", page_id.0);
-                }
+                #[cfg(debug_assertions)]
+                tracing::trace!("Flushed page {} to disk", page_id.0);
             }
         }
 
@@ -320,19 +321,17 @@ impl BufferPool {
             let frame = self.frames[frame_idx].clone();
             let frame_guard = frame.write();
 
-            if frame_guard.is_dirty {
-                if let Some(page) = &frame_guard.page {
-                    let page_arc = Arc::clone(page);
-                    drop(frame_guard);
+            if frame_guard.is_dirty && frame_guard.page.is_some() {
+                let page_arc = Arc::clone(frame_guard.page.as_ref().unwrap());
+                drop(frame_guard);
 
-                    let page_guard = page_arc.read();
-                    self.disk_manager.write_page(&page_guard)?;
-                    drop(page_guard);
+                let page_guard = page_arc.read();
+                self.disk_manager.write_page(&page_guard)?;
+                drop(page_guard);
 
-                    let mut frame_guard = frame.write();
-                    frame_guard.is_dirty = false;
-                    flushed += 1;
-                }
+                let mut frame_guard = frame.write();
+                frame_guard.is_dirty = false;
+                flushed += 1;
             }
         }
 
@@ -381,7 +380,8 @@ impl BufferPool {
         #[cfg(debug_assertions)]
         tracing::trace!(
             "Loaded page {} from disk into frame {}",
-            page_id.0, frame_idx
+            page_id.0,
+            frame_idx
         );
 
         Ok(page_arc)
@@ -438,9 +438,8 @@ impl BufferPool {
         }
 
         // If no victim found, all pages are pinned
-        let frame_idx = victim_idx.ok_or_else(|| {
-            MonoError::Storage("buffer pool full: all pages are pinned".into())
-        })?;
+        let frame_idx = victim_idx
+            .ok_or_else(|| MonoError::Storage("buffer pool full: all pages are pinned".into()))?;
 
         // Evict the victim
         let frame = self.frames[frame_idx].clone();
