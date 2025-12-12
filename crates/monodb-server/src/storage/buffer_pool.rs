@@ -293,8 +293,10 @@ impl BufferPool {
             let frame = self.frames[frame_idx].clone();
             let frame_guard = frame.write();
 
-            if frame_guard.is_dirty && frame_guard.page.is_some() {
-                let page_arc = Arc::clone(frame_guard.page.as_ref().unwrap());
+            if frame_guard.is_dirty
+                && let Some(page_arc) = frame_guard.page.as_ref()
+            {
+                let page_arc = Arc::clone(page_arc);
                 drop(frame_guard);
 
                 let page_guard = page_arc.read();
@@ -321,8 +323,10 @@ impl BufferPool {
             let frame = self.frames[frame_idx].clone();
             let frame_guard = frame.write();
 
-            if frame_guard.is_dirty && frame_guard.page.is_some() {
-                let page_arc = Arc::clone(frame_guard.page.as_ref().unwrap());
+            if frame_guard.is_dirty
+                && let Some(page_arc) = frame_guard.page.as_ref()
+            {
+                let page_arc = Arc::clone(page_arc);
                 drop(frame_guard);
 
                 let page_guard = page_arc.read();
