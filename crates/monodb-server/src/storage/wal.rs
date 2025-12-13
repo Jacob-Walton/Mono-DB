@@ -1,3 +1,4 @@
+use crossbeam_channel::{RecvTimeoutError, Sender, unbounded};
 use monodb_common::{MonoError, Result};
 use std::{
     fs::{File, OpenOptions},
@@ -10,7 +11,6 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use crossbeam_channel::{Sender, RecvTimeoutError, unbounded};
 
 use serde::{Deserialize, Serialize};
 
@@ -352,19 +352,23 @@ fn find_next_magic(buffer: &[u8], cursor: &mut usize) -> bool {
 /// This can be shared across threads without any synchronization.
 #[derive(Clone)]
 pub struct WalAsyncHandle {
+    #[allow(dead_code)]
     sequence_number: Arc<AtomicU64>,
+    #[allow(dead_code)]
     tx: Sender<Vec<u8>>,
 }
 
 impl WalAsyncHandle {
     /// Append an insert entry to the WAL without any locks.
     #[inline]
+    #[allow(dead_code)]
     pub fn append(&self, key: &[u8], value: &[u8]) -> Result<u64> {
         self.append_with_type(key, value, WalEntryType::Insert)
     }
 
     /// Append an entry with a specific type without any locks.
     #[inline]
+    #[allow(dead_code)]
     pub fn append_with_type(
         &self,
         key: &[u8],

@@ -9,11 +9,11 @@ use monodb_common::{
     MonoError, Result,
     protocol::{ProtocolCodec, Request, Response},
 };
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
-use tokio::sync::OwnedSemaphorePermit;
 
 /// Represents a connection to the server.
 ///
