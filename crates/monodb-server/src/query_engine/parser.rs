@@ -311,6 +311,9 @@ impl<'a> Parser<'a> {
                     || self.check_keyword("change")
                     || self.check_keyword("remove")
                     || self.check_keyword("make")
+                    || self.check_keyword("begin")
+                    || self.check_keyword("commit")
+                    || self.check_keyword("rollback")
                 {
                     return;
                 }
@@ -361,6 +364,15 @@ impl<'a> Parser<'a> {
                     self.parse_remove()
                 } else if self.check_keyword("make") {
                     self.parse_make()
+                } else if self.check_keyword("begin") {
+                    self.advance(); // consume 'begin'
+                    Ok(Statement::Begin)
+                } else if self.check_keyword("commit") {
+                    self.advance(); // consume 'commit'
+                    Ok(Statement::Commit)
+                } else if self.check_keyword("rollback") {
+                    self.advance(); // consume 'rollback'
+                    Ok(Statement::Rollback)
                 } else {
                     Err(self
                         .error("unexpected keyword at statement level")

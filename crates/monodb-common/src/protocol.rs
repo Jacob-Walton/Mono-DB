@@ -477,7 +477,7 @@ impl ProtocolCodec {
                             commit_timestamp,
                             row_count,
                         } => {
-                            const VALID_TYPES: [&str; 3] = ["array", "object", "row"];
+                            const VALID_TYPES: [&str; 4] = ["array", "object", "row", "string"];
 
                             body.put_u8(0); // Tag
                             body.put_u32_le(data.len() as u32);

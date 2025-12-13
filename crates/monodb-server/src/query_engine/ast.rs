@@ -91,6 +91,10 @@ pub enum Statement {
         variable: String,
         statement: Box<Statement>,
     },
+    // Transaction control statements (MVCC)
+    Begin,
+    Commit,
+    Rollback,
 }
 
 /// Conditional operation types

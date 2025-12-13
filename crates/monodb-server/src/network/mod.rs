@@ -36,6 +36,9 @@ pub async fn handle_connection(
     let session_id = session.id;
     sessions.insert(session_id, session);
 
+    // Create executor once per session to persist transaction state
+    let mut executor = QueryExecutor::new(storage_engine.clone());
+
     let mut buffer = BytesMut::new();
 
     loop {
@@ -50,7 +53,7 @@ pub async fn handle_connection(
                             #[cfg(debug_assertions)]
                             tracing::debug!("Received request: {:?}", request);
 
-                            match handle_request(storage_engine.clone(), request, session_id).await {
+                            match handle_request(&mut executor, request, session_id).await {
                                 Ok(response) => {
                                     let response_bytes = ProtocolCodec::encode_response(&response)?;
                                     if let Err(e) = stream.write_all(&response_bytes).await {
@@ -104,7 +107,7 @@ pub async fn handle_connection(
 }
 
 async fn handle_request(
-    storage_engine: Arc<StorageEngine>,
+    executor: &mut QueryExecutor,
     request: Request,
     _session_id: u64,
 ) -> Result<Response> {
@@ -144,8 +147,6 @@ async fn handle_request(
             let _start = std::time::Instant::now();
 
             let parse_result = parse(query.to_string());
-
-            let mut executor = QueryExecutor::new(storage_engine.clone());
 
             match parse_result {
                 Ok(statements) => {
@@ -220,7 +221,7 @@ async fn handle_request(
         Request::CommitTx { .. } => todo!(),
         Request::RollbackTx { .. } => todo!(),
         Request::List { .. } => {
-            let schemas = storage_engine.schemas();
+            let schemas = executor.storage().schemas();
 
             let tables: Vec<Value> = schemas
                 .iter()
@@ -273,5 +274,6 @@ fn error_to_code(error: &MonoError) -> ErrorCode {
         MonoError::Config(_) => ErrorCode::InternalError,
         MonoError::Execution(_) => ErrorCode::ExecutionError,
         MonoError::InvalidOperation(_) => ErrorCode::ExecutionError,
+        MonoError::WriteConflict(_) => ErrorCode::TransactionError,
     }
 }

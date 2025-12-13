@@ -50,9 +50,9 @@ page_size = 16384
 
 [storage.lsm]
 # Memory table size (bytes) before flushing to disk.
-# Larger values reduce I/O (fewer flushes) but use more RAM.
-# On small machines, reduce to 64-128 MiB.
-memtable_size = 536870912  # 512 MiB
+# Smaller values = more frequent flushes = smaller WAL
+# Larger values = fewer flushes = better write throughput
+memtable_size = 33554432  # 32 MiB
 
 # Number of level-0 files that trigger compaction.
 # Higher values reduce compaction frequency when memtables are large.
@@ -60,7 +60,7 @@ level0_file_num_compaction_trigger = 8
 
 # Maximum total size for level 0 (bytes).
 # Keep close to memtable_size.
-level0_size = 536870912  # 512 MiB
+level0_size = 67108864  # 64 MiB (2x memtable_size)
 
 # Size multiplier between levels
 # Default: 10

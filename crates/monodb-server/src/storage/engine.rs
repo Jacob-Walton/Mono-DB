@@ -31,6 +31,8 @@ pub struct StorageEngine {
     memory_keyspaces: Arc<DashMap<String, Arc<DashMap<String, MonoValue>>>>,
     secondary_indexes: Arc<DashMap<String, DashMap<String, Arc<IndexEntry>>>>,
     config: StorageConfig,
+    /// Transaction manager for MVCC (relational tables only)
+    tx_manager: Arc<TransactionManager>,
 }
 
 impl StorageEngine {
@@ -46,6 +48,7 @@ impl StorageEngine {
             memory_keyspaces: Arc::new(DashMap::new()),
             secondary_indexes: Arc::new(DashMap::new()),
             config,
+            tx_manager: Arc::new(TransactionManager::new()),
         });
 
         // Load persisted schemas
@@ -554,6 +557,125 @@ impl StorageEngine {
         Ok(())
     }
 
+    /// Get the transaction manager for MVCC operations
+    pub fn tx_manager(&self) -> &TransactionManager {
+        &self.tx_manager
+    }
+
+    // MVCC Visibility and Conflict Detection
+
+    /// Check if a version (identified by version_ts) is visible to the given transaction.
+    /// version_ts is the tx_id of the transaction that created this version.
+    pub fn is_version_visible(&self, version_ts: u64, reading_tx: &Transaction) -> bool {
+        // Check if this is our own write
+        if version_ts == reading_tx.tx_id {
+            return true;
+        }
+
+        // Look up the creating transaction
+        if let Some(creator_tx) = self.tx_manager.get(version_ts) {
+            match creator_tx.status {
+                TxStatus::Committed => {
+                    // Visible if committed before our snapshot started
+                    if let Some(commit_ts) = creator_tx.commit_ts {
+                        commit_ts <= reading_tx.start_ts
+                    } else {
+                        false // Shouldn't happen for committed tx
+                    }
+                }
+                TxStatus::Active => {
+                    // Only visible if it's our own transaction (checked above)
+                    false
+                }
+                TxStatus::Aborted => false,
+            }
+        } else {
+            // Transaction not in manager, assume it's an old committed transaction
+            // whose entry was cleaned up. The version_ts IS the commit_ts in this case.
+            version_ts <= reading_tx.start_ts
+        }
+    }
+
+    /// Check if a version is visible when there's no active transaction (auto-commit mode).
+    /// In this case, we see all committed versions.
+    pub fn is_version_visible_no_tx(&self, version_ts: u64) -> bool {
+        if let Some(creator_tx) = self.tx_manager.get(version_ts) {
+            creator_tx.status == TxStatus::Committed
+        } else {
+            // Old committed transaction, always visible
+            true
+        }
+    }
+
+    /// Check for write-write conflicts on a primary key.
+    /// Returns error if another transaction has written to this key after our start_ts.
+    pub async fn check_write_conflict(
+        &self,
+        collection: &str,
+        pk: &[u8],
+        current_tx: &Transaction,
+    ) -> Result<()> {
+        // Scan for all versions of this key
+        let prefix = pk.to_vec();
+        let mut scan_end = prefix.clone();
+        scan_end.push(0xFF); // Scan all versions of this PK
+
+        let versions = if self.config.use_lsm {
+            if let Some(lsm) = self.lsm_trees.get(collection) {
+                lsm.scan(&prefix, &scan_end).await?
+            } else {
+                return Ok(()); // Collection doesn't exist, no conflict
+            }
+        } else if let Some(btree) = self.btrees.get(collection) {
+            btree.scan(&prefix, &scan_end).await?
+        } else {
+            return Ok(());
+        };
+
+        for (key, _value) in versions {
+            if let Some((decoded_pk, version_ts)) = decode_versioned_key(&key) {
+                // Only check versions of the same primary key
+                if decoded_pk != pk {
+                    continue;
+                }
+
+                // Skip our own writes
+                if version_ts == current_tx.tx_id {
+                    continue;
+                }
+
+                if let Some(other_tx) = self.tx_manager.get(version_ts) {
+                    match other_tx.status {
+                        TxStatus::Active => {
+                            // Another active transaction is writing to this row
+                            return Err(MonoError::WriteConflict(format!(
+                                "Row is locked by active transaction {}",
+                                other_tx.tx_id
+                            )));
+                        }
+                        TxStatus::Committed => {
+                            // Check if committed after our start
+                            if let Some(commit_ts) = other_tx.commit_ts {
+                                if commit_ts > current_tx.start_ts {
+                                    return Err(MonoError::WriteConflict(format!(
+                                        "Row was modified by transaction {} after our start",
+                                        other_tx.tx_id
+                                    )));
+                                }
+                            }
+                        }
+                        TxStatus::Aborted => {
+                            // Ignore aborted transactions
+                        }
+                    }
+                }
+                // If transaction not found in manager, it's old and committed before us
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn create_collection(&self, schema: Schema) -> Result<()> {
         let collection_name = match &schema {
             Schema::Table { name, .. }
@@ -717,6 +839,248 @@ impl StorageEngine {
             .await?;
 
         Ok(())
+    }
+
+    /// Insert with MVCC transaction support (for relational tables only).
+    /// If tx is Some, uses versioned keys and conflict detection.
+    /// If tx is None, auto-commits immediately (like current behavior).
+    pub async fn insert_with_tx(
+        &self,
+        collection_name: &str,
+        data: &Data<'_>,
+        tx: Option<&Transaction>,
+    ) -> Result<()> {
+        // Validate data against schema
+        self.validate_data(collection_name, data)?;
+
+        let schema = self.schemas.get(collection_name).ok_or_else(|| {
+            MonoError::NotFound(format!("Collection '{collection_name}' not found"))
+        })?;
+
+        // Only use MVCC for relational tables with an active transaction
+        let use_mvcc = tx.is_some() && matches!(schema.value(), Schema::Table { .. });
+
+        if use_mvcc {
+            let tx = tx.unwrap();
+            // For relational tables with transaction: use versioned insert
+            if let (Schema::Table { .. }, Data::Row(row)) = (schema.value(), data) {
+                let primary_key = self.insert_row_versioned(collection_name, row, tx).await?;
+
+                // Update secondary indexes (TODO: make these versioned too)
+                self.update_secondary_indexes(collection_name, data, &primary_key)
+                    .await?;
+
+                return Ok(());
+            }
+        }
+
+        // Check uniqueness constraints (skip for MVCC as conflict detection handles it)
+        if !use_mvcc {
+            self.check_uniqueness_constraints(collection_name, data, None)
+                .await?;
+        }
+
+        // Fall back to non-versioned insert for non-relational or auto-commit
+        let primary_key = match (schema.value(), data) {
+            (Schema::KeySpace { .. }, Data::KeyValue { key, value }) => {
+                let value_typed = MonoValue::Binary(value.to_vec());
+                self.insert_kv_typed(collection_name, key, &value_typed)
+                    .await?;
+                key.to_vec()
+            }
+            (Schema::Collection { .. }, Data::Document(doc)) => {
+                self.insert_document(collection_name, doc).await?
+            }
+            (Schema::Table { .. }, Data::Row(row)) => {
+                // Auto-commit: use current timestamp from tx_manager
+                let auto_ts = self.tx_manager.next_timestamp();
+                self.insert_row_with_version(collection_name, row, auto_ts).await?
+            }
+            (Schema::KeySpace { .. }, Data::Row(row)) => {
+                let key = row.get("key").ok_or_else(|| {
+                    MonoError::InvalidOperation("Keyspace requires 'key' field".to_string())
+                })?;
+                let value = row.get("value").ok_or_else(|| {
+                    MonoError::InvalidOperation("Keyspace requires 'value' field".to_string())
+                })?;
+
+                let key_str = match key {
+                    MonoValue::String(s) => s.clone(),
+                    _ => key.to_string(),
+                };
+
+                self.insert_kv_typed(collection_name, key_str.as_bytes(), value)
+                    .await?;
+                key_str.as_bytes().to_vec()
+            }
+            (Schema::Collection { .. }, Data::Row(row)) => {
+                let doc_map: BTreeMap<String, MonoValue> =
+                    row.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+
+                let document = MonoValue::Object(doc_map);
+
+                self.insert_document(collection_name, &document).await?
+            }
+            (schema, data) => {
+                return Err(MonoError::TypeError {
+                    expected: "matching data for collection type".to_string(),
+                    actual: format!("collection type {schema:?}, data type {data:?}"),
+                });
+            }
+        };
+
+        // Update secondary indexes
+        self.update_secondary_indexes(collection_name, data, &primary_key)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Insert a row with a specific version timestamp (for auto-commit or MVCC).
+    async fn insert_row_with_version(
+        &self,
+        collection: &str,
+        row: &HashMap<String, MonoValue>,
+        version_ts: u64,
+    ) -> Result<Vec<u8>> {
+        let schema = self.schemas.get(collection).unwrap();
+        if let Schema::Table {
+            primary_key,
+            columns,
+            ..
+        } = schema.value()
+        {
+            if primary_key.is_empty() {
+                return Err(MonoError::InvalidOperation(format!(
+                    "table '{collection}' has no primary key defined"
+                )));
+            }
+
+            // Build the base primary key
+            let mut pk_values = Vec::new();
+            for pk_field in primary_key {
+                let value = row.get(pk_field);
+                if let Some(v) = value {
+                    pk_values.push(v.to_string());
+                } else {
+                    return Err(MonoError::InvalidOperation(format!(
+                        "primary key '{pk_field}' does not exist in '{collection}'"
+                    )));
+                }
+            }
+            let base_pk = pk_values.join(":").as_bytes().to_vec();
+
+            // Create versioned key
+            let versioned_key = encode_versioned_key(&base_pk, version_ts);
+
+            // Build ordered row value
+            let mut ordered_row: IndexMap<String, MonoValue> = IndexMap::new();
+            for col in columns {
+                if let Some(value) = row.get(&col.name) {
+                    ordered_row.insert(col.name.clone(), value.clone());
+                }
+            }
+            let value_to_store = MonoValue::Row(ordered_row);
+            let value_bytes = value_to_store.to_bytes();
+
+            // Store with versioned key
+            if self.config.use_lsm {
+                if let Some(lsm) = self.lsm_trees.get(collection) {
+                    lsm.put(versioned_key, value_bytes).await?;
+                } else {
+                    return Err(MonoError::NotFound(format!(
+                        "collection '{collection}' not found"
+                    )));
+                }
+            } else if let Some(btree) = self.btrees.get(collection) {
+                btree.insert(&versioned_key, &value_bytes).await?;
+            } else {
+                return Err(MonoError::NotFound(format!(
+                    "collection '{collection}' not found"
+                )));
+            }
+
+            Ok(base_pk)
+        } else {
+            unreachable!()
+        }
+    }
+
+    /// Insert a row within a transaction (MVCC).
+    /// Uses tx_id as version, checks for conflicts.
+    async fn insert_row_versioned(
+        &self,
+        collection: &str,
+        row: &HashMap<String, MonoValue>,
+        tx: &Transaction,
+    ) -> Result<Vec<u8>> {
+        let schema = self.schemas.get(collection).unwrap();
+        if let Schema::Table {
+            primary_key,
+            columns,
+            ..
+        } = schema.value()
+        {
+            if primary_key.is_empty() {
+                return Err(MonoError::InvalidOperation(format!(
+                    "table '{collection}' has no primary key defined"
+                )));
+            }
+
+            // Build the base primary key
+            let mut pk_values = Vec::new();
+            for pk_field in primary_key {
+                let value = row.get(pk_field);
+                if let Some(v) = value {
+                    pk_values.push(v.to_string());
+                } else {
+                    return Err(MonoError::InvalidOperation(format!(
+                        "primary key '{pk_field}' does not exist in '{collection}'"
+                    )));
+                }
+            }
+            let base_pk = pk_values.join(":").as_bytes().to_vec();
+
+            // Check for write-write conflicts
+            self.check_write_conflict(collection, &base_pk, tx).await?;
+
+            // Create versioned key using tx_id
+            let versioned_key = encode_versioned_key(&base_pk, tx.tx_id);
+
+            // Add to transaction's write set
+            self.tx_manager.add_to_write_set(tx.tx_id, collection.to_string(), base_pk.clone());
+
+            // Build ordered row value
+            let mut ordered_row: IndexMap<String, MonoValue> = IndexMap::new();
+            for col in columns {
+                if let Some(value) = row.get(&col.name) {
+                    ordered_row.insert(col.name.clone(), value.clone());
+                }
+            }
+            let value_to_store = MonoValue::Row(ordered_row);
+            let value_bytes = value_to_store.to_bytes();
+
+            // Store with versioned key
+            if self.config.use_lsm {
+                if let Some(lsm) = self.lsm_trees.get(collection) {
+                    lsm.put(versioned_key, value_bytes).await?;
+                } else {
+                    return Err(MonoError::NotFound(format!(
+                        "collection '{collection}' not found"
+                    )));
+                }
+            } else if let Some(btree) = self.btrees.get(collection) {
+                btree.insert(&versioned_key, &value_bytes).await?;
+            } else {
+                return Err(MonoError::NotFound(format!(
+                    "collection '{collection}' not found"
+                )));
+            }
+
+            Ok(base_pk)
+        } else {
+            unreachable!()
+        }
     }
 
     async fn insert_kv_typed(&self, collection: &str, key: &[u8], value: &MonoValue) -> Result<()> {
@@ -1185,6 +1549,16 @@ impl StorageEngine {
         collection_name: &str,
         query: crate::storage::models::Query,
     ) -> Result<Vec<MonoValue>> {
+        self.find_with_tx(collection_name, query, None).await
+    }
+
+    /// Find with optional transaction context for MVCC visibility.
+    pub async fn find_with_tx(
+        &self,
+        collection_name: &str,
+        query: crate::storage::models::Query,
+        tx: Option<&Transaction>,
+    ) -> Result<Vec<MonoValue>> {
         if !self.schemas.contains_key(collection_name) {
             return Err(MonoError::NotFound(format!(
                 "collection '{collection_name}' not found"
@@ -1195,7 +1569,7 @@ impl StorageEngine {
         match schema.value() {
             Schema::KeySpace { .. } => self.find_kv(collection_name, query).await,
             Schema::Collection { .. } | Schema::Table { .. } => {
-                self.find_with_filter(collection_name, query).await
+                self.find_with_filter_and_tx(collection_name, query, tx).await
             }
         }
     }
@@ -1388,7 +1762,24 @@ impl StorageEngine {
         collection: &str,
         query: crate::storage::models::Query,
     ) -> Result<Vec<MonoValue>> {
-        // Scan all documents without adding _key/key fields (those are for KeySpaces only)
+        self.find_with_filter_and_tx(collection, query, None).await
+    }
+
+    /// Find with optional transaction context for MVCC visibility.
+    /// For relational tables, only returns versions visible to the transaction.
+    pub async fn find_with_filter_and_tx(
+        &self,
+        collection: &str,
+        query: crate::storage::models::Query,
+        tx: Option<&Transaction>,
+    ) -> Result<Vec<MonoValue>> {
+        let schema = self.schemas.get(collection);
+        let is_relational = matches!(
+            schema.as_ref().map(|s| s.value()),
+            Some(Schema::Table { .. })
+        );
+
+        // Scan all key-value pairs
         let pairs: Vec<(Vec<u8>, Vec<u8>)> = if self.config.use_lsm {
             if let Some(lsm) = self.lsm_trees.get(collection) {
                 lsm.scan(&[], &[0xFF]).await?
@@ -1407,14 +1798,61 @@ impl StorageEngine {
         };
 
         let mut values: Vec<MonoValue> = Vec::with_capacity(pairs.len());
-        for (_k, v) in pairs {
-            // Deserialize
-            match MonoValue::from_bytes(&v) {
-                Ok((mv, _bytes_read)) => {
-                    values.push(mv);
+
+        if is_relational {
+            // MVCC visibility filtering for relational tables
+            // Group by primary key and pick the first visible version
+            let mut seen_pks: HashSet<Vec<u8>> = HashSet::new();
+
+            for (key, value) in pairs {
+                // Try to decode as versioned key
+                if let Some((pk, version_ts)) = decode_versioned_key(&key) {
+                    // Check if we've already found a visible version for this PK
+                    if seen_pks.contains(&pk) {
+                        continue;
+                    }
+
+                    // Check visibility
+                    let visible = if let Some(tx) = tx {
+                        self.is_version_visible(version_ts, tx)
+                    } else {
+                        self.is_version_visible_no_tx(version_ts)
+                    };
+
+                    if visible {
+                        // Deserialize and add
+                        match MonoValue::from_bytes(&value) {
+                            Ok((mv, _)) => {
+                                values.push(mv);
+                                seen_pks.insert(pk);
+                            }
+                            Err(e) => {
+                                tracing::warn!("failed to deserialize value: {}", e);
+                            }
+                        }
+                    }
+                } else {
+                    // Non-versioned key (legacy data) - always visible
+                    match MonoValue::from_bytes(&value) {
+                        Ok((mv, _)) => {
+                            values.push(mv);
+                        }
+                        Err(e) => {
+                            tracing::warn!("failed to deserialize value: {}", e);
+                        }
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("failed to deserialize value: {}", e);
+            }
+        } else {
+            // Non-relational: no MVCC, return all values
+            for (_k, v) in pairs {
+                match MonoValue::from_bytes(&v) {
+                    Ok((mv, _bytes_read)) => {
+                        values.push(mv);
+                    }
+                    Err(e) => {
+                        tracing::warn!("failed to deserialize value: {}", e);
+                    }
                 }
             }
         }
@@ -2345,16 +2783,221 @@ impl StorageEngine {
     }
 }
 
+// MVCC Transaction Support
+
+/// Transaction status for MVCC
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxStatus {
+    Active,
+    Committed,
+    Aborted,
+}
+
+/// Transaction metadata for MVCC with Snapshot Isolation
+#[derive(Debug, Clone)]
 pub struct Transaction {
-    pub id: u64,
+    /// Unique transaction identifier
+    pub tx_id: u64,
+    /// Timestamp when transaction started (used for visibility)
+    pub start_ts: u64,
+    /// Timestamp when transaction committed (None if not yet committed)
+    pub commit_ts: Option<u64>,
+    /// Current transaction status
+    pub status: TxStatus,
+    /// Keys modified by this transaction (collection_name, primary_key)
+    pub write_set: HashSet<(String, Vec<u8>)>,
 }
 
 impl Transaction {
-    #[allow(dead_code)]
-    fn new() -> Self {
-        static CTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    /// Create a new transaction with the given IDs
+    pub fn new(tx_id: u64, start_ts: u64) -> Self {
         Self {
-            id: CTR.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+            tx_id,
+            start_ts,
+            commit_ts: None,
+            status: TxStatus::Active,
+            write_set: HashSet::new(),
         }
+    }
+
+    /// Check if this transaction is still active
+    pub fn is_active(&self) -> bool {
+        self.status == TxStatus::Active
+    }
+}
+
+/// Transaction Manager for MVCC
+/// Manages transaction lifecycle and provides visibility information for snapshot isolation
+pub struct TransactionManager {
+    /// Monotonically increasing timestamp generator (used for both tx_id and timestamps)
+    next_ts: AtomicU64,
+    /// Active and recently committed transactions
+    transactions: DashMap<u64, Transaction>,
+    /// Oldest active transaction start timestamp (for GC decisions)
+    oldest_active_ts: AtomicU64,
+}
+
+impl TransactionManager {
+    /// Create a new transaction manager
+    pub fn new() -> Self {
+        Self {
+            next_ts: AtomicU64::new(1),
+            transactions: DashMap::new(),
+            oldest_active_ts: AtomicU64::new(u64::MAX),
+        }
+    }
+
+    /// Begin a new transaction
+    pub fn begin(&self) -> Transaction {
+        let ts = self.next_ts.fetch_add(1, Ordering::SeqCst);
+        let tx = Transaction::new(ts, ts); // tx_id == start_ts for simplicity
+
+        // Update oldest active timestamp
+        self.oldest_active_ts.fetch_min(ts, Ordering::SeqCst);
+
+        self.transactions.insert(ts, tx.clone());
+        tx
+    }
+
+    /// Commit a transaction, returns the commit timestamp
+    pub fn commit(&self, tx_id: u64) -> Result<u64> {
+        let commit_ts = self.next_ts.fetch_add(1, Ordering::SeqCst);
+
+        if let Some(mut tx) = self.transactions.get_mut(&tx_id) {
+            if tx.status != TxStatus::Active {
+                return Err(MonoError::InvalidOperation(format!(
+                    "Transaction {} is not active (status: {:?})",
+                    tx_id, tx.status
+                )));
+            }
+            tx.commit_ts = Some(commit_ts);
+            tx.status = TxStatus::Committed;
+        } else {
+            return Err(MonoError::NotFound(format!(
+                "Transaction {} not found",
+                tx_id
+            )));
+        }
+
+        // Recalculate oldest active timestamp
+        self.update_oldest_active();
+
+        Ok(commit_ts)
+    }
+
+    /// Abort a transaction
+    pub fn abort(&self, tx_id: u64) -> Result<()> {
+        if let Some(mut tx) = self.transactions.get_mut(&tx_id) {
+            if tx.status != TxStatus::Active {
+                return Err(MonoError::InvalidOperation(format!(
+                    "Transaction {} is not active (status: {:?})",
+                    tx_id, tx.status
+                )));
+            }
+            tx.status = TxStatus::Aborted;
+        } else {
+            return Err(MonoError::NotFound(format!(
+                "Transaction {} not found",
+                tx_id
+            )));
+        }
+
+        // Recalculate oldest active timestamp
+        self.update_oldest_active();
+
+        Ok(())
+    }
+
+    /// Get a transaction by ID
+    pub fn get(&self, tx_id: u64) -> Option<Transaction> {
+        self.transactions.get(&tx_id).map(|tx| tx.clone())
+    }
+
+    /// Get the oldest active transaction timestamp (for GC)
+    pub fn oldest_active(&self) -> u64 {
+        self.oldest_active_ts.load(Ordering::SeqCst)
+    }
+
+    /// Get next timestamp (for auto-commit operations)
+    pub fn next_timestamp(&self) -> u64 {
+        self.next_ts.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Add a key to a transaction's write set
+    pub fn add_to_write_set(&self, tx_id: u64, collection: String, pk: Vec<u8>) {
+        if let Some(mut tx) = self.transactions.get_mut(&tx_id) {
+            tx.write_set.insert((collection, pk));
+        }
+    }
+
+    /// Recalculate the oldest active transaction timestamp
+    fn update_oldest_active(&self) {
+        let mut oldest = u64::MAX;
+        for entry in self.transactions.iter() {
+            if entry.status == TxStatus::Active && entry.start_ts < oldest {
+                oldest = entry.start_ts;
+            }
+        }
+        self.oldest_active_ts.store(oldest, Ordering::SeqCst);
+    }
+
+    /// Clean up old committed/aborted transactions (call periodically)
+    /// Keeps transactions newer than the given threshold
+    #[allow(dead_code)]
+    pub fn cleanup(&self, older_than: u64) {
+        self.transactions.retain(|_, tx| {
+            tx.status == TxStatus::Active || tx.start_ts >= older_than
+        });
+    }
+}
+
+impl Default for TransactionManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// Versioned Key Encoding for MVCC
+
+/// Encode a versioned key: `pk:INVERTED_TIMESTAMP`
+/// Inverted timestamp ensures newest versions sort first lexicographically
+pub fn encode_versioned_key(pk: &[u8], commit_ts: u64) -> Vec<u8> {
+    let inverted = u64::MAX - commit_ts;
+    let mut key = pk.to_vec();
+    key.push(b':');
+    // 16-char hex for consistent sorting
+    key.extend_from_slice(format!("{:016X}", inverted).as_bytes());
+    key
+}
+
+/// Decode a versioned key back to (pk, commit_ts)
+/// Returns None if the key doesn't have a valid version suffix
+pub fn decode_versioned_key(key: &[u8]) -> Option<(Vec<u8>, u64)> {
+    // Find the last ':' separator
+    let sep_pos = key.iter().rposition(|&b| b == b':')?;
+
+    // Need at least 16 chars after the separator
+    if key.len() < sep_pos + 1 + 16 {
+        return None;
+    }
+
+    let pk = key[..sep_pos].to_vec();
+    let ts_hex = std::str::from_utf8(&key[sep_pos + 1..]).ok()?;
+
+    // Parse hex and un-invert
+    let inverted = u64::from_str_radix(ts_hex, 16).ok()?;
+    let commit_ts = u64::MAX - inverted;
+
+    Some((pk, commit_ts))
+}
+
+/// Check if a key is a versioned key (has timestamp suffix)
+pub fn is_versioned_key(key: &[u8]) -> bool {
+    if let Some(sep_pos) = key.iter().rposition(|&b| b == b':') {
+        // Check if suffix is exactly 16 hex chars
+        let suffix = &key[sep_pos + 1..];
+        suffix.len() == 16 && suffix.iter().all(|&b| b.is_ascii_hexdigit())
+    } else {
+        false
     }
 }

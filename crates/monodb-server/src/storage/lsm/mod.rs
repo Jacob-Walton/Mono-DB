@@ -190,6 +190,18 @@ impl LsmTree {
                 replayed_count,
                 replayed_size
             );
+
+            // If replayed data exceeds memtable threshold, we need to flush it
+            // to prevent unbounded WAL growth. Mark as non-replay so flush proceeds.
+            if replayed_size > self.config.memtable_size {
+                tracing::info!(
+                    "Replayed data ({} bytes) exceeds memtable threshold ({} bytes), will flush on first write",
+                    replayed_size,
+                    self.config.memtable_size
+                );
+                // Mark as non-replay so the next put() triggers a flush
+                self.memtable_is_replay_only.store(false, Ordering::SeqCst);
+            }
         }
 
         Ok(())

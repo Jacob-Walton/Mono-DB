@@ -58,6 +58,11 @@ fn main() {
     map.entry(b"and", "TokenKind::Keyword");
     map.entry(b"or", "TokenKind::Keyword");
 
+    // Transaction control (MVCC)
+    map.entry(b"begin", "TokenKind::Keyword");
+    map.entry(b"commit", "TokenKind::Keyword");
+    map.entry(b"rollback", "TokenKind::Keyword");
+
     write!(
         &mut file,
         "static KEYWORDS: phf::Map<&'static [u8], TokenKind> = {};",

@@ -12,7 +12,7 @@ use crate::{
         Assignment, BinaryOp, ConditionalType, Expr, Extension, FieldDef, Statement, TableProperty,
         TableType,
     },
-    storage::{Data, Filter, Query, engine::StorageEngine},
+    storage::{Data, Filter, Query, engine::{StorageEngine, Transaction}},
 };
 
 #[derive(Debug)]
@@ -60,6 +60,8 @@ type ExecutorResult<T> = Result<T, ExecutorError>;
 pub struct QueryExecutor {
     storage: Arc<StorageEngine>,
     variables: HashMap<String, Value>,
+    /// Current active transaction for this executor (MVCC)
+    current_tx: Option<Transaction>,
 }
 
 impl QueryExecutor {
@@ -68,7 +70,23 @@ impl QueryExecutor {
         Self {
             storage,
             variables: HashMap::new(),
+            current_tx: None,
         }
+    }
+
+    /// Get access to the storage engine
+    pub fn storage(&self) -> &Arc<StorageEngine> {
+        &self.storage
+    }
+
+    /// Get the current active transaction, if any
+    pub fn current_transaction(&self) -> Option<&Transaction> {
+        self.current_tx.as_ref()
+    }
+
+    /// Check if there's an active transaction
+    pub fn in_transaction(&self) -> bool {
+        self.current_tx.is_some()
     }
 
     /// Force flush all LSM tree memtables to disk (test-only)
@@ -208,6 +226,57 @@ impl QueryExecutor {
                     commit_timestamp: None,
                     time_elapsed: Some(start.elapsed().as_millis() as u64),
                     row_count: Some(row_count),
+                }
+            }
+            // Transaction control statements (MVCC)
+            Statement::Begin => {
+                if self.current_tx.is_some() {
+                    return Err(ExecutorError::InvalidOperation(
+                        "Transaction already active. COMMIT or ROLLBACK first.".into(),
+                    ));
+                }
+                let tx = self.storage.tx_manager().begin();
+                let tx_id = tx.tx_id;
+                self.current_tx = Some(tx);
+                ExecutionResult::Ok {
+                    data: vec![Value::String(format!("BEGIN (tx_id={})", tx_id))],
+                    time: chrono::Utc::now().timestamp_millis() as u64,
+                    commit_timestamp: None,
+                    time_elapsed: Some(start.elapsed().as_millis() as u64),
+                    row_count: None,
+                }
+            }
+            Statement::Commit => {
+                let tx = self.current_tx.take().ok_or_else(|| {
+                    ExecutorError::InvalidOperation("No active transaction to COMMIT".into())
+                })?;
+                let commit_ts = self.storage.tx_manager().commit(tx.tx_id).map_err(|e| {
+                    ExecutorError::InvalidOperation(format!("Commit failed: {}", e))
+                })?;
+                ExecutionResult::Ok {
+                    data: vec![Value::String(format!(
+                        "COMMIT (tx_id={}, commit_ts={})",
+                        tx.tx_id, commit_ts
+                    ))],
+                    time: chrono::Utc::now().timestamp_millis() as u64,
+                    commit_timestamp: Some(commit_ts),
+                    time_elapsed: Some(start.elapsed().as_millis() as u64),
+                    row_count: None,
+                }
+            }
+            Statement::Rollback => {
+                let tx = self.current_tx.take().ok_or_else(|| {
+                    ExecutorError::InvalidOperation("No active transaction to ROLLBACK".into())
+                })?;
+                self.storage.tx_manager().abort(tx.tx_id).map_err(|e| {
+                    ExecutorError::InvalidOperation(format!("Rollback failed: {}", e))
+                })?;
+                ExecutionResult::Ok {
+                    data: vec![Value::String(format!("ROLLBACK (tx_id={})", tx.tx_id))],
+                    time: chrono::Utc::now().timestamp_millis() as u64,
+                    commit_timestamp: None,
+                    time_elapsed: Some(start.elapsed().as_millis() as u64),
+                    row_count: None,
                 }
             }
             _ => {
@@ -554,11 +623,12 @@ impl QueryExecutor {
             }
         }
 
-        // Insert
+        // Insert with transaction support
         let data = Data::Row(row);
 
+        // Use insert_with_tx for MVCC support on relational tables
         self.storage
-            .insert(&target, &data)
+            .insert_with_tx(&target, &data, self.current_tx.as_ref())
             .await
             .map_err(|e| ExecutorError::InvalidOperation(e.to_string()))?;
 
@@ -677,9 +747,10 @@ impl QueryExecutor {
             ..Default::default()
         };
 
+        // Use find_with_tx for MVCC visibility on relational tables
         let results = self
             .storage
-            .find(&source, query)
+            .find_with_tx(&source, query, self.current_tx.as_ref())
             .await
             .map_err(|e| ExecutorError::InvalidOperation(e.to_string()))?;
 
