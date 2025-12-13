@@ -12,7 +12,10 @@ use crate::{
         Assignment, BinaryOp, ConditionalType, Expr, Extension, FieldDef, Statement, TableProperty,
         TableType,
     },
-    storage::{Data, Filter, Query, engine::{StorageEngine, Transaction}},
+    storage::{
+        Data, Filter, Query,
+        engine::{StorageEngine, Transaction},
+    },
 };
 
 #[derive(Debug)]

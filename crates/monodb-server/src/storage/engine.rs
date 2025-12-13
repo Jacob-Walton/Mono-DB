@@ -894,7 +894,8 @@ impl StorageEngine {
             (Schema::Table { .. }, Data::Row(row)) => {
                 // Auto-commit: use current timestamp from tx_manager
                 let auto_ts = self.tx_manager.next_timestamp();
-                self.insert_row_with_version(collection_name, row, auto_ts).await?
+                self.insert_row_with_version(collection_name, row, auto_ts)
+                    .await?
             }
             (Schema::KeySpace { .. }, Data::Row(row)) => {
                 let key = row.get("key").ok_or_else(|| {
@@ -1048,7 +1049,8 @@ impl StorageEngine {
             let versioned_key = encode_versioned_key(&base_pk, tx.tx_id);
 
             // Add to transaction's write set
-            self.tx_manager.add_to_write_set(tx.tx_id, collection.to_string(), base_pk.clone());
+            self.tx_manager
+                .add_to_write_set(tx.tx_id, collection.to_string(), base_pk.clone());
 
             // Build ordered row value
             let mut ordered_row: IndexMap<String, MonoValue> = IndexMap::new();
@@ -1569,7 +1571,8 @@ impl StorageEngine {
         match schema.value() {
             Schema::KeySpace { .. } => self.find_kv(collection_name, query).await,
             Schema::Collection { .. } | Schema::Table { .. } => {
-                self.find_with_filter_and_tx(collection_name, query, tx).await
+                self.find_with_filter_and_tx(collection_name, query, tx)
+                    .await
             }
         }
     }
@@ -2945,9 +2948,8 @@ impl TransactionManager {
     /// Keeps transactions newer than the given threshold
     #[allow(dead_code)]
     pub fn cleanup(&self, older_than: u64) {
-        self.transactions.retain(|_, tx| {
-            tx.status == TxStatus::Active || tx.start_ts >= older_than
-        });
+        self.transactions
+            .retain(|_, tx| tx.status == TxStatus::Active || tx.start_ts >= older_than);
     }
 }
 
