@@ -431,161 +431,16 @@ impl Value {
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
     }
+
+    #[inline]
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
+        let mut out = Vec::with_capacity(self.encoded_len());
+        self.write_to(&mut out);
 
-        match self {
-            Value::Null => {
-                bytes.push(0);
-            }
-
-            Value::Bool(b) => {
-                bytes.push(1);
-                bytes.push(if *b { 1 } else { 0 });
-            }
-
-            Value::Int32(i) => {
-                bytes.push(2);
-                bytes.extend(&i.to_le_bytes());
-            }
-
-            Value::Int64(i) => {
-                bytes.push(3);
-                bytes.extend(&i.to_le_bytes());
-            }
-
-            Value::Float32(f) => {
-                bytes.push(4);
-                bytes.extend(&f.to_bits().to_le_bytes());
-            }
-
-            Value::Float64(f) => {
-                bytes.push(5);
-                bytes.extend(&f.to_bits().to_le_bytes());
-            }
-
-            Value::String(s) => {
-                bytes.push(6);
-                let b = s.as_bytes();
-                let len = b.len() as u32;
-                bytes.extend(&len.to_le_bytes());
-                bytes.extend(b);
-            }
-
-            Value::Binary(b) => {
-                bytes.push(7);
-                let len = b.len() as u32;
-                bytes.extend(&len.to_le_bytes());
-                bytes.extend(b);
-            }
-
-            Value::DateTime(dt) => {
-                bytes.push(8);
-                let unix_micros = dt.timestamp_micros();
-                let offset_minutes = dt.offset().local_minus_utc() / 60;
-                bytes.extend(&unix_micros.to_le_bytes());
-                bytes.extend(&offset_minutes.to_le_bytes());
-            }
-
-            Value::Date(d) => {
-                bytes.push(9);
-                bytes.extend(&d.year().to_le_bytes());
-                bytes.push(d.month() as u8);
-                bytes.push(d.day() as u8);
-            }
-
-            Value::Time(t) => {
-                bytes.push(10);
-                bytes.push(t.hour() as u8);
-                bytes.push(t.minute() as u8);
-                bytes.push(t.second() as u8);
-                let micros = t.nanosecond() / 1000;
-                bytes.extend(&micros.to_le_bytes());
-            }
-
-            Value::Uuid(u) => {
-                bytes.push(11);
-                bytes.extend(u.as_bytes());
-            }
-
-            Value::ObjectId(oid) => {
-                bytes.push(12);
-                bytes.extend(oid.bytes());
-            }
-
-            Value::Array(arr) => {
-                bytes.push(13);
-                bytes.extend(&(arr.len() as u32).to_le_bytes());
-                for v in arr {
-                    bytes.extend(v.to_bytes());
-                }
-            }
-
-            Value::Object(map) => {
-                bytes.push(14);
-                bytes.extend(&(map.len() as u32).to_le_bytes());
-                for (k, v) in map {
-                    let kb = k.as_bytes();
-                    bytes.extend(&(kb.len() as u32).to_le_bytes());
-                    bytes.extend(kb);
-                    bytes.extend(v.to_bytes());
-                }
-            }
-
-            Value::Set(set) => {
-                bytes.push(15);
-                bytes.extend(&(set.len() as u32).to_le_bytes());
-                for item in set {
-                    let b = item.as_bytes();
-                    bytes.extend(&(b.len() as u32).to_le_bytes());
-                    bytes.extend(b);
-                }
-            }
-
-            Value::Row(row) => {
-                bytes.push(16);
-                bytes.extend(&(row.len() as u32).to_le_bytes());
-                for (k, v) in row {
-                    let kb = k.as_bytes();
-                    bytes.extend(&(kb.len() as u32).to_le_bytes());
-                    bytes.extend(kb);
-                    bytes.extend(v.to_bytes());
-                }
-            }
-
-            Value::SortedSet(items) => {
-                bytes.push(17);
-                bytes.extend(&(items.len() as u32).to_le_bytes());
-                for (score, member) in items {
-                    bytes.extend(&score.to_bits().to_le_bytes());
-                    let mb = member.as_bytes();
-                    bytes.extend(&(mb.len() as u32).to_le_bytes());
-                    bytes.extend(mb);
-                }
-            }
-
-            Value::GeoPoint { lat, lng } => {
-                bytes.push(18);
-                bytes.extend(&lat.to_bits().to_le_bytes());
-                bytes.extend(&lng.to_bits().to_le_bytes());
-            }
-
-            Value::Reference { collection, id } => {
-                bytes.push(19);
-
-                // collection : String
-                let cb = collection.as_bytes();
-                bytes.extend(&(cb.len() as u32).to_le_bytes());
-                bytes.extend(cb);
-
-                // id : Value
-                bytes.extend(id.to_bytes());
-            }
-        }
-
-        bytes
+        out
     }
 
+    #[inline]
     pub fn from_bytes(buf: &[u8]) -> crate::Result<(Value, usize)> {
         if buf.is_empty() {
             return Err(MonoError::Parse("Empty buffer".into()));
@@ -842,6 +697,210 @@ impl Value {
         };
 
         Ok((value, offset))
+    }
+
+    fn write_to(&self, out: &mut Vec<u8>) {
+        match self {
+            Value::Null => out.push(0),
+
+            Value::Bool(b) => {
+                out.push(1);
+                out.push(*b as u8);
+            }
+
+            Value::Int32(i) => {
+                out.push(2);
+                out.extend_from_slice(&i.to_le_bytes());
+            }
+
+            Value::Int64(i) => {
+                out.push(3);
+                out.extend_from_slice(&i.to_le_bytes());
+            }
+
+            Value::Float32(f) => {
+                out.push(4);
+                out.extend_from_slice(&f.to_bits().to_le_bytes());
+            }
+
+            Value::Float64(f) => {
+                out.push(5);
+                out.extend_from_slice(&f.to_bits().to_le_bytes());
+            }
+
+            Value::String(s) => {
+                out.push(6);
+                let b = s.as_bytes();
+                let len = b.len() as u32;
+                out.extend_from_slice(&len.to_le_bytes());
+                out.extend_from_slice(b);
+            }
+
+            Value::Binary(b) => {
+                out.push(7);
+                let len = b.len() as u32;
+                out.extend_from_slice(&len.to_le_bytes());
+                out.extend_from_slice(b);
+            }
+
+            Value::DateTime(dt) => {
+                out.push(8);
+                let unix_micros = dt.timestamp_micros();
+                let offset_minutes = dt.offset().local_minus_utc() / 60;
+                out.extend_from_slice(&unix_micros.to_le_bytes());
+                out.extend_from_slice(&offset_minutes.to_le_bytes());
+            }
+
+            Value::Date(d) => {
+                out.push(9);
+                out.extend_from_slice(&d.year().to_le_bytes());
+                out.push(d.month() as u8);
+                out.push(d.day() as u8);
+            }
+
+            Value::Time(t) => {
+                out.push(10);
+                out.push(t.hour() as u8);
+                out.push(t.minute() as u8);
+                out.push(t.second() as u8);
+                let micros = t.nanosecond() / 1000;
+                out.extend_from_slice(&micros.to_le_bytes());
+            }
+
+            Value::Uuid(u) => {
+                out.push(11);
+                out.extend_from_slice(u.as_bytes());
+            }
+
+            Value::ObjectId(oid) => {
+                out.push(12);
+                out.extend_from_slice(&oid.bytes());
+            }
+
+            Value::Array(arr) => {
+                out.push(13);
+                out.extend_from_slice(&(arr.len() as u32).to_le_bytes());
+                for v in arr {
+                    v.write_to(out);
+                }
+            }
+
+            Value::Object(map) => {
+                out.push(14);
+                out.extend_from_slice(&(map.len() as u32).to_le_bytes());
+                for (k, v) in map {
+                    let kb = k.as_bytes();
+                    out.extend_from_slice(&(kb.len() as u32).to_le_bytes());
+                    out.extend_from_slice(kb);
+                    v.write_to(out);
+                }
+            }
+
+            Value::Set(set) => {
+                out.push(15);
+                out.extend_from_slice(&(set.len() as u32).to_le_bytes());
+                for item in set {
+                    let b = item.as_bytes();
+                    out.extend_from_slice(&(b.len() as u32).to_le_bytes());
+                    out.extend_from_slice(b);
+                }
+            }
+
+            Value::Row(row) => {
+                out.push(16);
+                out.extend_from_slice(&(row.len() as u32).to_le_bytes());
+                for (k, v) in row {
+                    let kb = k.as_bytes();
+                    out.extend_from_slice(&(kb.len() as u32).to_le_bytes());
+                    out.extend_from_slice(kb);
+                    v.write_to(out);
+                }
+            }
+
+            Value::SortedSet(items) => {
+                out.push(17);
+                out.extend_from_slice(&(items.len() as u32).to_le_bytes());
+                for (score, member) in items {
+                    out.extend_from_slice(&score.to_bits().to_le_bytes());
+                    let mb = member.as_bytes();
+                    out.extend_from_slice(&(mb.len() as u32).to_le_bytes());
+                    out.extend_from_slice(mb);
+                }
+            }
+
+            Value::GeoPoint { lat, lng } => {
+                out.push(18);
+                out.extend_from_slice(&lat.to_bits().to_le_bytes());
+                out.extend_from_slice(&lng.to_bits().to_le_bytes());
+            }
+
+            Value::Reference { collection, id } => {
+                out.push(19);
+
+                // collection : String
+                let cb = collection.as_bytes();
+                out.extend_from_slice(&(cb.len() as u32).to_le_bytes());
+                out.extend_from_slice(cb);
+
+                // id : Value
+                id.write_to(out);
+            }
+        }
+    }
+
+    fn encoded_len(&self) -> usize {
+        match self {
+            Value::Null => 1,
+            Value::Bool(_) => 2,
+
+            Value::Int32(_) => 5, // 1 + 4
+            Value::Int64(_) => 9, // 1 + 8
+
+            Value::Float32(_) => 5, // 1 + 4
+            Value::Float64(_) => 9, // 1 + 8
+
+            Value::String(s) => 1 + 4 + s.len(),
+            Value::Binary(b) => 1 + 4 + b.len(),
+
+            Value::DateTime(_) => 13, // 1 + 8 + 4
+            Value::Date(_) => 7,      // 1 + 4 + 1 + 1
+            Value::Time(_) => 8,      // 1 + 1 + 1 + 1 + 4
+
+            Value::Uuid(_) => 17,     // 1 + 16
+            Value::ObjectId(_) => 13, // 1 + 12
+
+            Value::Array(arr) => 1 + 4 + arr.iter().map(|v| v.encoded_len()).sum::<usize>(),
+
+            Value::Object(map) => {
+                1 + 4
+                    + map
+                        .iter()
+                        .map(|(k, v)| 4 + k.len() + v.encoded_len())
+                        .sum::<usize>()
+            }
+
+            Value::Set(set) => 1 + 4 + set.iter().map(|s| 4 + s.len()).sum::<usize>(),
+
+            Value::Row(row) => {
+                1 + 4
+                    + row
+                        .iter()
+                        .map(|(k, v)| 4 + k.len() + v.encoded_len())
+                        .sum::<usize>()
+            }
+
+            Value::SortedSet(items) => {
+                1 + 4
+                    + items
+                        .iter()
+                        .map(|(_, member)| 8 + 4 + member.len())
+                        .sum::<usize>()
+            }
+
+            Value::GeoPoint { .. } => 1 + 8 + 8,
+
+            Value::Reference { collection, id } => 1 + (4 + collection.len()) + id.encoded_len(),
+        }
     }
 }
 
@@ -1277,6 +1336,74 @@ impl std::str::FromStr for Value {
             expected: "a valid type".into(),
             actual: s.into(),
         })
+    }
+}
+
+impl From<i32> for Value {
+    fn from(value: i32) -> Self {
+        Value::Int32(value)
+    }
+}
+
+impl From<i64> for Value {
+    fn from(value: i64) -> Self {
+        if value >= i32::MIN as i64 && value <= i32::MAX as i64 {
+            Value::Int32(value as i32)
+        } else {
+            Value::Int64(value)
+        }
+    }
+}
+
+impl From<u32> for Value {
+    fn from(value: u32) -> Self {
+        if value <= i32::MAX as u32 {
+            Value::Int32(value as i32)
+        } else {
+            Value::Int64(value as i64)
+        }
+    }
+}
+
+impl From<u64> for Value {
+    fn from(value: u64) -> Self {
+        if value <= i32::MAX as u64 {
+            Value::Int32(value as i32)
+        } else if value <= i64::MAX as u64 {
+            Value::Int64(value as i64)
+        } else {
+            Value::Float64(value as f64)
+        }
+    }
+}
+
+impl From<f32> for Value {
+    fn from(value: f32) -> Self {
+        Value::Float32(value)
+    }
+}
+
+impl From<f64> for Value {
+    fn from(value: f64) -> Self {
+        Value::Float64(value)
+    }
+}
+
+impl From<bool> for Value {
+    fn from(value: bool) -> Self {
+        Value::Bool(value)
+    }
+}
+
+impl From<String> for Value {
+    fn from(value: String) -> Self {
+        Value::String(value)
+    }
+}
+
+impl From<&str> for Value {
+    fn from(value: &str) -> Self {
+        Value::String(value.to_string())
     }
 }
 

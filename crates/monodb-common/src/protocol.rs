@@ -165,6 +165,7 @@ pub enum ErrorCode {
 }
 
 impl From<u16> for ErrorCode {
+    #[inline(always)]
     fn from(code: u16) -> Self {
         match code {
             1001 => ErrorCode::ParseError,
@@ -477,17 +478,9 @@ impl ProtocolCodec {
                             commit_timestamp,
                             row_count,
                         } => {
-                            const VALID_TYPES: [&str; 3] = ["array", "object", "row"];
-
                             body.put_u8(0); // Tag
                             body.put_u32_le(data.len() as u32);
                             for value in data {
-                                if !VALID_TYPES.contains(&value.type_name()) {
-                                    return Err(MonoError::Network(format!(
-                                        "Invalid value type in ExecutionResult::Ok: {}",
-                                        value.type_name()
-                                    )));
-                                }
                                 let value_bytes = value.to_bytes();
                                 body.put_u32_le(value_bytes.len() as u32);
                                 body.put_slice(&value_bytes);
@@ -689,52 +682,52 @@ impl ProtocolCodec {
 
 // Primitive helpers
 
-#[inline]
+#[inline(always)]
 #[allow(unused)]
 fn put_u8(buf: &mut BytesMut, v: u8) {
     buf.put_u8(v);
 }
-#[inline]
+#[inline(always)]
 #[allow(unused)]
 fn put_u16(buf: &mut BytesMut, v: u16) {
     buf.put_u16_le(v);
 }
-#[inline]
+#[inline(always)]
 #[allow(unused)]
 fn put_u32(buf: &mut BytesMut, v: u32) {
     buf.put_u32_le(v);
 }
-#[inline]
+#[inline(always)]
 #[allow(unused)]
 fn put_u64(buf: &mut BytesMut, v: u64) {
     buf.put_u64_le(v);
 }
-#[inline]
+#[inline(always)]
 #[allow(unused)]
 fn put_i32(buf: &mut BytesMut, v: i32) {
     buf.put_i32_le(v);
 }
-#[inline]
+#[inline(always)]
 #[allow(unused)]
 fn put_i64(buf: &mut BytesMut, v: i64) {
     buf.put_i64_le(v);
 }
 
-#[inline]
+#[inline(always)]
 #[allow(unused)]
 fn put_string(buf: &mut BytesMut, s: &str) {
     put_u32(buf, s.len() as u32);
     buf.put_slice(s.as_bytes());
 }
 
-#[inline]
+#[inline(always)]
 #[allow(unused)]
 fn put_bytes(buf: &mut BytesMut, b: &[u8]) {
     put_u32(buf, b.len() as u32);
     buf.put_slice(b);
 }
 
-#[inline]
+#[inline(always)]
 #[allow(unused)]
 fn put_opt_u64(buf: &mut BytesMut, v: &Option<u64>) {
     match v {
@@ -746,7 +739,7 @@ fn put_opt_u64(buf: &mut BytesMut, v: &Option<u64>) {
     }
 }
 
-#[inline]
+#[inline(always)]
 #[allow(unused)]
 fn put_opt_string(buf: &mut BytesMut, v: &Option<String>) {
     match v {
@@ -758,30 +751,52 @@ fn put_opt_string(buf: &mut BytesMut, v: &Option<String>) {
     }
 }
 
-#[inline]
+#[inline(always)]
 #[allow(unused)]
 fn get_string(buf: &mut BytesMut) -> crate::Result<String> {
-    let str_len = buf.get_u32_le() as usize;
-    let s = String::from_utf8(buf.split_to(str_len).to_vec())
-        .map_err(|e| MonoError::Network(format!("Decode error: {e}")))?;
+    let len = buf.get_u32_le() as usize;
+
+    if buf.len() < len {
+        return Err(MonoError::Network("Truncated string".into()));
+    }
+
+    let s = {
+        let bytes = &buf[..len];
+        std::str::from_utf8(bytes)
+            .map_err(|e| MonoError::Network(format!("Decode error: {e}")))?
+            .to_owned()
+    };
+
+    buf.advance(len);
     Ok(s)
 }
 
-#[inline]
+#[inline(always)]
 #[allow(unused)]
 fn get_opt_string(buf: &mut BytesMut) -> crate::Result<Option<String>> {
     let flag = buf.get_u8();
     if flag == 0 {
-        Ok(None)
-    } else {
-        let str_len = buf.get_u32_le() as usize;
-        let s = String::from_utf8(buf.split_to(str_len).to_vec())
-            .map_err(|e| MonoError::Network(format!("Decode error: {e}")))?;
-        Ok(Some(s))
+        return Ok(None)
     }
+
+    let len = buf.get_u32_le() as usize;
+
+    if buf.len() < len {
+        return Err(MonoError::Network("Truncated string".into()));
+    }
+
+    let s = {
+        let bytes = &buf[..len];
+        std::str::from_utf8(bytes)
+            .map_err(|e| MonoError::Network(format!("Decode error: {e}")))?
+            .to_owned()
+    };
+
+    buf.advance(len);
+    Ok(Some(s))
 }
 
-#[inline]
+#[inline(always)]
 #[allow(unused)]
 fn get_opt_u64(buf: &mut BytesMut) -> Option<u64> {
     let flag = buf.get_u8();

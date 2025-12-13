@@ -17,12 +17,17 @@ chrono.workspace = true
 hex.workspace = true
 rand.workspace = true
 tokio.workspace = true
-# For creating custom errors easily
 thiserror = "2.0.17"
-# For quick hashes (similar to Git)
 sha1 = "0.10.6"
 indexmap.workspace = true
 base64 = "0.22.1"
 bytes.workspace = true
 rkyv = "0.8.12"
 tracing.workspace = true
+
+[dev-dependencies]
+criterion = { version = "0.8.1", features = ["html_reports"] }
+
+[[bench]]
+name = "protocol_codec"
+harness = false
