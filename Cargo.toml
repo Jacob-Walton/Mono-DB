@@ -20,7 +20,7 @@ version = "0.2.1"
 edition = "2024"
 authors = ["Jacob Walton"]
 license = ""
-repository = "https://github.com/Jacob-Walton/monodb"
+repository = "https://github.com/Jacob-Walton/Mono-DB"
 
 [workspace.dependencies]
 # Essential library for working with asynchronous Rust code
