@@ -19,15 +19,16 @@ struct BenchConfig {
 /// Run a write benchmark against the configured target.
 async fn run_benchmark(
     cfg: BenchConfig,
-    pool: Arc<monodb_client::pool::ConnectionPool>,
+    client: Client,
     count: usize,
     concurrency: usize,
     batch_size: usize,
 ) -> Result<()> {
-    println!("\n=== {} ===", cfg.name);
+    println!("\n--- {} ---", cfg.name);
 
     let start_time = std::time::Instant::now();
 
+    let pool = Arc::new(client.pool().await.clone());
     let latencies = Arc::new(AsyncMutex::new(Vec::with_capacity(count)));
     let total_bytes = Arc::new(AtomicU64::new(0));
 
@@ -37,7 +38,10 @@ async fn run_benchmark(
         let builder = Arc::clone(&cfg.builder);
         let total_bytes = Arc::clone(&total_bytes);
         async move {
-            let mut conn = pool.get().await.expect("Failed to get connection from pool");
+            let mut conn = pool
+                .get()
+                .await
+                .expect("Failed to get connection from pool");
 
             let (batch_sql, actual) = builder(base, batch_size);
             if actual == 0 {
@@ -153,7 +157,6 @@ make table testing
 
 make table sessions
     as keyspace
-    persistence "memory"
 "#;
 
     let pool = client.pool().await.clone();
@@ -204,12 +207,10 @@ make table sessions
     }
 
     // Test inserting a large number of records using multiple connections
-    const COUNT: usize = 10_000;
+    const COUNT: usize = 1_000_000;
     const CONCURRENCY: usize = 16;
     // Batch size: number of logical inserts per Execute request
     const BATCH_SIZE: usize = 256;
-
-    let pool = Arc::new(pool);
 
     let relational = BenchConfig {
         name: "Relational table (users)",
@@ -271,9 +272,9 @@ make table sessions
         }),
     };
 
-    run_benchmark(relational, Arc::clone(&pool), COUNT, CONCURRENCY, BATCH_SIZE).await?;
-    run_benchmark(collection, Arc::clone(&pool), COUNT, CONCURRENCY, BATCH_SIZE).await?;
-    run_benchmark(keyspace, Arc::clone(&pool), COUNT, CONCURRENCY, BATCH_SIZE).await?;
+    run_benchmark(relational, client.clone(), COUNT, CONCURRENCY, BATCH_SIZE).await?;
+    run_benchmark(collection, client.clone(), COUNT, CONCURRENCY, BATCH_SIZE).await?;
+    run_benchmark(keyspace, client.clone(), COUNT, CONCURRENCY, BATCH_SIZE).await?;
 
     pool.return_connection(conn);
 
