@@ -32,6 +32,8 @@ pub struct LsmTree {
     immutable_memtables: ImmutableMemtables,
     sstables: Arc<RwLock<Vec<SsTable>>>,
     wal: Arc<RwLock<Wal>>,
+    /// Cached flag: true if WAL is in async mode (avoids lock to check)
+    wal_is_async: bool,
     config: LsmConfig,
     compaction_sender: mpsc::Sender<CompactionType>,
     compaction_in_progress: Arc<AtomicBool>,
@@ -49,6 +51,7 @@ impl LsmTree {
         std::fs::create_dir_all(&data_dir)?;
 
         let wal = Wal::with_config(path.join("wal.log"), wal_config)?;
+        let wal_is_async = wal.is_async();
 
         let (compaction_sender, mut compaction_receiver) = mpsc::channel(1);
         let sstables = Arc::new(RwLock::new(Vec::new()));
@@ -60,6 +63,7 @@ impl LsmTree {
             immutable_memtables: Arc::new(RwLock::new(Vec::new())),
             sstables,
             wal: Arc::new(RwLock::new(wal)),
+            wal_is_async,
             config,
             compaction_sender,
             compaction_in_progress,
@@ -282,14 +286,13 @@ impl LsmTree {
 
     pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
         // Write to WAL first for durability
-        let sequence = {
-            let wal_r = self.wal.read();
-            if wal_r.is_async() {
-                wal_r.append_async(&key, &value)?
-            } else {
-                drop(wal_r);
-                self.wal.write().append(&key, &value)?
-            }
+        // Use cached async flag to avoid lock acquisition in the hot path
+        let sequence = if self.wal_is_async {
+            // Async mode: crossbeam_channel::Sender is Sync, so this is safe
+            // without holding any lock during the send
+            self.wal.read().append_async(&key, &value)?
+        } else {
+            self.wal.write().append(&key, &value)?
         };
         debug!("WAL: Wrote entry with sequence {}", sequence);
 

@@ -52,7 +52,7 @@ page_size = 16384
 # Memory table size (bytes) before flushing to disk.
 # Larger values reduce I/O (fewer flushes) but use more RAM.
 # On small machines, reduce to 64-128 MiB.
-memtable_size = 536870912
+memtable_size = 536870912  # 512 MiB
 
 # Number of level-0 files that trigger compaction.
 # Higher values reduce compaction frequency when memtables are large.
@@ -60,7 +60,7 @@ level0_file_num_compaction_trigger = 8
 
 # Maximum total size for level 0 (bytes).
 # Keep close to memtable_size.
-level0_size = 536870912
+level0_size = 536870912  # 512 MiB
 
 # Size multiplier between levels
 # Default: 10
@@ -82,10 +82,10 @@ bloom_filter_fp_rate = 0.01
 # Write-ahead log (WAL) configuration
 [storage.wal]
 # WAL buffer size (bytes) for write batching.
-buffer_size = 4194304
+buffer_size = 10485760  # 10 MiB
 
 # Maximum WAL size (bytes) before rotation.
-max_size = 268435456
+max_size = 268435456  # 256 MiB
 
 # Sync changes to disk using the thresholds below.
 # Keep this enabled for durability.
@@ -97,6 +97,6 @@ async_write = true
 
 # Group-commit thresholds:
 # - Sync after this many bytes appended to the WAL.
-sync_every_bytes = 4194304  # 4 MiB
+sync_every_bytes = 1048576  # 1 MiB
 # - Ensure a sync at least this often (milliseconds), even if the byte threshold is not hit.
-sync_interval_ms = 20       # 20 ms
+sync_interval_ms = 1000  # 1 second

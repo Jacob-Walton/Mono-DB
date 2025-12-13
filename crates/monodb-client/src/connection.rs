@@ -13,6 +13,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
+use tokio::sync::OwnedSemaphorePermit;
 
 /// Represents a connection to the server.
 ///
@@ -25,6 +26,10 @@ pub struct Connection {
     /// Request ID counter for matching requests and responses
     #[allow(dead_code)]
     request_id: u64,
+    /// Owned permit from the connection pool semaphore. Keeping this
+    /// permit alive for the lifetime of the connection ensures the pool
+    /// counts active connections correctly.
+    pub(crate) permit: Option<OwnedSemaphorePermit>,
 }
 
 impl Connection {
@@ -41,11 +46,13 @@ impl Connection {
             .await
             .map_err(|_| MonoError::Network("Connection timeout after 3 seconds".into()))?
             .map_err(|e| MonoError::Network(format!("Failed to connect: {e}")))?;
+        stream.set_nodelay(true)?;
 
         let mut conn = Self {
             stream,
             buffer: BytesMut::new(),
             request_id: 0,
+            permit: None,
         };
 
         // Send Connect request

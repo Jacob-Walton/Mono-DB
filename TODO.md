@@ -15,7 +15,7 @@
 
 ### Storage Engine
 
-- [ ] Reimplement and optimise the buffer pool.
+- [x] Reimplement and optimise the buffer pool.
 - [x] Replace bincode with manual encoding/decoding throughout the codec to remove overhead.
 - [ ] Add support for secondary indexes.
 - [ ] Add the option to choose B-Tree or LSM per table, based on declared priority (read/write).

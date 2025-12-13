@@ -6,11 +6,11 @@ use std::{
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicU64, Ordering},
-        mpsc::{RecvTimeoutError, Sender, channel},
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use crossbeam_channel::{Sender, RecvTimeoutError, unbounded};
 
 use serde::{Deserialize, Serialize};
 
@@ -348,18 +348,58 @@ fn find_next_magic(buffer: &[u8], cursor: &mut usize) -> bool {
     false
 }
 
+/// Lock-free handle for async WAL appends.
+/// This can be shared across threads without any synchronization.
+#[derive(Clone)]
+pub struct WalAsyncHandle {
+    sequence_number: Arc<AtomicU64>,
+    tx: Sender<Vec<u8>>,
+}
+
+impl WalAsyncHandle {
+    /// Append an insert entry to the WAL without any locks.
+    #[inline]
+    pub fn append(&self, key: &[u8], value: &[u8]) -> Result<u64> {
+        self.append_with_type(key, value, WalEntryType::Insert)
+    }
+
+    /// Append an entry with a specific type without any locks.
+    #[inline]
+    pub fn append_with_type(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        entry_type: WalEntryType,
+    ) -> Result<u64> {
+        let sequence = self.sequence_number.fetch_add(1, Ordering::Relaxed);
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64;
+
+        let buf = encode_record(sequence, timestamp, entry_type, key, value, false);
+
+        let _ = self.tx.send(buf);
+
+        Ok(sequence)
+    }
+}
+
 // WAL Implementation
 
 pub struct Wal {
     writer: BufWriter<File>,
     file_path: PathBuf,
-    sequence_number: AtomicU64,
+    /// Shared sequence number
+    sequence_number: Arc<AtomicU64>,
     current_size: u64,
     max_size: u64,
     sync_on_write: bool,
     last_checkpoint: Option<CheckpointInfo>,
     async_mode: bool,
     tx: Option<Sender<Vec<u8>>>,
+    /// Lock-free handle for async appends (None if sync mode)
+    async_handle: Option<WalAsyncHandle>,
     bytes_since_sync: u64,
     last_sync: Instant,
     sync_every_bytes: Option<u64>,
@@ -395,16 +435,19 @@ impl Wal {
             last_checkpoint.as_ref().map(|c| c.sequence)
         );
 
+        let sequence_number = Arc::new(AtomicU64::new(last_sequence + 1));
+
         let mut wal = Self {
             writer,
             file_path: path,
-            sequence_number: AtomicU64::new(last_sequence + 1),
+            sequence_number,
             current_size,
             max_size: config.max_size,
             sync_on_write: config.sync_on_write,
             last_checkpoint,
             async_mode: false,
             tx: None,
+            async_handle: None,
             bytes_since_sync: 0,
             last_sync: Instant::now(),
             sync_every_bytes: config.sync_every_bytes,
@@ -423,7 +466,7 @@ impl Wal {
 
     /// Spawn the background async writer thread
     fn spawn_async_writer(&mut self, config: WalConfig) {
-        let (tx, rx) = channel::<Vec<u8>>();
+        let (tx, rx) = unbounded::<Vec<u8>>();
         let path_bg = self.file_path.clone();
         let buffer_size = config.buffer_size;
         let sync_on_write = config.sync_on_write;
@@ -553,8 +596,15 @@ impl Wal {
             commit_cv_arc.notify_all();
         });
 
+        // Create lock-free async append handle and store it
+        let async_handle = WalAsyncHandle {
+            sequence_number: Arc::clone(&self.sequence_number),
+            tx: tx.clone(),
+        };
+
         self.async_mode = true;
         self.tx = Some(tx);
+        self.async_handle = Some(async_handle);
     }
 
     /// Returns true if WAL is using background async writer
@@ -833,8 +883,16 @@ impl Wal {
 
     /// Get current WAL statistics
     pub fn stats(&self) -> WalStats {
+        let current_size = if self.async_mode {
+            std::fs::metadata(&self.file_path)
+                .map(|m| m.len())
+                .unwrap_or(self.current_size)
+        } else {
+            self.current_size
+        };
+
         WalStats {
-            current_size: self.current_size,
+            current_size,
             next_sequence: self.sequence_number.load(Ordering::SeqCst),
             max_size: self.max_size,
             last_checkpoint_sequence: self.last_checkpoint.as_ref().map(|c| c.sequence),

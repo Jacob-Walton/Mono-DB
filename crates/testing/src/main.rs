@@ -1,184 +1,281 @@
-// use anyhow::{Result, bail};
-// use monodb_client::Client;
-// use monodb_common::protocol::{ExecutionResult, Response};
-
-// #[tokio::main]
-// pub async fn main() -> Result<()> {
-//     let client = Client::connect("localhost:7899").await;
-
-//     let table_code = r#"
-// make table users
-//     as relational
-//     fields
-//         id int primary key unique
-//         first_name text
-//         last_name text
-//         email text unique
-
-// make table testing
-//     as document
-
-// make table sessions
-//     as keyspace
-//     persistence "memory"
-// "#;
-
-//     match client {
-//         Ok(client) => {
-//             let pool = client.pool().await;
-//             let connection = pool.get().await;
-
-//             match connection {
-//                 Ok(mut conn) => {
-//                     let _ = conn.execute(table_code.to_string()).await;
-
-//                     let response = conn.list_tables().await;
-
-//                     match response {
-//                         Ok(resp) => match resp {
-//                             Response::Success { result } => {
-//                                 let result = result.get(0).unwrap();
-
-//                                 match result {
-//                                     ExecutionResult::Ok { data, .. } => {
-//                                         println!("Data: {data}");
-//                                     }
-//                                     _ => bail!("Received unexpected ExecutionResult"),
-//                                 }
-//                             }
-//                             _ => bail!("Received unexpected response type"),
-//                         },
-//                         Err(e) => {
-//                             bail!(e)
-//                         }
-//                     }
-//                 }
-//                 Err(e) => {
-//                     bail!(e)
-//                 }
-//             }
-//         }
-//         Err(e) => {
-//             bail!(e)
-//         }
-//     }
-//     Ok(())
-// }
-
-use bytes::BytesMut;
-use indexmap::IndexMap;
+use anyhow::{Context, Result, bail};
+use futures::stream::{FuturesUnordered, StreamExt};
+use monodb_client::Client;
 use monodb_common::{
     Value,
-    protocol::{ExecutionResult, ProtocolCodec, Request, Response},
+    protocol::{ExecutionResult, Response},
 };
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+use tokio::sync::Mutex as AsyncMutex;
 
-fn example_requests() -> Vec<Request> {
-    vec![
-        Request::Connect {
-            protocol_version: 1,
-            auth_token: None,
-        },
-        Request::Connect {
-            protocol_version: 1,
-            auth_token: Some("example_auth_token".into()),
-        },
-        Request::Connect {
-            protocol_version: 2,
-            auth_token: None,
-        },
-        Request::Execute {
-            query: "get from users".to_string(),
-            params: Vec::new(),
-            snapshot_timestamp: None,
-            user_id: None,
-        },
-        Request::Execute {
-            query: "get from users where\n\tfirst_name = $1".to_string(),
-            params: vec![Value::String("Jacob".into())],
-            snapshot_timestamp: None,
-            user_id: None,
-        },
-        Request::Execute {
-            query: "get from users".to_string(),
-            params: Vec::new(),
-            snapshot_timestamp: Some(1),
-            user_id: None,
-        },
-        Request::Execute {
-            query: "get from users".to_string(),
-            params: Vec::new(),
-            snapshot_timestamp: None,
-            user_id: Some("example_id".into()),
-        },
-    ]
+struct BenchConfig {
+    name: &'static str,
+    builder: Arc<dyn Fn(usize, usize) -> (String, usize) + Send + Sync>,
 }
 
-fn example_responses() -> Vec<Response> {
-    vec![
-        Response::ConnectAck {
-            protocol_version: 1,
-            server_timestamp: None,
-            user_permissions: None,
-        },
-        Response::ConnectAck {
-            protocol_version: 1,
-            server_timestamp: Some(1735689600),
-            user_permissions: Some(vec!["read".into(), "write".into()]),
-        },
-        Response::Success { result: vec![] },
-        Response::Success {
-            result: vec![
-                ExecutionResult::Ok {
-                    data: vec![Value::Row({
-                        let mut map = IndexMap::new();
-                        map.insert("result".into(), Value::Bool(true));
-                        map
-                    })],
-                    time: 1735689600,
-                    time_elapsed: Some(5),
-                    commit_timestamp: None,
-                    row_count: Some(0),
-                },
-                ExecutionResult::Created {
-                    time: 1735689605,
-                    commit_timestamp: Some(1735689610),
-                },
-                ExecutionResult::Modified {
-                    time: 1735689610,
-                    commit_timestamp: None,
-                    rows_affected: Some(50),
-                },
-            ],
-        },
-        Response::Error {
-            code: 1001.into(),
-            message: "Syntax error in query".into(),
-        },
-        Response::Error {
-            code: 9999.into(),
-            message: "Internal server error".into(),
-        },
-        Response::Stream {},
-        Response::Ack {},
-    ]
+/// Run a write benchmark against the configured target.
+async fn run_benchmark(
+    cfg: BenchConfig,
+    pool: Arc<monodb_client::pool::ConnectionPool>,
+    count: usize,
+    concurrency: usize,
+    batch_size: usize,
+) -> Result<()> {
+    println!("\n=== {} ===", cfg.name);
+
+    let start_time = std::time::Instant::now();
+
+    let latencies = Arc::new(AsyncMutex::new(Vec::with_capacity(count)));
+    let total_bytes = Arc::new(AtomicU64::new(0));
+
+    let insert_futures = (0..count).step_by(batch_size).map(|base| {
+        let pool = Arc::clone(&pool);
+        let lat_clone = Arc::clone(&latencies);
+        let builder = Arc::clone(&cfg.builder);
+        let total_bytes = Arc::clone(&total_bytes);
+        async move {
+            let mut conn = pool.get().await.expect("Failed to get connection from pool");
+
+            let (batch_sql, actual) = builder(base, batch_size);
+            if actual == 0 {
+                pool.return_connection(conn);
+                return Ok(Response::Success { result: vec![] });
+            }
+
+            // Rough protocol overhead per Execute request (version/type/len etc.)
+            let request_bytes = 32 + batch_sql.len() as u64;
+            total_bytes.fetch_add(request_bytes, Ordering::Relaxed);
+
+            let start = std::time::Instant::now();
+            let response = conn.execute(batch_sql).await;
+            let elapsed = start.elapsed().as_nanos();
+
+            let per_insert = elapsed / (actual as u128);
+            let mut guard = lat_clone.lock().await;
+            for _ in 0..actual {
+                guard.push(per_insert);
+            }
+
+            pool.return_connection(conn);
+            response
+        }
+    });
+
+    let mut stream = FuturesUnordered::new();
+    let mut in_flight = 0;
+    let mut insert_iter = insert_futures.into_iter();
+
+    while in_flight < concurrency {
+        if let Some(fut) = insert_iter.next() {
+            stream.push(fut);
+            in_flight += 1;
+        } else {
+            break;
+        }
+    }
+
+    while let Some(res) = stream.next().await {
+        in_flight -= 1;
+        match res {
+            Ok(Response::Success { .. }) => {}
+            Ok(other) => bail!("Unexpected response type on insert: {other:?}"),
+            Err(e) => bail!("Insert failed: {e}"),
+        }
+        if let Some(fut) = insert_iter.next() {
+            stream.push(fut);
+            in_flight += 1;
+        }
+    }
+
+    let duration = start_time.elapsed();
+    println!("Inserted {count} items in {:?}", duration);
+
+    let mut lat_vec = latencies.lock().await;
+    if !lat_vec.is_empty() {
+        lat_vec.sort_unstable();
+        let count = lat_vec.len();
+        let sum: u128 = lat_vec.iter().copied().sum();
+        let mean_ns = sum as f64 / count as f64;
+        let idx = |p: f64| -> usize {
+            let mut i = (count as f64 * p).floor() as usize;
+            if i >= count {
+                i = count - 1;
+            }
+            i
+        };
+        let p50 = lat_vec[idx(0.50)];
+        let p90 = lat_vec[idx(0.90)];
+        let p99 = lat_vec[idx(0.99)];
+        let max = *lat_vec.last().unwrap();
+
+        println!(
+            "Per-request latency (ns): count={} mean={:.0} p50={} p90={} p99={} max={}",
+            count, mean_ns, p50, p90, p99, max
+        );
+    } else {
+        println!("No latency samples recorded");
+    }
+
+    let total_bytes = total_bytes.load(Ordering::Relaxed);
+    let bandwidth = total_bytes as f64 / duration.as_secs_f64();
+    match bandwidth {
+        bw if bw < 10_000.0 => println!("Effective Bandwidth: {:.2} B/s", bw),
+        bw if bw < 10_000_000.0 => println!("Effective Bandwidth: {:.2} KB/s", bw / 1_000.0),
+        bw if bw < 10_000_000_000.0 => {
+            println!("Effective Bandwidth: {:.2} MB/s", bw / 1_000_000.0)
+        }
+        bw => println!("Effective Bandwidth: {:.2} GB/s", bw / 1_000_000_000.0),
+    }
+
+    Ok(())
 }
 
-fn main() {
-    for request in example_requests() {
-        let bytes = ProtocolCodec::encode_request(&request).expect("Failed to encode request");
-        let decoded_request = ProtocolCodec::decode_request(&mut BytesMut::from(&bytes[..]))
-            .expect("Failed to decode request")
-            .expect("Decoded request was None");
-        assert_eq!(request, decoded_request);
-        println!("Successfully encoded and decoded request: {:?}", request);
+#[tokio::main]
+pub async fn main() -> Result<()> {
+    let client = Client::connect("localhost:7899")
+        .await
+        .context("Failed to connect to server")?;
+
+    let table_code = r#"
+make table users
+    as relational
+    fields
+        id int primary key
+        first_name text
+        last_name text
+        email text
+
+make table testing
+    as document
+
+make table sessions
+    as keyspace
+    persistence "memory"
+"#;
+
+    let pool = client.pool().await.clone();
+    let mut conn = pool
+        .get()
+        .await
+        .context("Failed to get connection from pool")?;
+
+    // Ignore result of table creation
+    let _ = conn.execute(table_code.to_string()).await;
+
+    let response = conn.list_tables().await.context("Failed to list tables")?;
+
+    let result = match response {
+        Response::Success { result } => result.get(0).cloned().context("No result returned")?,
+        _ => bail!("Received unexpected response type"),
+    };
+
+    match result {
+        ExecutionResult::Ok { data, .. } => {
+            for value in data {
+                let arr = match value {
+                    Value::Array(arr) => arr,
+                    _ => bail!("Received unexpected return value"),
+                };
+                println!("Received expected return value");
+                for item in arr {
+                    let arr = match item {
+                        Value::Array(arr) => arr,
+                        _ => bail!("Found unexpected value in table listing"),
+                    };
+                    if arr.len() != 2 {
+                        bail!("Received invalid table array");
+                    }
+                    let name = arr
+                        .get(1)
+                        .and_then(|v| v.as_string())
+                        .context("Table name missing or not a string")?;
+                    let r#type = arr
+                        .get(0)
+                        .and_then(|v| v.as_string())
+                        .context("Table type missing or not a string")?;
+                    println!("{} (type: {})", name, r#type);
+                }
+            }
+        }
+        _ => bail!("Received unexpected ExecutionResult"),
     }
 
-    for response in example_responses() {
-        let bytes = ProtocolCodec::encode_response(&response).expect("Failed to encode response");
-        let decoded_response = ProtocolCodec::decode_response(&mut BytesMut::from(&bytes[..]))
-            .expect("Failed to decode response")
-            .expect("Decoded response was None");
-        assert_eq!(response, decoded_response);
-        println!("Successfully encoded and decoded response: {:?}", response);
-    }
+    // Test inserting a large number of records using multiple connections
+    const COUNT: usize = 10_000;
+    const CONCURRENCY: usize = 16;
+    // Batch size: number of logical inserts per Execute request
+    const BATCH_SIZE: usize = 256;
+
+    let pool = Arc::new(pool);
+
+    let relational = BenchConfig {
+        name: "Relational table (users)",
+        builder: Arc::new(|base, batch_size| {
+            let mut batch_sql = String::new();
+            let mut actual = 0usize;
+            for j in 0..batch_size {
+                let i = base + j;
+                if i >= COUNT {
+                    break;
+                }
+                let first_name = format!("First{i}");
+                let last_name = format!("Last{i}");
+                let email = format!("{first_name}.{last_name}@example.com");
+                batch_sql.push_str(&format!(
+                    "put into users\n    id = {i}\n    first_name = \"{first_name}\"\n    last_name = \"{last_name}\"\n    email = \"{email}\"\n\n"
+                ));
+                actual += 1;
+            }
+            (batch_sql, actual)
+        }),
+    };
+
+    let collection = BenchConfig {
+        name: "Document collection (testing)",
+        builder: Arc::new(|base, batch_size| {
+            let mut batch_sql = String::new();
+            let mut actual = 0usize;
+            for j in 0..batch_size {
+                let i = base + j;
+                if i >= COUNT {
+                    break;
+                }
+                batch_sql.push_str(&format!(
+                    "put into testing\n    _id = {i}\n    first_name = \"DocFirst{i}\"\n    last_name = \"DocLast{i}\"\n    email = \"doc{i}@example.com\"\n\n"
+                ));
+                actual += 1;
+            }
+            (batch_sql, actual)
+        }),
+    };
+
+    let keyspace = BenchConfig {
+        name: "In-memory keyspace (sessions)",
+        builder: Arc::new(|base, batch_size| {
+            let mut batch_sql = String::new();
+            let mut actual = 0usize;
+            for j in 0..batch_size {
+                let i = base + j;
+                if i >= COUNT {
+                    break;
+                }
+                batch_sql.push_str(&format!(
+                    "put into sessions\n    key = \"session:{i}\"\n    value = \"payload{i}\"\n\n"
+                ));
+                actual += 1;
+            }
+            (batch_sql, actual)
+        }),
+    };
+
+    run_benchmark(relational, Arc::clone(&pool), COUNT, CONCURRENCY, BATCH_SIZE).await?;
+    run_benchmark(collection, Arc::clone(&pool), COUNT, CONCURRENCY, BATCH_SIZE).await?;
+    run_benchmark(keyspace, Arc::clone(&pool), COUNT, CONCURRENCY, BATCH_SIZE).await?;
+
+    pool.return_connection(conn);
+
+    Ok(())
 }

@@ -16,7 +16,7 @@ impl Default for PoolConfig {
     fn default() -> Self {
         Self {
             min_connections: 1,
-            max_connections: 10,
+            max_connections: 32,
             connection_timeout: Duration::from_secs(5),
             idle_timeout: Some(Duration::from_secs(300)),
         }
@@ -51,13 +51,20 @@ impl ConnectionPool {
         }
 
         // Create new connection
-        let _permit = self
+        // Acquire an owned permit which we will store inside the Connection
+        // so that the permit is held for the lifetime of the TCP connection
+        let permit = self
             .semaphore
-            .acquire()
+            .clone()
+            .acquire_owned()
             .await
             .map_err(|_| MonoError::Network("Connection pool closed".into()))?;
 
-        Connection::connect(&self.addr).await
+        let mut conn = Connection::connect(&self.addr).await?;
+        // Attach the permit so the pool slot remains reserved while the
+        // connection exists (idle or checked out).
+        conn.permit = Some(permit);
+        Ok(conn)
     }
 
     pub fn return_connection(&self, conn: Connection) {

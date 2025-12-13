@@ -1,6 +1,6 @@
 use monodb_common::Result;
 
-use crate::pool::ConnectionPool;
+pub use crate::pool::ConnectionPool;
 
 mod connection;
 mod pool;
