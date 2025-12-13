@@ -12,7 +12,7 @@ pub mod sstable;
 
 use crate::config::{LsmConfig, WalConfig};
 use crate::storage::wal::Wal;
-use compaction::{CompactionType, run_compaction_task};
+pub use compaction::{CompactionType, run_compaction_task};
 use crossbeam_skiplist::SkipMap;
 use monodb_common::Result;
 use parking_lot::RwLock;
@@ -31,8 +31,10 @@ pub struct LsmTree {
     memtable_size: Arc<AtomicUsize>,
     immutable_memtables: ImmutableMemtables,
     sstables: Arc<RwLock<Vec<SsTable>>>,
-    wal: Arc<RwLock<Wal>>,
+    /// Optional WAL - if None, uses external/system WAL
+    wal: Option<Arc<RwLock<Wal>>>,
     /// Cached flag: true if WAL is in async mode (avoids lock to check)
+    #[allow(dead_code)]
     wal_is_async: bool,
     config: LsmConfig,
     compaction_sender: mpsc::Sender<CompactionType>,
@@ -40,18 +42,56 @@ pub struct LsmTree {
     data_dir: PathBuf,
     /// Track if memtable contains only replayed WAL data (no new writes)
     memtable_is_replay_only: Arc<AtomicBool>,
+    /// Collection name for this LSM tree (used in system WAL)
+    #[allow(dead_code)]
+    collection_name: String,
 }
 
 impl LsmTree {
+    /// Create a new LSM tree with its own per-collection WAL (legacy mode).
+    #[allow(dead_code)]
     pub fn new<P: AsRef<Path>>(path: P, config: LsmConfig, wal_config: WalConfig) -> Result<Self> {
+        let path = path.as_ref();
+        let collection_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        Self::with_wal(path, config, Some(wal_config), collection_name)
+    }
+
+    /// Create a new LSM tree that uses an external/system WAL.
+    /// When wal_config is None, no internal WAL is created - caller must handle WAL.
+    pub fn with_external_wal<P: AsRef<Path>>(
+        path: P,
+        config: LsmConfig,
+        collection_name: String,
+    ) -> Result<Self> {
+        Self::with_wal(path, config, None, collection_name)
+    }
+
+    /// Internal constructor - creates LSM tree with optional internal WAL.
+    fn with_wal<P: AsRef<Path>>(
+        path: P,
+        config: LsmConfig,
+        wal_config: Option<WalConfig>,
+        collection_name: String,
+    ) -> Result<Self> {
         let path = path.as_ref();
         let data_dir = path.join("data");
 
         // Ensure data directory exists
         std::fs::create_dir_all(&data_dir)?;
 
-        let wal = Wal::with_config(path.join("wal.log"), wal_config)?;
-        let wal_is_async = wal.is_async();
+        // Create internal WAL only if config provided
+        let (wal, wal_is_async) = if let Some(wal_cfg) = wal_config {
+            let wal = Wal::with_config(path.join("wal.log"), wal_cfg)?;
+            let is_async = wal.is_async();
+            (Some(Arc::new(RwLock::new(wal))), is_async)
+        } else {
+            (None, false)
+        };
 
         let (compaction_sender, mut compaction_receiver) = mpsc::channel(1);
         let sstables = Arc::new(RwLock::new(Vec::new()));
@@ -62,20 +102,23 @@ impl LsmTree {
             memtable_size: Arc::new(AtomicUsize::new(0)),
             immutable_memtables: Arc::new(RwLock::new(Vec::new())),
             sstables,
-            wal: Arc::new(RwLock::new(wal)),
+            wal,
             wal_is_async,
             config,
             compaction_sender,
             compaction_in_progress,
             data_dir: data_dir.clone(),
             memtable_is_replay_only: Arc::new(AtomicBool::new(true)),
+            collection_name,
         };
 
         // Load existing SSTables from disk
         lsm.load_existing_sstables()?;
 
-        // Replay WAL entries into memtable
-        lsm.replay_wal(path)?;
+        // Replay internal WAL entries into memtable (only if we have internal WAL)
+        if lsm.wal.is_some() {
+            lsm.replay_wal(path)?;
+        }
 
         // Spawn compaction task with proper references
         let sstables_ref = Arc::clone(&lsm.sstables);
@@ -296,18 +339,30 @@ impl LsmTree {
             .sum()
     }
 
+    #[allow(dead_code)]
     pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
-        // Write to WAL first for durability
-        // Use cached async flag to avoid lock acquisition in the hot path
-        let sequence = if self.wal_is_async {
-            // Async mode: crossbeam_channel::Sender is Sync, so this is safe
-            // without holding any lock during the send
-            self.wal.read().append_async(&key, &value)?
-        } else {
-            self.wal.write().append(&key, &value)?
-        };
-        debug!("WAL: Wrote entry with sequence {}", sequence);
+        // Write to internal WAL first for durability (if we have one)
+        if let Some(ref wal) = self.wal {
+            let sequence = if self.wal_is_async {
+                wal.read().append_async(&key, &value)?
+            } else {
+                wal.write().append(&key, &value)?
+            };
+            debug!("WAL: Wrote entry with sequence {}", sequence);
+        }
 
+        // Do the actual memtable insert
+        self.put_to_memtable(key, value).await
+    }
+
+    /// Insert directly into memtable without WAL write.
+    /// Use this when system-level WAL handles persistence.
+    pub async fn put_no_wal(&self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
+        self.put_to_memtable(key, value).await
+    }
+
+    /// Internal: insert into memtable and handle flush if needed.
+    async fn put_to_memtable(&self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
         // Mark that memtable now contains new writes (not just replay data)
         self.memtable_is_replay_only.store(false, Ordering::Relaxed);
 
@@ -338,11 +393,19 @@ impl LsmTree {
             self.flush_memtable().await?;
             self.trigger_compaction_if_needed().await?;
 
-            // Consider checkpointing after major operations
-            self.auto_checkpoint_if_needed().await?;
+            // Consider checkpointing after major operations (only if we have internal WAL)
+            if self.wal.is_some() {
+                self.auto_checkpoint_if_needed().await?;
+            }
         }
 
         Ok(())
+    }
+
+    /// Get the collection name for this LSM tree.
+    #[allow(dead_code)]
+    pub fn collection_name(&self) -> &str {
+        &self.collection_name
     }
 
     #[allow(dead_code)]
@@ -474,27 +537,41 @@ impl LsmTree {
     }
 
     /// Delete a key-value pair (writes a tombstone).
+    #[allow(dead_code)]
     pub async fn delete(&self, key: Vec<u8>) -> Result<()> {
-        // Write delete entry to WAL first
-        let sequence = {
-            let wal_r = self.wal.read();
-            if wal_r.is_async() {
-                wal_r.append_with_type_async(
-                    &key,
-                    &[],
-                    crate::storage::wal::WalEntryType::Delete,
-                )?
-            } else {
-                drop(wal_r);
-                self.wal.write().append_with_type(
-                    &key,
-                    &[],
-                    crate::storage::wal::WalEntryType::Delete,
-                )?
-            }
-        };
-        debug!("WAL: Wrote delete entry with sequence {}", sequence);
+        // Write delete entry to internal WAL first (if we have one)
+        if let Some(ref wal) = self.wal {
+            let sequence = {
+                let wal_r = wal.read();
+                if wal_r.is_async() {
+                    wal_r.append_with_type_async(
+                        &key,
+                        &[],
+                        crate::storage::wal::WalEntryType::Delete,
+                    )?
+                } else {
+                    drop(wal_r);
+                    wal.write().append_with_type(
+                        &key,
+                        &[],
+                        crate::storage::wal::WalEntryType::Delete,
+                    )?
+                }
+            };
+            debug!("WAL: Wrote delete entry with sequence {}", sequence);
+        }
 
+        self.delete_from_memtable(key).await
+    }
+
+    /// Delete directly from memtable without WAL write.
+    /// Use this when system-level WAL handles persistence.
+    pub async fn delete_no_wal(&self, key: Vec<u8>) -> Result<()> {
+        self.delete_from_memtable(key).await
+    }
+
+    /// Internal: insert tombstone into memtable and handle flush if needed.
+    async fn delete_from_memtable(&self, key: Vec<u8>) -> Result<()> {
         // Insert tombstone into memtable (empty value indicates deletion)
         let entry_size = key.len() + 16; // +16 for overhead
 
@@ -509,7 +586,6 @@ impl LsmTree {
         };
 
         // Insert tombstone (empty value)
-        // Move key directly into memtable (avoid cloning)
         self.memtable.read().insert(key, Vec::new());
 
         // Update size atomically
@@ -523,15 +599,22 @@ impl LsmTree {
             self.flush_memtable().await?;
             self.trigger_compaction_if_needed().await?;
 
-            // Consider checkpointing after major operations
-            self.auto_checkpoint_if_needed().await?;
+            // Consider checkpointing after major operations (only if we have internal WAL)
+            if self.wal.is_some() {
+                self.auto_checkpoint_if_needed().await?;
+            }
         }
 
         Ok(())
     }
 
     /// Create a comprehensive checkpoint in the WAL with SSTable state.
-    pub async fn checkpoint(&self) -> Result<u64> {
+    /// Returns None if no internal WAL is configured.
+    pub async fn checkpoint(&self) -> Result<Option<u64>> {
+        let Some(ref wal) = self.wal else {
+            return Ok(None);
+        };
+
         // Get list of all current SSTable files
         let sstable_files: Vec<String> = self
             .sstables
@@ -548,7 +631,7 @@ impl LsmTree {
             .collect();
 
         // Create checkpoint with comprehensive metadata
-        let sequence = self.wal.write().checkpoint(sstable_files.clone(), 1)?; // Schema version 1 for now
+        let sequence = wal.write().checkpoint(sstable_files.clone(), 1)?; // Schema version 1 for now
 
         info!(
             "Created LSM checkpoint at sequence {} with {} SSTable files",
@@ -557,36 +640,50 @@ impl LsmTree {
         );
 
         // Check if we should truncate the WAL after checkpointing
-        if self.wal.read().should_truncate() {
+        if wal.read().should_truncate() {
             info!("WAL size threshold reached, performing truncation");
-            self.wal.write().truncate_to_checkpoint()?;
+            wal.write().truncate_to_checkpoint()?;
         }
 
-        Ok(sequence)
+        Ok(Some(sequence))
     }
 
     /// Wait for the WAL to be fsynced up to at least the given sequence.
     /// Only effective in async WAL mode. Returns Ok(true) if reached, Ok(false) on timeout.
+    /// Returns Ok(true) immediately if no internal WAL is configured.
     pub async fn wal_commit_barrier(
         &self,
         sequence: u64,
         timeout: Option<std::time::Duration>,
     ) -> Result<bool> {
-        let wal = self.wal.read();
-        wal.commit_barrier(sequence, timeout)
+        let Some(ref wal) = self.wal else {
+            return Ok(true); // No WAL = nothing to wait for
+        };
+        let wal_guard = wal.read();
+        wal_guard
+            .commit_barrier(sequence, timeout)
             .map_err(|e| monodb_common::MonoError::Storage(format!("commit barrier: {}", e)))
     }
 
     /// Wait until current writes are durable (to current next_sequence - 1).
+    /// Returns Ok(true) immediately if no internal WAL is configured.
     pub async fn wal_commit_current(&self, timeout: Option<std::time::Duration>) -> Result<bool> {
-        let stats = self.wal.read().stats();
+        let Some(ref wal) = self.wal else {
+            return Ok(true);
+        };
+        let stats = wal.read().stats();
         let target = stats.next_sequence.saturating_sub(1);
         self.wal_commit_barrier(target, timeout).await
     }
 
     /// Create a checkpoint automatically after major operations
+    /// Does nothing if no internal WAL is configured.
     pub async fn auto_checkpoint_if_needed(&self) -> Result<()> {
-        let wal_stats = self.wal.read().stats();
+        let Some(ref wal) = self.wal else {
+            return Ok(());
+        };
+
+        let wal_stats = wal.read().stats();
 
         // Create checkpoint if:
         // 1. We have written more than 1000 entries since last checkpoint, OR
@@ -615,14 +712,24 @@ impl LsmTree {
         Ok(())
     }
 
-    /// Force sync the WAL to disk
+    /// Force sync the WAL to disk.
+    /// Does nothing if no internal WAL is configured.
     pub async fn sync_wal(&self) -> Result<()> {
-        self.wal.write().sync()
+        if let Some(ref wal) = self.wal {
+            wal.write().sync()?;
+        }
+        Ok(())
     }
 
-    /// Get WAL statistics
-    pub fn wal_stats(&self) -> crate::storage::wal::WalStats {
-        self.wal.read().stats()
+    /// Get WAL statistics. Returns None if no internal WAL is configured.
+    pub fn wal_stats(&self) -> Option<crate::storage::wal::WalStats> {
+        self.wal.as_ref().map(|wal| wal.read().stats())
+    }
+
+    /// Check if this LSM tree has an internal WAL.
+    #[allow(dead_code)]
+    pub fn has_internal_wal(&self) -> bool {
+        self.wal.is_some()
     }
 
     /// Clear the WAL after successful compaction

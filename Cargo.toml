@@ -16,7 +16,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 authors = ["Jacob Walton"]
 license = ""
@@ -67,12 +67,16 @@ incremental = false
 rpath = false
 
 [profile.dev]
-opt-level = 1
+opt-level = 2
 debug = true
-overflow-checks = true
 incremental = true
-codegen-units = 128
+codegen-units = 16
 panic = "unwind"
+overflow-checks = true
 
 [profile.test]
-inherits = "release"
+opt-level = 1
+debug = true
+incremental = true
+codegen-units = 64
+overflow-checks = true

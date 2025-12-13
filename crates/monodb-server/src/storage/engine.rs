@@ -33,11 +33,20 @@ pub struct StorageEngine {
     config: StorageConfig,
     /// Transaction manager for MVCC (relational tables only)
     tx_manager: Arc<TransactionManager>,
+    /// System-level WAL for all data and transaction operations
+    system_wal: Arc<RwLock<Wal>>,
+    /// Cached flag for system WAL async mode
+    system_wal_is_async: bool,
 }
 
 impl StorageEngine {
     pub async fn new(config: StorageConfig) -> Result<Arc<Self>> {
         std::fs::create_dir_all(&config.data_dir)?;
+
+        // Create system-level WAL
+        let wal_path = Path::new(&config.data_dir).join("system.wal");
+        let system_wal = Wal::with_config(&wal_path, config.wal.clone())?;
+        let system_wal_is_async = system_wal.is_async();
 
         let engine = Arc::new(Self {
             btrees: Arc::new(DashMap::new()),
@@ -49,12 +58,264 @@ impl StorageEngine {
             secondary_indexes: Arc::new(DashMap::new()),
             config,
             tx_manager: Arc::new(TransactionManager::new()),
+            system_wal: Arc::new(RwLock::new(system_wal)),
+            system_wal_is_async,
         });
+
+        // Replay system WAL before loading schemas
+        engine.replay_system_wal().await?;
 
         // Load persisted schemas
         engine.load_schemas().await?;
 
         Ok(engine)
+    }
+
+    /// Replay entries from the system WAL during startup.
+    /// Only replays data from committed transactions.
+    async fn replay_system_wal(&self) -> Result<()> {
+        let wal_path = Path::new(&self.config.data_dir).join("system.wal");
+        let entries = Wal::replay(&wal_path)?;
+
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        info!("Replaying {} entries from system WAL", entries.len());
+
+        // First pass: build transaction state
+        // Track: committed txs, aborted txs, and max timestamp seen
+        let mut committed_txs: HashSet<u64> = HashSet::new();
+        let mut aborted_txs: HashSet<u64> = HashSet::new();
+        let mut max_ts: u64 = 0;
+
+        for entry in &entries {
+            use crate::storage::wal::WalEntryType;
+
+            match entry.entry_type {
+                WalEntryType::TxBegin => {
+                    if let Some((tx_id, start_ts)) = Wal::parse_tx_begin_payload(&entry.value) {
+                        max_ts = max_ts.max(tx_id).max(start_ts);
+                    }
+                }
+                WalEntryType::TxCommit => {
+                    if let Some((tx_id, commit_ts)) = Wal::parse_tx_commit_payload(&entry.value) {
+                        committed_txs.insert(tx_id);
+                        max_ts = max_ts.max(tx_id).max(commit_ts);
+                    }
+                }
+                WalEntryType::TxRollback => {
+                    if let Some(tx_id) = Wal::parse_tx_rollback_payload(&entry.value) {
+                        aborted_txs.insert(tx_id);
+                        max_ts = max_ts.max(tx_id);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        info!(
+            "WAL analysis: {} committed, {} aborted transactions, max_ts={}",
+            committed_txs.len(),
+            aborted_txs.len(),
+            max_ts
+        );
+
+        // Restore transaction manager timestamp counter
+        // Set to max_ts + 1 to avoid collisions
+        if max_ts > 0 {
+            self.tx_manager.restore_timestamp(max_ts + 1);
+        }
+
+        // Second pass: replay data from committed transactions only
+        let mut replayed = 0;
+        let mut skipped_uncommitted = 0;
+
+        for entry in entries {
+            use crate::storage::wal::WalEntryType;
+
+            match entry.entry_type {
+                WalEntryType::Insert | WalEntryType::Update => {
+                    if let Some((collection, key)) = Self::parse_wal_key(&entry.key) {
+                        // Check if this is versioned data from a transaction
+                        let should_replay = if is_versioned_key(&key) {
+                            // Versioned key: extract tx_id and check if committed
+                            if let Some((_, version_ts)) = decode_versioned_key(&key) {
+                                // version_ts is the tx_id for uncommitted data
+                                // Only replay if the transaction was committed
+                                committed_txs.contains(&version_ts)
+                            } else {
+                                // Couldn't decode, replay anyway (non-MVCC data)
+                                true
+                            }
+                        } else {
+                            // Non-versioned key (keyspace, collection) - always replay
+                            true
+                        };
+
+                        if should_replay {
+                            if let Some(lsm) = self.lsm_trees.get(&collection) {
+                                lsm.put_no_wal(key, entry.value).await?;
+                                replayed += 1;
+                            }
+                        } else {
+                            skipped_uncommitted += 1;
+                        }
+                    }
+                }
+                WalEntryType::Delete => {
+                    if let Some((collection, key)) = Self::parse_wal_key(&entry.key) {
+                        // Same logic for deletes
+                        let should_replay = if is_versioned_key(&key) {
+                            if let Some((_, version_ts)) = decode_versioned_key(&key) {
+                                committed_txs.contains(&version_ts)
+                            } else {
+                                true
+                            }
+                        } else {
+                            true
+                        };
+
+                        if should_replay {
+                            if let Some(lsm) = self.lsm_trees.get(&collection) {
+                                lsm.delete_no_wal(key).await?;
+                                replayed += 1;
+                            }
+                        } else {
+                            skipped_uncommitted += 1;
+                        }
+                    }
+                }
+                WalEntryType::TxBegin | WalEntryType::TxCommit | WalEntryType::TxRollback => {
+                    // Already processed in first pass
+                }
+                WalEntryType::Checkpoint => {
+                    debug!("WAL replay: checkpoint at seq {}", entry.sequence);
+                }
+            }
+        }
+
+        info!(
+            "WAL replay complete: {} entries replayed, {} uncommitted skipped",
+            replayed, skipped_uncommitted
+        );
+        Ok(())
+    }
+
+    /// Parse a WAL key into (collection, actual_key).
+    /// Key format: "collection\0key_bytes"
+    fn parse_wal_key(key: &[u8]) -> Option<(String, Vec<u8>)> {
+        let sep_pos = key.iter().position(|&b| b == 0)?;
+        let collection = String::from_utf8(key[..sep_pos].to_vec()).ok()?;
+        let actual_key = key[sep_pos + 1..].to_vec();
+        Some((collection, actual_key))
+    }
+
+    /// Encode a key for the system WAL.
+    /// Format: "collection\0key_bytes"
+    fn encode_wal_key(collection: &str, key: &[u8]) -> Vec<u8> {
+        let mut wal_key = collection.as_bytes().to_vec();
+        wal_key.push(0); // null separator
+        wal_key.extend_from_slice(key);
+        wal_key
+    }
+
+    /// Write to system WAL.
+    fn wal_append(&self, key: &[u8], value: &[u8]) -> Result<u64> {
+        if self.system_wal_is_async {
+            self.system_wal.read().append_async(key, value)
+        } else {
+            self.system_wal.write().append(key, value)
+        }
+    }
+
+    /// Write to system WAL with specific entry type.
+    fn wal_append_with_type(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        entry_type: crate::storage::wal::WalEntryType,
+    ) -> Result<u64> {
+        if self.system_wal_is_async {
+            self.system_wal
+                .read()
+                .append_with_type_async(key, value, entry_type)
+        } else {
+            self.system_wal
+                .write()
+                .append_with_type(key, value, entry_type)
+        }
+    }
+
+    /// Write to LSM tree with system WAL for durability.
+    /// This is the primary method for persisting data.
+    async fn lsm_put_with_wal(&self, collection: &str, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
+        // Write to system WAL first
+        let wal_key = Self::encode_wal_key(collection, &key);
+        self.wal_append(&wal_key, &value)?;
+
+        // Then write to LSM (no internal WAL)
+        if let Some(lsm) = self.lsm_trees.get(collection) {
+            lsm.put_no_wal(key, value).await
+        } else {
+            Err(MonoError::NotFound(format!(
+                "collection '{collection}' not found"
+            )))
+        }
+    }
+
+    /// Delete from LSM tree with system WAL for durability.
+    async fn lsm_delete_with_wal(&self, collection: &str, key: Vec<u8>) -> Result<()> {
+        // Write delete to system WAL first
+        let wal_key = Self::encode_wal_key(collection, &key);
+        self.wal_append_with_type(&wal_key, &[], crate::storage::wal::WalEntryType::Delete)?;
+
+        // Then delete from LSM (no internal WAL)
+        if let Some(lsm) = self.lsm_trees.get(collection) {
+            lsm.delete_no_wal(key).await
+        } else {
+            Err(MonoError::NotFound(format!(
+                "collection '{collection}' not found"
+            )))
+        }
+    }
+
+    // Transaction WAL Methods
+
+    /// Write TxBegin to system WAL when a transaction starts.
+    pub fn wal_tx_begin(&self, tx_id: u64, start_ts: u64) -> Result<u64> {
+        if self.system_wal_is_async {
+            self.system_wal
+                .read()
+                .append_tx_begin_async(tx_id, start_ts)
+        } else {
+            self.system_wal.write().append_tx_begin(tx_id, start_ts)
+        }
+    }
+
+    /// Write TxCommit to system WAL when a transaction commits.
+    pub fn wal_tx_commit(&self, tx_id: u64, commit_ts: u64) -> Result<u64> {
+        if self.system_wal_is_async {
+            self.system_wal
+                .read()
+                .append_tx_commit_async(tx_id, commit_ts)
+        } else {
+            self.system_wal.write().append_tx_commit(tx_id, commit_ts)
+        }
+    }
+
+    /// Write TxRollback to system WAL when a transaction is aborted.
+    pub fn wal_tx_rollback(&self, tx_id: u64) -> Result<u64> {
+        if self.system_wal_is_async {
+            self.system_wal.read().append_tx_rollback_async(tx_id)
+        } else {
+            self.system_wal.write().append_tx_rollback(tx_id)
+        }
+    }
+
+    /// Get access to the system WAL for stats/sync.
+    pub fn system_wal(&self) -> &Arc<RwLock<Wal>> {
+        &self.system_wal
     }
 
     /// Validate data against schema before insertion
@@ -439,15 +700,10 @@ impl StorageEngine {
             return Ok(());
         }
 
-        // Delete from storage
+        // Delete from storage (using system WAL)
         if self.config.use_lsm {
-            if let Some(lsm) = self.lsm_trees.get(collection) {
-                lsm.delete(key_bytes.to_vec()).await
-            } else {
-                Err(MonoError::NotFound(format!(
-                    "collection '{collection}' not found"
-                )))
-            }
+            self.lsm_delete_with_wal(collection, key_bytes.to_vec())
+                .await
         } else if let Some(btree) = self.btrees.get(collection) {
             btree.delete(key_bytes).await
         } else {
@@ -986,13 +1242,8 @@ impl StorageEngine {
 
             // Store with versioned key
             if self.config.use_lsm {
-                if let Some(lsm) = self.lsm_trees.get(collection) {
-                    lsm.put(versioned_key, value_bytes).await?;
-                } else {
-                    return Err(MonoError::NotFound(format!(
-                        "collection '{collection}' not found"
-                    )));
-                }
+                self.lsm_put_with_wal(collection, versioned_key, value_bytes)
+                    .await?;
             } else if let Some(btree) = self.btrees.get(collection) {
                 btree.insert(&versioned_key, &value_bytes).await?;
             } else {
@@ -1064,13 +1315,8 @@ impl StorageEngine {
 
             // Store with versioned key
             if self.config.use_lsm {
-                if let Some(lsm) = self.lsm_trees.get(collection) {
-                    lsm.put(versioned_key, value_bytes).await?;
-                } else {
-                    return Err(MonoError::NotFound(format!(
-                        "collection '{collection}' not found"
-                    )));
-                }
+                self.lsm_put_with_wal(collection, versioned_key, value_bytes)
+                    .await?;
             } else if let Some(btree) = self.btrees.get(collection) {
                 btree.insert(&versioned_key, &value_bytes).await?;
             } else {
@@ -1110,13 +1356,8 @@ impl StorageEngine {
         let serialized_value = value.to_bytes();
 
         if self.config.use_lsm {
-            if let Some(lsm) = self.lsm_trees.get(collection) {
-                lsm.put(key, serialized_value).await?;
-            } else {
-                return Err(MonoError::NotFound(format!(
-                    "collection '{collection}' not found"
-                )));
-            }
+            self.lsm_put_with_wal(collection, key, serialized_value)
+                .await?;
         } else if let Some(btree) = self.btrees.get(collection) {
             btree.insert(&key, &serialized_value).await?;
         } else {
@@ -1129,7 +1370,7 @@ impl StorageEngine {
     }
 
     /// Fast-path insert for raw key/value bytes into a KeySpace collection.
-    /// Skips bincode serialization and schema/type conversions.
+    /// Skips serialization and schema/type conversions.
     pub async fn insert_kv_raw(&self, collection: &str, key: &[u8], value: &[u8]) -> Result<()> {
         // Memory keyspaces store typed Values; wrap as Binary for compatibility
         if let Some(schema) = self.schemas.get(collection)
@@ -1154,13 +1395,7 @@ impl StorageEngine {
         let val_vec = value.to_vec();
 
         if self.config.use_lsm {
-            if let Some(lsm) = self.lsm_trees.get(collection) {
-                lsm.put(key_vec, val_vec).await?;
-            } else {
-                return Err(MonoError::NotFound(format!(
-                    "collection '{collection}' not found"
-                )));
-            }
+            self.lsm_put_with_wal(collection, key_vec, val_vec).await?;
         } else if let Some(btree) = self.btrees.get(collection) {
             btree.insert(&key_vec, &val_vec).await?;
         } else {
@@ -1206,13 +1441,8 @@ impl StorageEngine {
         let value_bytes = doc.to_bytes();
 
         if self.config.use_lsm {
-            if let Some(lsm) = self.lsm_trees.get(collection) {
-                lsm.put(key_bytes.clone(), value_bytes).await?;
-            } else {
-                return Err(MonoError::NotFound(format!(
-                    "collection '{collection}' not found"
-                )));
-            }
+            self.lsm_put_with_wal(collection, key_bytes.clone(), value_bytes)
+                .await?;
         } else if let Some(btree) = self.btrees.get(collection) {
             btree.insert(&key_bytes, &value_bytes).await?;
         } else {
@@ -1269,13 +1499,8 @@ impl StorageEngine {
             let value_bytes = value_to_store.to_bytes();
 
             if self.config.use_lsm {
-                if let Some(lsm) = self.lsm_trees.get(collection) {
-                    lsm.put(key_bytes.clone(), value_bytes).await?;
-                } else {
-                    return Err(MonoError::NotFound(format!(
-                        "collection '{collection}' not found"
-                    )));
-                }
+                self.lsm_put_with_wal(collection, key_bytes.clone(), value_bytes)
+                    .await?;
             } else if let Some(btree) = self.btrees.get(collection) {
                 btree.insert(&key_bytes, &value_bytes).await?;
             } else {
@@ -1434,10 +1659,11 @@ impl StorageEngine {
         };
 
         let collection_path = std::path::Path::new(&self.config.data_dir).join(collection_name);
-        Ok(Arc::new(crate::storage::lsm::LsmTree::new(
+        // Use external WAL, system WAL handles persistence
+        Ok(Arc::new(crate::storage::lsm::LsmTree::with_external_wal(
             collection_path,
             lsm_config,
-            self.config.wal.clone(),
+            collection_name.to_string(),
         )?))
     }
 
@@ -2030,7 +2256,7 @@ impl StorageEngine {
         Ok(())
     }
 
-    pub async fn checkpoint_all(&self) -> Result<Vec<(String, u64)>> {
+    pub async fn checkpoint_all(&self) -> Result<Vec<(String, Option<u64>)>> {
         let mut out = Vec::new();
         for e in self.lsm_trees.iter() {
             let seq = e.value().checkpoint().await?;
@@ -2039,7 +2265,7 @@ impl StorageEngine {
         Ok(out)
     }
 
-    pub async fn checkpoint_collection(&self, collection_name: &str) -> Result<u64> {
+    pub async fn checkpoint_collection(&self, collection_name: &str) -> Result<Option<u64>> {
         if let Some(lsm) = self.lsm_trees.get(collection_name) {
             lsm.checkpoint().await
         } else {
@@ -2049,7 +2275,10 @@ impl StorageEngine {
         }
     }
 
-    pub fn get_wal_stats(&self, collection_name: &str) -> Result<crate::storage::wal::WalStats> {
+    pub fn get_wal_stats(
+        &self,
+        collection_name: &str,
+    ) -> Result<Option<crate::storage::wal::WalStats>> {
         if let Some(lsm) = self.lsm_trees.get(collection_name) {
             Ok(lsm.wal_stats())
         } else {
@@ -2090,14 +2319,15 @@ impl StorageEngine {
         info!("Running storage maintenance");
         for e in self.lsm_trees.iter() {
             e.value().auto_checkpoint_if_needed().await?;
-            let stats = e.value().wal_stats();
-            debug!(
-                "collection '{}' WAL size {} next_seq {} last_checkpoint {:?}",
-                e.key(),
-                stats.current_size,
-                stats.next_sequence,
-                stats.last_checkpoint_sequence
-            );
+            if let Some(stats) = e.value().wal_stats() {
+                debug!(
+                    "collection '{}' WAL size {} next_seq {} last_checkpoint {:?}",
+                    e.key(),
+                    stats.current_size,
+                    stats.next_sequence,
+                    stats.last_checkpoint_sequence
+                );
+            }
         }
         Ok(())
     }
@@ -2926,6 +3156,12 @@ impl TransactionManager {
         self.next_ts.fetch_add(1, Ordering::SeqCst)
     }
 
+    /// Restore timestamp counter during WAL recovery.
+    /// Sets the counter to at least the given value.
+    pub fn restore_timestamp(&self, min_ts: u64) {
+        self.next_ts.fetch_max(min_ts, Ordering::SeqCst);
+    }
+
     /// Add a key to a transaction's write set
     pub fn add_to_write_set(&self, tx_id: u64, collection: String, pk: Vec<u8>) {
         if let Some(mut tx) = self.transactions.get_mut(&tx_id) {
@@ -2950,6 +3186,20 @@ impl TransactionManager {
     pub fn cleanup(&self, older_than: u64) {
         self.transactions
             .retain(|_, tx| tx.status == TxStatus::Active || tx.start_ts >= older_than);
+    }
+
+    /// Get the set of aborted transaction IDs (for GC)
+    pub fn aborted_tx_ids(&self) -> HashSet<u64> {
+        self.transactions
+            .iter()
+            .filter(|entry| entry.status == TxStatus::Aborted)
+            .map(|entry| entry.tx_id)
+            .collect()
+    }
+
+    /// Get a GC context for compaction
+    pub fn gc_context(&self) -> crate::storage::lsm::compaction::GcContext {
+        crate::storage::lsm::compaction::GcContext::new(self.oldest_active(), self.aborted_tx_ids())
     }
 }
 

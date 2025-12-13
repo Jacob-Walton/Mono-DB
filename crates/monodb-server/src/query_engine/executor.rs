@@ -240,6 +240,13 @@ impl QueryExecutor {
                 }
                 let tx = self.storage.tx_manager().begin();
                 let tx_id = tx.tx_id;
+                let start_ts = tx.start_ts;
+
+                // Write TxBegin to WAL
+                self.storage.wal_tx_begin(tx_id, start_ts).map_err(|e| {
+                    ExecutorError::InvalidOperation(format!("WAL write failed: {}", e))
+                })?;
+
                 self.current_tx = Some(tx);
                 ExecutionResult::Ok {
                     data: vec![Value::String(format!("BEGIN (tx_id={})", tx_id))],
@@ -256,6 +263,14 @@ impl QueryExecutor {
                 let commit_ts = self.storage.tx_manager().commit(tx.tx_id).map_err(|e| {
                     ExecutorError::InvalidOperation(format!("Commit failed: {}", e))
                 })?;
+
+                // Write TxCommit to WAL
+                self.storage
+                    .wal_tx_commit(tx.tx_id, commit_ts)
+                    .map_err(|e| {
+                        ExecutorError::InvalidOperation(format!("WAL write failed: {}", e))
+                    })?;
+
                 ExecutionResult::Ok {
                     data: vec![Value::String(format!(
                         "COMMIT (tx_id={}, commit_ts={})",
@@ -271,6 +286,12 @@ impl QueryExecutor {
                 let tx = self.current_tx.take().ok_or_else(|| {
                     ExecutorError::InvalidOperation("No active transaction to ROLLBACK".into())
                 })?;
+
+                // Write TxRollback to WAL
+                self.storage.wal_tx_rollback(tx.tx_id).map_err(|e| {
+                    ExecutorError::InvalidOperation(format!("WAL write failed: {}", e))
+                })?;
+
                 self.storage.tx_manager().abort(tx.tx_id).map_err(|e| {
                     ExecutorError::InvalidOperation(format!("Rollback failed: {}", e))
                 })?;
