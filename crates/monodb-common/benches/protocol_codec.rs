@@ -1,12 +1,10 @@
 use std::hint::black_box;
 
 use bytes::BytesMut;
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 
-use monodb_common::protocol::{
-    ProtocolCodec, Request, Response, ExecutionResult,
-};
 use monodb_common::Value;
+use monodb_common::protocol::{ExecutionResult, ProtocolCodec, Request, Response};
 
 fn make_request() -> Request {
     Request::Execute {
@@ -19,18 +17,13 @@ fn make_request() -> Request {
 
 fn make_response() -> Response {
     Response::Success {
-        result: vec![
-            ExecutionResult::Ok {
-                data: vec![
-                    Value::from(1u64),
-                    Value::from("alice"),
-                ],
-                time: 12,
-                commit_timestamp: Some(1_725_000_010),
-                time_elapsed: Some(3),
-                row_count: Some(1),
-            }
-        ],
+        result: vec![ExecutionResult::Ok {
+            data: vec![Value::from(1u64), Value::from("alice")],
+            time: 12,
+            commit_timestamp: Some(1_725_000_010),
+            time_elapsed: Some(3),
+            row_count: Some(1),
+        }],
     }
 }
 

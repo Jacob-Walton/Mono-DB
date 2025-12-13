@@ -776,7 +776,7 @@ fn get_string(buf: &mut BytesMut) -> crate::Result<String> {
 fn get_opt_string(buf: &mut BytesMut) -> crate::Result<Option<String>> {
     let flag = buf.get_u8();
     if flag == 0 {
-        return Ok(None)
+        return Ok(None);
     }
 
     let len = buf.get_u32_le() as usize;
