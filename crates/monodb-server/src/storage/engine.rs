@@ -655,13 +655,13 @@ impl StorageEngine {
                         }
                         TxStatus::Committed => {
                             // Check if committed after our start
-                            if let Some(commit_ts) = other_tx.commit_ts {
-                                if commit_ts > current_tx.start_ts {
-                                    return Err(MonoError::WriteConflict(format!(
-                                        "Row was modified by transaction {} after our start",
-                                        other_tx.tx_id
-                                    )));
-                                }
+                            if let Some(commit_ts) = other_tx.commit_ts
+                                && commit_ts > current_tx.start_ts
+                            {
+                                return Err(MonoError::WriteConflict(format!(
+                                    "Row was modified by transaction {} after our start",
+                                    other_tx.tx_id
+                                )));
                             }
                         }
                         TxStatus::Aborted => {
