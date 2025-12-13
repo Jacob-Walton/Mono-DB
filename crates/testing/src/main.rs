@@ -5,10 +5,7 @@ use monodb_common::{
     Value,
     protocol::{ExecutionResult, Response},
 };
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
+use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 
 struct BenchConfig {
@@ -30,13 +27,11 @@ async fn run_benchmark(
 
     let pool = Arc::new(client.pool().await.clone());
     let latencies = Arc::new(AsyncMutex::new(Vec::with_capacity(count)));
-    let total_bytes = Arc::new(AtomicU64::new(0));
 
     let insert_futures = (0..count).step_by(batch_size).map(|base| {
         let pool = Arc::clone(&pool);
         let lat_clone = Arc::clone(&latencies);
         let builder = Arc::clone(&cfg.builder);
-        let total_bytes = Arc::clone(&total_bytes);
         async move {
             let mut conn = pool
                 .get()
@@ -48,10 +43,6 @@ async fn run_benchmark(
                 pool.return_connection(conn);
                 return Ok(Response::Success { result: vec![] });
             }
-
-            // Rough protocol overhead per Execute request (version/type/len etc.)
-            let request_bytes = 32 + batch_sql.len() as u64;
-            total_bytes.fetch_add(request_bytes, Ordering::Relaxed);
 
             let start = std::time::Instant::now();
             let response = conn.execute(batch_sql).await;
@@ -123,15 +114,12 @@ async fn run_benchmark(
         println!("No latency samples recorded");
     }
 
-    let total_bytes = total_bytes.load(Ordering::Relaxed);
-    let bandwidth = total_bytes as f64 / duration.as_secs_f64();
-    match bandwidth {
-        bw if bw < 10_000.0 => println!("Effective Bandwidth: {:.2} B/s", bw),
-        bw if bw < 10_000_000.0 => println!("Effective Bandwidth: {:.2} KB/s", bw / 1_000.0),
-        bw if bw < 10_000_000_000.0 => {
-            println!("Effective Bandwidth: {:.2} MB/s", bw / 1_000_000.0)
-        }
-        bw => println!("Effective Bandwidth: {:.2} GB/s", bw / 1_000_000_000.0),
+    // Calculate ops/s
+    let ops_per_sec = count as f64 / duration.as_secs_f64();
+    match ops_per_sec {
+        ops if ops < 1_000.0 => println!("Throughput: {:.2} ops/s", ops),
+        ops if ops < 1_000_000.0 => println!("Throughput: {:.2} Kops/s", ops / 1_000.0),
+        ops => println!("Throughput: {:.2} Mops/s", ops / 1_000_000.0),
     }
 
     Ok(())
@@ -157,6 +145,7 @@ make table testing
 
 make table sessions
     as keyspace
+    persistence "memory"
 "#;
 
     let pool = client.pool().await.clone();
