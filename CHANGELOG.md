@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.2.3] - 2025-12-14
+
+### Added
+
+- **Language Extensions** - New keywords and syntax
+  - `make index [index_name] on [table_name]([column_name])` for non-unique indexes
+  - `make unique index [index_name] on [table_name]([column_name])` for unique indexes
+  - `drop index [index_name]` to remove indexes
+  - `describe [table_name]` to show table schema
+  - `count <from> [table_name]` to get row count
+- **Index Support** - Secondary indexes for faster lookups
+  - Index creation and deletion
+  - Index metadata stored in catalog
+  - Indexes updated on row insert/update/delete
+  - Query planner uses indexes for optimization
+
+### Changed
+
+- `QueryExecutor` now handles some basic query planning for index usage
+
 ## [0.2.2] - 2025-12-13
 
 ### Added

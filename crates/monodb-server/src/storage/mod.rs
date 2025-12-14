@@ -2,6 +2,7 @@ mod btree;
 mod buffer_pool;
 mod disk_manager;
 pub mod engine;
+pub mod key_encoding;
 mod lsm;
 mod models;
 mod page;

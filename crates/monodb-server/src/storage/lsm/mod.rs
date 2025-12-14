@@ -8,6 +8,7 @@
 
 pub mod bloom_filter;
 pub mod compaction;
+pub mod merge_iterator;
 pub mod sstable;
 
 use crate::config::{LsmConfig, WalConfig};
@@ -252,40 +253,57 @@ impl LsmTree {
 
     pub async fn scan(
         &self,
-        _start_key: &[u8],
-        _end_key: &[u8],
+        start_key: &[u8],
+        end_key: &[u8],
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let mut results = Vec::new();
+        self.scan_with_limit(start_key, end_key, None).await
+    }
 
-        // Scan memtable
+    /// Scan the LSM tree in sorted key order using merge iterator
+    /// This properly merges memtable, immutable memtables, and SSTables
+    pub async fn scan_with_limit(
+        &self,
+        start_key: &[u8],
+        end_key: &[u8],
+        limit: Option<usize>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        use merge_iterator::MergeIterator;
+
+        let mut sources: Vec<Vec<(Vec<u8>, Vec<u8>)>> = Vec::new();
+
+        // Source 0: memtable (most recent)
+        let mut memtable_entries = Vec::new();
         for entry in self.memtable.read().iter() {
-            if entry.key().as_slice() >= _start_key && entry.key().as_slice() <= _end_key {
-                results.push((entry.key().clone(), entry.value().clone()));
+            if entry.key().as_slice() >= start_key && entry.key().as_slice() <= end_key {
+                memtable_entries.push((entry.key().clone(), entry.value().clone()));
             }
         }
+        sources.push(memtable_entries);
 
-        // Scan immutable memtables
+        // Source 1+: immutable memtables (ordered by recency)
         for immutable_memtable in self.immutable_memtables.read().iter() {
+            let mut entries = Vec::new();
             for entry in immutable_memtable.iter() {
-                if entry.key().as_slice() >= _start_key && entry.key().as_slice() <= _end_key {
-                    results.push((entry.key().clone(), entry.value().clone()));
+                if entry.key().as_slice() >= start_key && entry.key().as_slice() <= end_key {
+                    entries.push((entry.key().clone(), entry.value().clone()));
                 }
             }
+            sources.push(entries);
         }
 
-        // Scan SSTables
+        // Source N+: SSTables (ordered by level/recency)
         let sstables = self.sstables.read().clone();
         for sstable in sstables.iter() {
             // Check if this SSTable might contain keys in our range
-            if sstable.max_key.as_slice() >= _start_key && sstable.min_key.as_slice() <= _end_key {
-                // Use the iterator to scan the SSTable
+            if sstable.max_key.as_slice() >= start_key && sstable.min_key.as_slice() <= end_key {
+                let mut entries = Vec::new();
                 match sstable::SsTableIterator::new(&sstable.path) {
                     Ok(iterator) => {
                         for entry_result in iterator {
                             match entry_result {
                                 Ok((key, value)) => {
-                                    if key.as_slice() >= _start_key && key.as_slice() <= _end_key {
-                                        results.push((key, value));
+                                    if key.as_slice() >= start_key && key.as_slice() <= end_key {
+                                        entries.push((key, value));
                                     }
                                 }
                                 Err(e) => {
@@ -306,12 +324,99 @@ impl LsmTree {
                         );
                     }
                 }
+                sources.push(entries);
             }
         }
 
-        // Remove duplicates, keeping the most recent (last) occurrence
-        let mut seen_keys = std::collections::HashSet::new();
-        results.retain(|(key, _)| seen_keys.insert(key.clone()));
+        // Use merge iterator to get sorted, deduplicated results
+        let merger = MergeIterator::new(sources);
+        let results = if let Some(limit) = limit {
+            merger.collect_sorted_limit(limit)
+        } else {
+            merger.collect_sorted()
+        };
+
+        Ok(results)
+    }
+
+    /// Scan the LSM tree in REVERSE (descending) key order using reverse merge iterator.
+    /// This is the proper way to implement DESC queries, we merge all sources
+    /// using a max-heap so largest keys come out first, allowing early termination.
+    pub async fn scan_reverse_with_limit(
+        &self,
+        start_key: &[u8],
+        end_key: &[u8],
+        limit: Option<usize>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        use merge_iterator::ReverseMergeIterator;
+
+        let mut sources: Vec<Vec<(Vec<u8>, Vec<u8>)>> = Vec::new();
+
+        // Source 0: memtable (most recent) - iterate in ascending order,
+        // the ReverseMergeIterator will handle the descending output
+        let mut memtable_entries = Vec::new();
+        for entry in self.memtable.read().iter() {
+            if entry.key().as_slice() >= start_key && entry.key().as_slice() <= end_key {
+                memtable_entries.push((entry.key().clone(), entry.value().clone()));
+            }
+        }
+        sources.push(memtable_entries);
+
+        // Source 1+: immutable memtables (ordered by recency)
+        for immutable_memtable in self.immutable_memtables.read().iter() {
+            let mut entries = Vec::new();
+            for entry in immutable_memtable.iter() {
+                if entry.key().as_slice() >= start_key && entry.key().as_slice() <= end_key {
+                    entries.push((entry.key().clone(), entry.value().clone()));
+                }
+            }
+            sources.push(entries);
+        }
+
+        // Source N+: SSTables (ordered by level/recency)
+        let sstables = self.sstables.read().clone();
+        for sstable in sstables.iter() {
+            // Check if this SSTable might contain keys in our range
+            if sstable.max_key.as_slice() >= start_key && sstable.min_key.as_slice() <= end_key {
+                let mut entries = Vec::new();
+                match sstable::SsTableIterator::new(&sstable.path) {
+                    Ok(iterator) => {
+                        for entry_result in iterator {
+                            match entry_result {
+                                Ok((key, value)) => {
+                                    if key.as_slice() >= start_key && key.as_slice() <= end_key {
+                                        entries.push((key, value));
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Error reading from SSTable {:?}: {}",
+                                        sstable.path,
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to create iterator for SSTable {:?}: {}",
+                            sstable.path,
+                            e
+                        );
+                    }
+                }
+                sources.push(entries);
+            }
+        }
+
+        // Use REVERSE merge iterator to get sorted results in DESCENDING order
+        let merger = ReverseMergeIterator::new(sources);
+        let results = if let Some(limit) = limit {
+            merger.collect_sorted_limit(limit)
+        } else {
+            merger.collect_sorted()
+        };
 
         Ok(results)
     }

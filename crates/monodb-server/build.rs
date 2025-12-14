@@ -63,6 +63,25 @@ fn main() {
     map.entry(b"commit", "TokenKind::Keyword");
     map.entry(b"rollback", "TokenKind::Keyword");
 
+    // Query modifiers (ordering, pagination)
+    map.entry(b"order", "TokenKind::Keyword");
+    map.entry(b"by", "TokenKind::Keyword");
+    map.entry(b"asc", "TokenKind::Keyword");
+    map.entry(b"desc", "TokenKind::Keyword");
+    map.entry(b"take", "TokenKind::Keyword");
+    map.entry(b"skip", "TokenKind::Keyword");
+
+    // Index management
+    map.entry(b"index", "TokenKind::Keyword");
+    map.entry(b"on", "TokenKind::Keyword");
+    map.entry(b"drop", "TokenKind::Keyword");
+
+    // Schema inspection
+    map.entry(b"describe", "TokenKind::Keyword");
+
+    // Aggregation
+    map.entry(b"count", "TokenKind::Keyword");
+
     write!(
         &mut file,
         "static KEYWORDS: phf::Map<&'static [u8], TokenKind> = {};",

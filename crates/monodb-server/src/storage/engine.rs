@@ -454,6 +454,56 @@ impl StorageEngine {
         Ok(())
     }
 
+    /// Check if a primary key already exists (has any visible version).
+    /// Used to prevent duplicate INSERT, only UPDATE should create new versions.
+    async fn check_pk_exists(
+        &self,
+        collection: &str,
+        pk: &[u8],
+        tx: Option<&Transaction>,
+    ) -> Result<bool> {
+        // Scan for any version of this key
+        let prefix = pk.to_vec();
+        let mut end_key = prefix.clone();
+        end_key.push(0xFF); // Include all versions
+
+        let pairs = if self.config.use_lsm {
+            if let Some(lsm) = self.lsm_trees.get(collection) {
+                lsm.scan_with_limit(&prefix, &end_key, Some(10)).await?
+            } else {
+                return Ok(false);
+            }
+        } else if let Some(btree) = self.btrees.get(collection) {
+            btree.scan(&prefix, &end_key).await?
+        } else {
+            return Ok(false);
+        };
+
+        // Check if any version is visible
+        for (key, value) in pairs {
+            if let Some((found_pk, version_ts)) = decode_versioned_key(&key) {
+                if found_pk == pk {
+                    // Check if this is a tombstone (deleted)
+                    if value.is_empty() {
+                        continue;
+                    }
+
+                    let visible = if let Some(tx) = tx {
+                        self.is_version_visible(version_ts, tx)
+                    } else {
+                        self.is_version_visible_no_tx(version_ts)
+                    };
+
+                    if visible {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
     /// Check uniqueness constraints before insertion
     async fn check_uniqueness_constraints(
         &self,
@@ -1116,6 +1166,11 @@ impl StorageEngine {
         // Only use MVCC for relational tables with an active transaction
         let use_mvcc = tx.is_some() && matches!(schema.value(), Schema::Table { .. });
 
+        // Check uniqueness constraints (for non-PK unique columns)
+        // PK uniqueness is checked inside insert_row_versioned/insert_row_with_version
+        self.check_uniqueness_constraints(collection_name, data, None)
+            .await?;
+
         if use_mvcc {
             let tx = tx.unwrap();
             // For relational tables with transaction: use versioned insert
@@ -1128,12 +1183,6 @@ impl StorageEngine {
 
                 return Ok(());
             }
-        }
-
-        // Check uniqueness constraints (skip for MVCC as conflict detection handles it)
-        if !use_mvcc {
-            self.check_uniqueness_constraints(collection_name, data, None)
-                .await?;
         }
 
         // Fall back to non-versioned insert for non-relational or auto-commit
@@ -1213,19 +1262,26 @@ impl StorageEngine {
                 )));
             }
 
-            // Build the base primary key
-            let mut pk_values = Vec::new();
+            // Build the base primary key using sortable encoding
+            let mut pk_parts = Vec::new();
             for pk_field in primary_key {
                 let value = row.get(pk_field);
                 if let Some(v) = value {
-                    pk_values.push(v.to_string());
+                    pk_parts.push(v.clone());
                 } else {
                     return Err(MonoError::InvalidOperation(format!(
                         "primary key '{pk_field}' does not exist in '{collection}'"
                     )));
                 }
             }
-            let base_pk = pk_values.join(":").as_bytes().to_vec();
+            let base_pk = crate::storage::key_encoding::encode_composite_sortable(&pk_parts);
+
+            // Check if PK already exists, INSERT should not overwrite existing rows
+            if self.check_pk_exists(collection, &base_pk, None).await? {
+                return Err(MonoError::InvalidOperation(format!(
+                    "Duplicate primary key: row with this key already exists in '{collection}'"
+                )));
+            }
 
             // Create versioned key
             let versioned_key = encode_versioned_key(&base_pk, version_ts);
@@ -1279,21 +1335,28 @@ impl StorageEngine {
                 )));
             }
 
-            // Build the base primary key
-            let mut pk_values = Vec::new();
+            // Build the base primary key using sortable encoding
+            let mut pk_parts = Vec::new();
             for pk_field in primary_key {
                 let value = row.get(pk_field);
                 if let Some(v) = value {
-                    pk_values.push(v.to_string());
+                    pk_parts.push(v.clone());
                 } else {
                     return Err(MonoError::InvalidOperation(format!(
                         "primary key '{pk_field}' does not exist in '{collection}'"
                     )));
                 }
             }
-            let base_pk = pk_values.join(":").as_bytes().to_vec();
+            let base_pk = crate::storage::key_encoding::encode_composite_sortable(&pk_parts);
 
-            // Check for write-write conflicts
+            // Check if PK already exists, INSERT should not overwrite existing rows
+            if self.check_pk_exists(collection, &base_pk, Some(tx)).await? {
+                return Err(MonoError::InvalidOperation(format!(
+                    "Duplicate primary key: row with this key already exists in '{collection}'"
+                )));
+            }
+
+            // Check for write-write conflicts (in case another tx is inserting same key)
             self.check_write_conflict(collection, &base_pk, tx).await?;
 
             // Create versioned key using tx_id
@@ -2008,10 +2071,18 @@ impl StorageEngine {
             Some(Schema::Table { .. })
         );
 
+        // Calculate scan limit, request more than needed to account for MVCC visibility
+        // Only apply limit if there's no filter (filters need all rows to evaluate)
+        let scan_limit = if query.filter.is_none() {
+            query.limit.map(|l| l.saturating_mul(2).max(100)) // Request 2x to account for MVCC
+        } else {
+            None
+        };
+
         // Scan all key-value pairs
         let pairs: Vec<(Vec<u8>, Vec<u8>)> = if self.config.use_lsm {
             if let Some(lsm) = self.lsm_trees.get(collection) {
-                lsm.scan(&[], &[0xFF]).await?
+                lsm.scan_with_limit(&[], &[0xFF], scan_limit).await?
             } else {
                 return Err(MonoError::NotFound(format!(
                     "collection {collection} not found"
@@ -2019,14 +2090,23 @@ impl StorageEngine {
             }
         } else if let Some(btree) = self.btrees.get(collection) {
             let end = vec![0xFFu8; 64];
-            btree.scan(&[], &end).await?
+            btree.scan(&[], &end).await? // BTree doesn't have limit support yet
         } else {
             return Err(MonoError::NotFound(format!(
                 "collection {collection} not found"
             )));
         };
 
-        let mut values: Vec<MonoValue> = Vec::with_capacity(pairs.len());
+        // Early exit limit, only applies when no filter (filter needs all rows to evaluate)
+        let early_exit_limit = if query.filter.is_none() {
+            query.limit
+        } else {
+            None
+        };
+
+        let mut values: Vec<MonoValue> = Vec::with_capacity(
+            early_exit_limit.unwrap_or(pairs.len().min(1024)),
+        );
 
         if is_relational {
             // MVCC visibility filtering for relational tables
@@ -2034,6 +2114,11 @@ impl StorageEngine {
             let mut seen_pks: HashSet<Vec<u8>> = HashSet::new();
 
             for (key, value) in pairs {
+                // Early exit if we have enough visible rows
+                if early_exit_limit.is_some_and(|l| values.len() >= l) {
+                    break;
+                }
+
                 // Try to decode as versioned key
                 if let Some((pk, version_ts)) = decode_versioned_key(&key) {
                     // Check if we've already found a visible version for this PK
@@ -2075,6 +2160,11 @@ impl StorageEngine {
         } else {
             // Non-relational: no MVCC, return all values
             for (_k, v) in pairs {
+                // Early exit if we have enough rows
+                if early_exit_limit.is_some_and(|l| values.len() >= l) {
+                    break;
+                }
+
                 match MonoValue::from_bytes(&v) {
                     Ok((mv, _bytes_read)) => {
                         values.push(mv);
@@ -2193,6 +2283,597 @@ impl StorageEngine {
         self.secondary_indexes.remove(collection_name);
 
         self.persist_schemas().await?;
+        Ok(())
+    }
+
+    /// Get the schema for a collection/table
+    pub fn get_schema(&self, collection_name: &str) -> Option<Schema> {
+        self.schemas.get(collection_name).map(|s| s.value().clone())
+    }
+
+    /// Count the number of rows in a collection/table
+    /// This is an efficient count that iterates through unique primary keys
+    pub async fn count_rows(
+        &self,
+        collection_name: &str,
+        tx: Option<&Transaction>,
+    ) -> Result<usize> {
+        // Scan all keys and count unique visible primary keys
+        let pairs = if self.config.use_lsm {
+            if let Some(lsm) = self.lsm_trees.get(collection_name) {
+                lsm.scan_with_limit(&[], &[0xFF], None).await?
+            } else {
+                return Err(MonoError::NotFound(format!(
+                    "collection '{collection_name}' not found"
+                )));
+            }
+        } else if let Some(btree) = self.btrees.get(collection_name) {
+            btree.scan(&[], &[0xFF; 64]).await?
+        } else {
+            return Err(MonoError::NotFound(format!(
+                "collection '{collection_name}' not found"
+            )));
+        };
+
+        let mut count = 0;
+        let mut seen_pks: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+
+        for (key, _value) in pairs.iter() {
+            if let Some((pk, version_ts)) = decode_versioned_key(key) {
+                if seen_pks.contains(&pk) {
+                    continue;
+                }
+
+                let visible = if let Some(tx) = tx {
+                    self.is_version_visible(version_ts, tx)
+                } else {
+                    self.is_version_visible_no_tx(version_ts)
+                };
+
+                if visible {
+                    count += 1;
+                    seen_pks.insert(pk);
+                }
+            }
+        }
+
+        Ok(count)
+    }
+
+    /// Create a secondary index on a collection/table
+    /// Returns immediately, backfill happens in background
+    pub async fn create_index(
+        self: &Arc<Self>,
+        collection_name: &str,
+        index_name: &str,
+        columns: Vec<String>,
+        unique: bool,
+    ) -> Result<()> {
+        use monodb_common::schema::{Index, IndexType};
+
+        // Get and update schema
+        let mut schema = self
+            .schemas
+            .get(collection_name)
+            .ok_or_else(|| MonoError::NotFound(format!("collection '{collection_name}' not found")))?
+            .value()
+            .clone();
+
+        // Create index definition
+        let index = Index {
+            name: index_name.to_string(),
+            columns: columns.clone(),
+            unique,
+            index_type: IndexType::BTree,
+        };
+
+        // Add index to schema
+        match &mut schema {
+            Schema::Table { indexes, .. } => {
+                if indexes.iter().any(|i| i.name == index_name) {
+                    return Err(MonoError::InvalidOperation(format!(
+                        "index '{index_name}' already exists on '{collection_name}'"
+                    )));
+                }
+                indexes.push(index);
+            }
+            Schema::Collection { indexes, .. } => {
+                if indexes.iter().any(|i| i.name == index_name) {
+                    return Err(MonoError::InvalidOperation(format!(
+                        "index '{index_name}' already exists on '{collection_name}'"
+                    )));
+                }
+                indexes.push(index);
+            }
+            Schema::KeySpace { .. } => {
+                return Err(MonoError::InvalidOperation(
+                    "cannot create index on keyspace".to_string(),
+                ));
+            }
+        }
+
+        // Update schema in memory
+        self.schemas.insert(collection_name.to_string(), schema);
+
+        // Initialize secondary index storage
+        let collection_indexes = self
+            .secondary_indexes
+            .entry(collection_name.to_string())
+            .or_default();
+        collection_indexes.insert(index_name.to_string(), Arc::new(DashMap::new()));
+
+        // Persist schema changes immediately
+        self.persist_schemas().await?;
+
+        // Spawn background task for backfill
+        let engine = Arc::clone(self);
+        let collection = collection_name.to_string();
+        let index = index_name.to_string();
+        let cols = columns.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = engine.backfill_index(&collection, &index, &cols).await {
+                tracing::error!("Failed to backfill index '{}' on '{}': {}", index, collection, e);
+            } else {
+                tracing::info!("Index '{}' on '{}' backfill complete", index, collection);
+            }
+        });
+
+        Ok(())
+    }
+
+    /// Backfill a newly created index with existing data
+    async fn backfill_index(
+        &self,
+        collection_name: &str,
+        index_name: &str,
+        columns: &[String],
+    ) -> Result<()> {
+        // Scan all existing data
+        let query = crate::storage::models::Query::default();
+        let rows = self.find_with_tx(collection_name, query, None).await?;
+
+        let collection_indexes = self
+            .secondary_indexes
+            .get(collection_name)
+            .ok_or_else(|| MonoError::NotFound("index storage not found".to_string()))?;
+
+        let secondary_index = collection_indexes
+            .get(index_name)
+            .ok_or_else(|| MonoError::NotFound(format!("index '{index_name}' not found")))?;
+
+        for row in rows {
+            // Extract index key from row
+            let index_values = self.extract_index_values_from_value(&row, columns)?;
+            let index_key = Self::encode_composite_key(&index_values);
+
+            // Extract primary key from row
+            let primary_key = self.extract_primary_key(&row)?;
+
+            // Add to index
+            secondary_index
+                .entry(index_key)
+                .or_default()
+                .insert(primary_key);
+        }
+
+        Ok(())
+    }
+
+    /// Extract index column values from a Value (Row or Object)
+    fn extract_index_values_from_value(
+        &self,
+        value: &MonoValue,
+        columns: &[String],
+    ) -> Result<Vec<MonoValue>> {
+        let mut values = Vec::with_capacity(columns.len());
+
+        for col in columns {
+            let val = match value {
+                MonoValue::Row(row) => row.get(col).cloned(),
+                MonoValue::Object(obj) => obj.get(col).cloned(),
+                _ => None,
+            };
+            values.push(val.unwrap_or(MonoValue::Null));
+        }
+
+        Ok(values)
+    }
+
+    /// Extract primary key from a row value
+    /// Uses sortable binary encoding (same as insert_row)
+    fn extract_primary_key(&self, value: &MonoValue) -> Result<Vec<u8>> {
+        // Try to get "id" or "_id" field as primary key
+        let pk_value = match value {
+            MonoValue::Row(row) => row
+                .get("id")
+                .or_else(|| row.get("_id"))
+                .cloned()
+                .unwrap_or(MonoValue::Null),
+            MonoValue::Object(obj) => obj
+                .get("id")
+                .or_else(|| obj.get("_id"))
+                .cloned()
+                .unwrap_or(MonoValue::Null),
+            _ => MonoValue::Null,
+        };
+
+        // Use sortable encoding (same as insert_row)
+        Ok(crate::storage::key_encoding::encode_composite_sortable(&[pk_value]))
+    }
+
+    /// Find a usable index for a query (simple query planner)
+    ///
+    /// Checks if any index can be used for:
+    /// 1. Equality filters (WHERE col = value) - returns ExactMatch plan
+    /// 2. ORDER BY on primary key - returns PrimaryKeyScan (uses LSM directly)
+    /// 3. ORDER BY on indexed column - returns OrderedScan plan
+    pub fn find_usable_index(
+        &self,
+        collection_name: &str,
+        filter: Option<&crate::storage::models::Filter>,
+        order_by: Option<&[crate::query_engine::ast::OrderByField]>,
+    ) -> Option<crate::storage::models::IndexPlan> {
+        use crate::query_engine::ast::SortDirection as AstSortDirection;
+        use crate::storage::models::{IndexPlan, IndexScanType};
+
+        // Get schema to find available indexes and primary key
+        let schema = self.schemas.get(collection_name)?;
+        let (indexes, primary_key) = match schema.value() {
+            Schema::Table { indexes, primary_key, .. } => (indexes, Some(primary_key)),
+            Schema::Collection { indexes, .. } => (indexes, None),
+            Schema::KeySpace { .. } => return None,
+        };
+
+        // Priority 1: Check for equality filter match
+        if !indexes.is_empty() {
+            if let Some(filter) = filter {
+                if let Some(plan) = self.find_index_for_filter(indexes, filter) {
+                    return Some(plan);
+                }
+            }
+        }
+
+        // Priority 2: Check for ORDER BY on primary key (fastest - data already sorted!)
+        if let Some(order_fields) = order_by {
+            if let Some(first_order) = order_fields.first() {
+                // Check if ordering by primary key
+                if let Some(pk_cols) = primary_key {
+                    if pk_cols.len() == 1 && pk_cols.first() == Some(&first_order.field) {
+                        let scan_type = match first_order.direction {
+                            AstSortDirection::Asc => IndexScanType::PrimaryKeyScanAsc,
+                            AstSortDirection::Desc => IndexScanType::PrimaryKeyScanDesc,
+                        };
+                        return Some(IndexPlan {
+                            index_name: "__primary__".to_string(),
+                            columns: pk_cols.clone(),
+                            scan_type,
+                            lookup_value: None,
+                        });
+                    }
+                }
+
+                // Priority 3: Check secondary indexes for ORDER BY
+                for index in indexes {
+                    if let Some(first_col) = index.columns.first() {
+                        if first_col == &first_order.field {
+                            let scan_type = match first_order.direction {
+                                AstSortDirection::Asc => IndexScanType::OrderedScanAsc,
+                                AstSortDirection::Desc => IndexScanType::OrderedScanDesc,
+                            };
+                            return Some(IndexPlan {
+                                index_name: index.name.clone(),
+                                columns: index.columns.clone(),
+                                scan_type,
+                                lookup_value: None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Find an index that can satisfy a filter condition
+    fn find_index_for_filter(
+        &self,
+        indexes: &[monodb_common::schema::Index],
+        filter: &crate::storage::models::Filter,
+    ) -> Option<crate::storage::models::IndexPlan> {
+        use crate::storage::models::{Filter, IndexPlan, IndexScanType};
+
+        match filter {
+            // Direct equality on a single column
+            Filter::Eq(column, value) => {
+                for index in indexes {
+                    if let Some(first_col) = index.columns.first() {
+                        if first_col == column {
+                            return Some(IndexPlan {
+                                index_name: index.name.clone(),
+                                columns: index.columns.clone(),
+                                scan_type: IndexScanType::ExactMatch,
+                                lookup_value: Some(value.clone()),
+                            });
+                        }
+                    }
+                }
+                None
+            }
+            // For AND filters, try to find an index for any equality condition
+            Filter::And(conditions) => {
+                for condition in conditions {
+                    if let Some(plan) = self.find_index_for_filter(indexes, condition) {
+                        return Some(plan);
+                    }
+                }
+                None
+            }
+            // Other filter types don't use indexes (for now)
+            _ => None,
+        }
+    }
+
+    /// Lookup rows by index for exact match
+    pub async fn find_by_index(
+        &self,
+        collection_name: &str,
+        index_name: &str,
+        lookup_value: &MonoValue,
+        tx: Option<&Transaction>,
+    ) -> Result<Vec<MonoValue>> {
+        // Get the index
+        let collection_indexes = self
+            .secondary_indexes
+            .get(collection_name)
+            .ok_or_else(|| MonoError::NotFound(format!("no indexes on '{collection_name}'")))?;
+
+        let index = collection_indexes
+            .get(index_name)
+            .ok_or_else(|| MonoError::NotFound(format!("index '{index_name}' not found")))?;
+
+        // Encode the lookup value as index key
+        let index_key = Self::encode_composite_key(&[lookup_value.clone()]);
+
+        // Get primary keys from index
+        let primary_keys = match index.get(&index_key) {
+            Some(pk_set) => pk_set.iter().cloned().collect::<Vec<_>>(),
+            None => return Ok(vec![]),
+        };
+
+        // Fetch actual rows by primary key
+        let mut results = Vec::with_capacity(primary_keys.len());
+        for pk in primary_keys {
+            if let Some(row) = self.get_by_primary_key(collection_name, &pk, tx).await? {
+                results.push(row);
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Get a single row by its primary key using direct LSM lookup
+    async fn get_by_primary_key(
+        &self,
+        collection_name: &str,
+        primary_key: &[u8],
+        tx: Option<&Transaction>,
+    ) -> Result<Option<MonoValue>> {
+        // Create scan range for this primary key (all versions)
+        // Versioned keys are: {pk_bytes}{separator}{timestamp}
+        // We scan from pk_bytes to pk_bytes + high byte to get all versions
+        let mut end_key = primary_key.to_vec();
+        end_key.push(0xFF);
+
+        let pairs = if self.config.use_lsm {
+            if let Some(lsm) = self.lsm_trees.get(collection_name) {
+                lsm.scan_with_limit(primary_key, &end_key, Some(10)).await?
+            } else {
+                return Ok(None);
+            }
+        } else if let Some(btree) = self.btrees.get(collection_name) {
+            btree.scan(primary_key, &end_key).await?
+        } else {
+            return Ok(None);
+        };
+
+        // Find the most recent visible version
+        for (key, value) in pairs {
+            if let Some((_pk, version_ts)) = decode_versioned_key(&key) {
+                let visible = if let Some(tx) = tx {
+                    self.is_version_visible(version_ts, tx)
+                } else {
+                    self.is_version_visible_no_tx(version_ts)
+                };
+
+                if visible {
+                    match MonoValue::from_bytes(&value) {
+                        Ok((mv, _)) => return Ok(Some(mv)),
+                        Err(e) => {
+                            tracing::warn!("Failed to deserialize row: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Scan index in sorted order for ORDER BY
+    pub async fn scan_by_index_ordered(
+        &self,
+        collection_name: &str,
+        index_name: &str,
+        ascending: bool,
+        limit: Option<usize>,
+        tx: Option<&Transaction>,
+    ) -> Result<Vec<MonoValue>> {
+        // Get the index
+        let collection_indexes = self
+            .secondary_indexes
+            .get(collection_name)
+            .ok_or_else(|| MonoError::NotFound(format!("no indexes on '{collection_name}'")))?;
+
+        let index = collection_indexes
+            .get(index_name)
+            .ok_or_else(|| MonoError::NotFound(format!("index '{index_name}' not found")))?;
+
+        // Collect all index entries and sort them
+        let mut entries: Vec<(Vec<u8>, Vec<Vec<u8>>)> = index
+            .iter()
+            .map(|entry| {
+                let key = entry.key().clone();
+                let pks: Vec<Vec<u8>> = entry.value().iter().cloned().collect();
+                (key, pks)
+            })
+            .collect();
+
+        // Sort by index key
+        if ascending {
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+        } else {
+            entries.sort_by(|a, b| b.0.cmp(&a.0));
+        }
+
+        // Fetch rows in sorted order
+        let mut results = Vec::new();
+        let limit = limit.unwrap_or(usize::MAX);
+
+        'outer: for (_index_key, primary_keys) in entries {
+            for pk in primary_keys {
+                if results.len() >= limit {
+                    break 'outer;
+                }
+                if let Some(row) = self.get_by_primary_key(collection_name, &pk, tx).await? {
+                    results.push(row);
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Scan data in primary key order (data is already sorted by PK in LSM)
+    /// Uses proper bidirectional scanning: ASC uses forward scan, DESC uses reverse scan.
+    /// Both can terminate early once enough results are found.
+    pub async fn scan_by_primary_key_order(
+        &self,
+        collection_name: &str,
+        ascending: bool,
+        limit: Option<usize>,
+        tx: Option<&Transaction>,
+    ) -> Result<Vec<MonoValue>> {
+        // Over-fetch slightly to account for MVCC filtering (multiple versions per key)
+        let scan_limit = limit.map(|l| l.saturating_mul(3).max(100));
+
+        let pairs = if self.config.use_lsm {
+            if let Some(lsm) = self.lsm_trees.get(collection_name) {
+                if ascending {
+                    // Forward scan: smallest keys first
+                    lsm.scan_with_limit(&[], &[0xFF], scan_limit).await?
+                } else {
+                    // Reverse scan: largest keys first (proper DESC support)
+                    lsm.scan_reverse_with_limit(&[], &[0xFF], scan_limit).await?
+                }
+            } else {
+                return Err(MonoError::NotFound(format!(
+                    "collection '{collection_name}' not found"
+                )));
+            }
+        } else if let Some(btree) = self.btrees.get(collection_name) {
+            // BTree doesn't have reverse scan yet, fall back to forward scan
+            btree.scan(&[], &[0xFF; 64]).await?
+        } else {
+            return Err(MonoError::NotFound(format!(
+                "collection '{collection_name}' not found"
+            )));
+        };
+
+        let mut results = Vec::new();
+        let mut seen_pks: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+
+        // Iterate through pairs (already in correct order: ASC or DESC)
+        // and collect unique visible rows until we have enough
+        for (key, value) in pairs.iter() {
+            if let Some((pk, version_ts)) = decode_versioned_key(key) {
+                if seen_pks.contains(&pk) {
+                    continue;
+                }
+
+                let visible = if let Some(tx) = tx {
+                    self.is_version_visible(version_ts, tx)
+                } else {
+                    self.is_version_visible_no_tx(version_ts)
+                };
+
+                if visible {
+                    match MonoValue::from_bytes(value) {
+                        Ok((mv, _)) => {
+                            results.push(mv);
+                            seen_pks.insert(pk);
+
+                            // Early termination: stop once we have enough
+                            if let Some(lim) = limit {
+                                if results.len() >= lim {
+                                    break;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to deserialize row: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Drop a secondary index from a collection/table
+    pub async fn drop_index(&self, collection_name: &str, index_name: &str) -> Result<()> {
+        // Get and update schema
+        let mut schema = self
+            .schemas
+            .get(collection_name)
+            .ok_or_else(|| MonoError::NotFound(format!("collection '{collection_name}' not found")))?
+            .value()
+            .clone();
+
+        // Remove index from schema
+        let removed = match &mut schema {
+            Schema::Table { indexes, .. } => {
+                let len_before = indexes.len();
+                indexes.retain(|i| i.name != index_name);
+                indexes.len() < len_before
+            }
+            Schema::Collection { indexes, .. } => {
+                let len_before = indexes.len();
+                indexes.retain(|i| i.name != index_name);
+                indexes.len() < len_before
+            }
+            Schema::KeySpace { .. } => false,
+        };
+
+        if !removed {
+            return Err(MonoError::NotFound(format!(
+                "index '{index_name}' not found on '{collection_name}'"
+            )));
+        }
+
+        // Update schema in memory
+        self.schemas.insert(collection_name.to_string(), schema);
+
+        // Remove index data
+        if let Some(collection_indexes) = self.secondary_indexes.get(collection_name) {
+            collection_indexes.remove(index_name);
+        }
+
+        // Persist schema changes
+        self.persist_schemas().await?;
+
         Ok(())
     }
 

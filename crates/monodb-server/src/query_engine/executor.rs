@@ -9,8 +9,8 @@ use monodb_common::{
 
 use crate::{
     query_engine::ast::{
-        Assignment, BinaryOp, ConditionalType, Expr, Extension, FieldDef, Statement, TableProperty,
-        TableType,
+        Assignment, BinaryOp, ConditionalType, Expr, Extension, FieldDef, OrderByField,
+        SortDirection, Statement, TableProperty, TableType,
     },
     storage::{
         Data, Filter, Query,
@@ -36,7 +36,7 @@ impl fmt::Display for ExecutorError {
                 write!(f, "Type error: expected {expected}, got {actual}")
             }
             ExecutorError::FieldNotFound(field) => write!(f, "Field '{field}' not found"),
-            ExecutorError::InvalidOperation(msg) => write!(f, "Invalid operation: {msg}"),
+            ExecutorError::InvalidOperation(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -53,7 +53,7 @@ impl From<ExecutorError> for MonoError {
                 MonoError::TypeError { expected, actual }
             }
             ExecutorError::FieldNotFound(field) => MonoError::NotFound(field),
-            ExecutorError::InvalidOperation(msg) => MonoError::Execution(msg),
+            ExecutorError::InvalidOperation(msg) => MonoError::InvalidOperation(msg),
         }
     }
 }
@@ -214,14 +214,140 @@ impl QueryExecutor {
                 source,
                 filter,
                 fields,
+                order_by,
+                take,
+                skip,
                 extensions,
             } => {
-                let data = self.execute_get(source, filter, fields, extensions).await?;
-                // Flatten the array so each row is a separate element in data
-                let rows = match data {
-                    Value::Array(arr) => arr,
-                    other => vec![other],
+                // Translate filter for query planner
+                let translated_filter = if let Some(ref expr) = filter {
+                    Some(self.translate_filter(expr.clone()).await?)
+                } else {
+                    None
                 };
+
+                // Check if we can use an index (very basic query planner)
+                let index_plan = self.storage.find_usable_index(
+                    &source,
+                    translated_filter.as_ref(),
+                    order_by.as_deref(),
+                );
+
+                let (mut rows, used_index_for_order) = if let Some(ref plan) = index_plan {
+                    use crate::storage::IndexScanType;
+
+                    match &plan.scan_type {
+                        IndexScanType::ExactMatch => {
+                            // Use index for equality lookup
+                            if let Some(ref lookup_val) = plan.lookup_value {
+                                let results = self
+                                    .storage
+                                    .find_by_index(
+                                        &source,
+                                        &plan.index_name,
+                                        lookup_val,
+                                        self.current_tx.as_ref(),
+                                    )
+                                    .await
+                                    .map_err(|e| ExecutorError::InvalidOperation(e.message().to_string()))?;
+                                (results, false)
+                            } else {
+                                // Fallback to full scan
+                                let data = self
+                                    .execute_get(source.clone(), filter, fields, extensions, None)
+                                    .await?;
+                                let rows = match data {
+                                    Value::Array(arr) => arr,
+                                    other => vec![other],
+                                };
+                                (rows, false)
+                            }
+                        }
+                        IndexScanType::OrderedScanAsc | IndexScanType::OrderedScanDesc => {
+                            // Use secondary index for ordered scan
+                            let ascending = matches!(plan.scan_type, IndexScanType::OrderedScanAsc);
+                            let limit = if skip.is_none() {
+                                take.map(|t| t as usize)
+                            } else {
+                                // Need more rows if we're skipping
+                                take.map(|t| t as usize + skip.unwrap_or(0) as usize)
+                            };
+
+                            let results = self
+                                .storage
+                                .scan_by_index_ordered(
+                                    &source,
+                                    &plan.index_name,
+                                    ascending,
+                                    limit,
+                                    self.current_tx.as_ref(),
+                                )
+                                .await
+                                .map_err(|e| ExecutorError::InvalidOperation(e.message().to_string()))?;
+                            (results, true) // Used index for ordering
+                        }
+                        IndexScanType::PrimaryKeyScanAsc | IndexScanType::PrimaryKeyScanDesc => {
+                            // Use direct LSM scan for primary key ordering
+                            let ascending =
+                                matches!(plan.scan_type, IndexScanType::PrimaryKeyScanAsc);
+                            let limit = if skip.is_none() {
+                                take.map(|t| t as usize)
+                            } else {
+                                take.map(|t| t as usize + skip.unwrap_or(0) as usize)
+                            };
+
+                            let results = self
+                                .storage
+                                .scan_by_primary_key_order(
+                                    &source,
+                                    ascending,
+                                    limit,
+                                    self.current_tx.as_ref(),
+                                )
+                                .await
+                                .map_err(|e| ExecutorError::InvalidOperation(e.message().to_string()))?;
+                            (results, true) // Data is already in order
+                        }
+                    }
+                } else {
+                    // No usable index, use full scan
+                    let storage_limit = if order_by.is_none() && skip.is_none() {
+                        take.map(|t| t as usize)
+                    } else {
+                        None
+                    };
+                    let data = self
+                        .execute_get(source, filter, fields, extensions, storage_limit)
+                        .await?;
+                    let rows = match data {
+                        Value::Array(arr) => arr,
+                        other => vec![other],
+                    };
+                    (rows, false)
+                };
+
+                // Apply ordering if specified AND we didn't use index for ordering
+                if let Some(order_fields) = order_by {
+                    if !used_index_for_order {
+                        self.apply_ordering(&mut rows, &order_fields);
+                    }
+                }
+
+                // Apply skip (offset) if specified
+                if let Some(skip_count) = skip {
+                    let skip_usize = skip_count as usize;
+                    if skip_usize < rows.len() {
+                        rows = rows.into_iter().skip(skip_usize).collect();
+                    } else {
+                        rows.clear();
+                    }
+                }
+
+                // Apply take (limit) if specified
+                if let Some(take_count) = take {
+                    rows.truncate(take_count as usize);
+                }
+
                 let row_count = rows.len() as u64;
                 ExecutionResult::Ok {
                     data: rows,
@@ -249,7 +375,14 @@ impl QueryExecutor {
 
                 self.current_tx = Some(tx);
                 ExecutionResult::Ok {
-                    data: vec![Value::String(format!("BEGIN (tx_id={})", tx_id))],
+                    data: vec![Value::Object(
+                        [
+                            ("operation".to_string(), Value::String("begin".to_string())),
+                            ("tx_id".to_string(), Value::Int64(tx_id as i64)),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    )],
                     time: chrono::Utc::now().timestamp_millis() as u64,
                     commit_timestamp: None,
                     time_elapsed: Some(start.elapsed().as_millis() as u64),
@@ -272,10 +405,15 @@ impl QueryExecutor {
                     })?;
 
                 ExecutionResult::Ok {
-                    data: vec![Value::String(format!(
-                        "COMMIT (tx_id={}, commit_ts={})",
-                        tx.tx_id, commit_ts
-                    ))],
+                    data: vec![Value::Object(
+                        [
+                            ("operation".to_string(), Value::String("commit".to_string())),
+                            ("tx_id".to_string(), Value::Int64(tx.tx_id as i64)),
+                            ("commit_ts".to_string(), Value::Int64(commit_ts as i64)),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    )],
                     time: chrono::Utc::now().timestamp_millis() as u64,
                     commit_timestamp: Some(commit_ts),
                     time_elapsed: Some(start.elapsed().as_millis() as u64),
@@ -296,11 +434,126 @@ impl QueryExecutor {
                     ExecutorError::InvalidOperation(format!("Rollback failed: {}", e))
                 })?;
                 ExecutionResult::Ok {
-                    data: vec![Value::String(format!("ROLLBACK (tx_id={})", tx.tx_id))],
+                    data: vec![Value::Object(
+                        [
+                            (
+                                "operation".to_string(),
+                                Value::String("rollback".to_string()),
+                            ),
+                            ("tx_id".to_string(), Value::Int64(tx.tx_id as i64)),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    )],
                     time: chrono::Utc::now().timestamp_millis() as u64,
                     commit_timestamp: None,
                     time_elapsed: Some(start.elapsed().as_millis() as u64),
                     row_count: None,
+                }
+            }
+            Statement::MakeIndex {
+                index_name,
+                table_name,
+                columns,
+                unique,
+            } => {
+                self.execute_make_index(index_name.clone(), table_name.clone(), columns.clone(), unique)
+                    .await?;
+                ExecutionResult::Ok {
+                    data: vec![Value::Object(
+                        [
+                            (
+                                "operation".to_string(),
+                                Value::String("create_index".to_string()),
+                            ),
+                            ("index_name".to_string(), Value::String(index_name)),
+                            ("table_name".to_string(), Value::String(table_name)),
+                            (
+                                "columns".to_string(),
+                                Value::Array(columns.into_iter().map(Value::String).collect()),
+                            ),
+                            ("unique".to_string(), Value::Bool(unique)),
+                            (
+                                "status".to_string(),
+                                Value::String("backfill_in_progress".to_string()),
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    )],
+                    time: chrono::Utc::now().timestamp_millis() as u64,
+                    commit_timestamp: None,
+                    time_elapsed: Some(start.elapsed().as_millis() as u64),
+                    row_count: None,
+                }
+            }
+            Statement::DropIndex {
+                index_name,
+                table_name,
+            } => {
+                self.execute_drop_index(index_name.clone(), table_name.clone())
+                    .await?;
+                ExecutionResult::Ok {
+                    data: vec![Value::Object(
+                        [
+                            (
+                                "operation".to_string(),
+                                Value::String("drop_index".to_string()),
+                            ),
+                            ("index_name".to_string(), Value::String(index_name)),
+                            ("table_name".to_string(), Value::String(table_name)),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    )],
+                    time: chrono::Utc::now().timestamp_millis() as u64,
+                    commit_timestamp: None,
+                    time_elapsed: Some(start.elapsed().as_millis() as u64),
+                    row_count: None,
+                }
+            }
+            Statement::DropTable { table_name } => {
+                self.execute_drop_table(table_name.clone()).await?;
+                ExecutionResult::Ok {
+                    data: vec![Value::Object(
+                        [
+                            (
+                                "operation".to_string(),
+                                Value::String("drop_table".to_string()),
+                            ),
+                            ("table_name".to_string(), Value::String(table_name)),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    )],
+                    time: chrono::Utc::now().timestamp_millis() as u64,
+                    commit_timestamp: None,
+                    time_elapsed: Some(start.elapsed().as_millis() as u64),
+                    row_count: None,
+                }
+            }
+            Statement::Describe { table_name } => {
+                let description = self.execute_describe(table_name).await?;
+                ExecutionResult::Ok {
+                    data: vec![description],
+                    time: chrono::Utc::now().timestamp_millis() as u64,
+                    commit_timestamp: None,
+                    time_elapsed: Some(start.elapsed().as_millis() as u64),
+                    row_count: None,
+                }
+            }
+            Statement::Count { table_name } => {
+                let count = self.execute_count(&table_name).await?;
+                ExecutionResult::Ok {
+                    data: vec![Value::Object(
+                        [("count".to_string(), Value::Int64(count as i64))]
+                            .into_iter()
+                            .collect(),
+                    )],
+                    time: chrono::Utc::now().timestamp_millis() as u64,
+                    commit_timestamp: None,
+                    time_elapsed: Some(start.elapsed().as_millis() as u64),
+                    row_count: Some(count as u64),
                 }
             }
             _ => {
@@ -549,6 +802,229 @@ impl QueryExecutor {
         }
     }
 
+    /// Create a secondary index on a table
+    async fn execute_make_index(
+        &mut self,
+        index_name: String,
+        table_name: String,
+        columns: Vec<String>,
+        unique: bool,
+    ) -> ExecutorResult<Value> {
+        // Validate table exists and get schema
+        let schema = self
+            .storage
+            .get_schema(&table_name)
+            .ok_or_else(|| ExecutorError::InvalidOperation(format!("table '{table_name}' not found")))?;
+
+        // Validate columns exist in schema
+        match &schema {
+            Schema::Table { columns: table_cols, .. } => {
+                for col in &columns {
+                    if !table_cols.iter().any(|tc| &tc.name == col) {
+                        return Err(ExecutorError::InvalidOperation(format!(
+                            "column '{col}' not found in table '{table_name}'"
+                        )));
+                    }
+                }
+            }
+            Schema::Collection { .. } => {
+                // Collections don't have strict schema, allow any column
+            }
+            Schema::KeySpace { .. } => {
+                return Err(ExecutorError::InvalidOperation(
+                    "cannot create index on keyspace".to_string(),
+                ));
+            }
+        }
+
+        // Create the index
+        self.storage
+            .create_index(&table_name, &index_name, columns.clone(), unique)
+            .await
+            .map_err(|e| ExecutorError::InvalidOperation(e.message().to_string()))?;
+
+        Ok(Value::String(format!(
+            "index '{}' created on '{}'({})",
+            index_name,
+            table_name,
+            columns.join(", ")
+        )))
+    }
+
+    /// Drop an index from a table
+    async fn execute_drop_index(
+        &mut self,
+        index_name: String,
+        table_name: String,
+    ) -> ExecutorResult<Value> {
+        self.storage
+            .drop_index(&table_name, &index_name)
+            .await
+            .map_err(|e| ExecutorError::InvalidOperation(e.message().to_string()))?;
+
+        Ok(Value::String(format!(
+            "index '{}' dropped from '{}'",
+            index_name, table_name
+        )))
+    }
+
+    /// Drop a table/collection
+    async fn execute_drop_table(&mut self, table_name: String) -> ExecutorResult<Value> {
+        self.storage
+            .drop_collection(&table_name)
+            .await
+            .map_err(|e| ExecutorError::InvalidOperation(e.message().to_string()))?;
+
+        Ok(Value::String(format!("table '{}' dropped", table_name)))
+    }
+
+    /// Describe a table/collection
+    async fn execute_describe(&mut self, table_name: String) -> ExecutorResult<Value> {
+        use monodb_common::schema::Schema;
+        use std::collections::BTreeMap;
+
+        let schema = self
+            .storage
+            .get_schema(&table_name)
+            .ok_or_else(|| ExecutorError::InvalidOperation(format!("table '{table_name}' not found")))?;
+
+        let mut result: BTreeMap<String, Value> = BTreeMap::new();
+
+        match &schema {
+            Schema::Table {
+                name,
+                columns,
+                primary_key,
+                indexes,
+            } => {
+                result.insert("name".to_string(), Value::String(name.clone()));
+                result.insert("type".to_string(), Value::String("table".to_string()));
+
+                // Columns as array of objects
+                let cols: Vec<Value> = columns
+                    .iter()
+                    .map(|col| {
+                        Value::Object(
+                            [
+                                ("name".to_string(), Value::String(col.name.clone())),
+                                (
+                                    "data_type".to_string(),
+                                    Value::String(format!("{:?}", col.data_type).to_lowercase()),
+                                ),
+                                ("is_primary".to_string(), Value::Bool(col.is_primary)),
+                                ("is_unique".to_string(), Value::Bool(col.is_unique)),
+                                ("nullable".to_string(), Value::Bool(col.nullable)),
+                            ]
+                            .into_iter()
+                            .collect(),
+                        )
+                    })
+                    .collect();
+                result.insert("columns".to_string(), Value::Array(cols));
+
+                // Primary key as array of column names
+                let pk: Vec<Value> = primary_key
+                    .iter()
+                    .map(|k| Value::String(k.clone()))
+                    .collect();
+                result.insert("primary_key".to_string(), Value::Array(pk));
+
+                // Indexes as array of objects
+                let idxs: Vec<Value> = indexes
+                    .iter()
+                    .map(|idx| {
+                        Value::Object(
+                            [
+                                ("name".to_string(), Value::String(idx.name.clone())),
+                                (
+                                    "columns".to_string(),
+                                    Value::Array(
+                                        idx.columns
+                                            .iter()
+                                            .map(|c| Value::String(c.clone()))
+                                            .collect(),
+                                    ),
+                                ),
+                                ("unique".to_string(), Value::Bool(idx.unique)),
+                            ]
+                            .into_iter()
+                            .collect(),
+                        )
+                    })
+                    .collect();
+                result.insert("indexes".to_string(), Value::Array(idxs));
+            }
+            Schema::Collection {
+                name,
+                validation,
+                indexes,
+            } => {
+                result.insert("name".to_string(), Value::String(name.clone()));
+                result.insert("type".to_string(), Value::String("collection".to_string()));
+
+                if let Some(rule) = validation {
+                    result.insert(
+                        "validation".to_string(),
+                        Value::String(format!("{:?}", rule)),
+                    );
+                }
+
+                let idxs: Vec<Value> = indexes
+                    .iter()
+                    .map(|idx| {
+                        Value::Object(
+                            [
+                                ("name".to_string(), Value::String(idx.name.clone())),
+                                (
+                                    "columns".to_string(),
+                                    Value::Array(
+                                        idx.columns
+                                            .iter()
+                                            .map(|c| Value::String(c.clone()))
+                                            .collect(),
+                                    ),
+                                ),
+                                ("unique".to_string(), Value::Bool(idx.unique)),
+                            ]
+                            .into_iter()
+                            .collect(),
+                        )
+                    })
+                    .collect();
+                result.insert("indexes".to_string(), Value::Array(idxs));
+            }
+            Schema::KeySpace {
+                name,
+                ttl_enabled,
+                max_size,
+                persistence,
+            } => {
+                result.insert("name".to_string(), Value::String(name.clone()));
+                result.insert("type".to_string(), Value::String("keyspace".to_string()));
+                result.insert("ttl_enabled".to_string(), Value::Bool(*ttl_enabled));
+                result.insert(
+                    "persistence".to_string(),
+                    Value::String(format!("{:?}", persistence)),
+                );
+                if let Some(size) = max_size {
+                    result.insert("max_size".to_string(), Value::Int64(*size as i64));
+                }
+            }
+        }
+
+        Ok(Value::Object(result))
+    }
+
+    /// Count rows in a table/collection
+    async fn execute_count(&mut self, table_name: &str) -> ExecutorResult<usize> {
+        let count = self
+            .storage
+            .count_rows(table_name, self.current_tx.as_ref())
+            .await
+            .map_err(|e| ExecutorError::InvalidOperation(e.message().to_string()))?;
+        Ok(count)
+    }
+
     async fn execute_put(
         &mut self,
         target: String,
@@ -570,7 +1046,7 @@ impl QueryExecutor {
                 // Collections: Add _id (ObjectId) if missing
                 if !row.contains_key("_id") {
                     let oid = monodb_common::ObjectId::new()
-                        .map_err(|e| ExecutorError::InvalidOperation(e.to_string()))?;
+                        .map_err(|e| ExecutorError::InvalidOperation(e.message().to_string()))?;
                     row.insert("_id".to_string(), Value::ObjectId(oid));
                 }
             }
@@ -582,10 +1058,10 @@ impl QueryExecutor {
                 // Relational tables: handled below, don't add _id/_key
             }
             None => {
-                // Unknown collection type - treat as collection for backwards compatibility
+                // Unknown collection type, treat as collection
                 if !row.contains_key("_id") {
                     let oid = monodb_common::ObjectId::new()
-                        .map_err(|e| ExecutorError::InvalidOperation(e.to_string()))?;
+                        .map_err(|e| ExecutorError::InvalidOperation(e.message().to_string()))?;
                     row.insert("_id".to_string(), Value::ObjectId(oid));
                 }
             }
@@ -617,7 +1093,7 @@ impl QueryExecutor {
                         .storage
                         .next_sequence_value(&target, pk_name)
                         .await
-                        .map_err(|e| ExecutorError::InvalidOperation(e.to_string()))?;
+                        .map_err(|e| ExecutorError::InvalidOperation(e.message().to_string()))?;
 
                     row.insert(
                         pk_name.clone(),
@@ -654,7 +1130,7 @@ impl QueryExecutor {
         self.storage
             .insert_with_tx(&target, &data, self.current_tx.as_ref())
             .await
-            .map_err(|e| ExecutorError::InvalidOperation(e.to_string()))?;
+            .map_err(|e| ExecutorError::InvalidOperation(e.message().to_string()))?;
 
         Ok(Value::String(format!("Inserted 1 row into '{target}'")))
     }
@@ -745,7 +1221,7 @@ impl QueryExecutor {
             .storage
             .delete_many(&target, filter)
             .await
-            .map_err(|e| ExecutorError::InvalidOperation(e.to_string()))?;
+            .map_err(|e| ExecutorError::InvalidOperation(e.message().to_string()))?;
 
         Ok((
             count,
@@ -759,6 +1235,7 @@ impl QueryExecutor {
         filter: Option<Expr>,
         _fields: Option<Vec<String>>,
         _extensions: Vec<Extension>,
+        limit: Option<usize>,
     ) -> ExecutorResult<Value> {
         let filter = if let Some(expr) = filter {
             Some(self.translate_filter(expr).await?)
@@ -768,6 +1245,7 @@ impl QueryExecutor {
 
         let query = Query {
             filter,
+            limit,
             ..Default::default()
         };
 
@@ -776,7 +1254,7 @@ impl QueryExecutor {
             .storage
             .find_with_tx(&source, query, self.current_tx.as_ref())
             .await
-            .map_err(|e| ExecutorError::InvalidOperation(e.to_string()))?;
+            .map_err(|e| ExecutorError::InvalidOperation(e.message().to_string()))?;
 
         Ok(Value::Array(results))
     }
@@ -1013,6 +1491,119 @@ impl QueryExecutor {
                 Self::collect_field_path(base).map(|p| format!("{p}.{field}"))
             }
             _ => None,
+        }
+    }
+
+    /// Apply ordering to a list of rows based on `order by` fields.
+    fn apply_ordering(&self, rows: &mut [Value], order_fields: &[OrderByField]) {
+        rows.sort_by(|a, b| {
+            for order_field in order_fields {
+                let cmp = self.compare_values_by_field(a, b, &order_field.field);
+                let cmp = match order_field.direction {
+                    SortDirection::Asc => cmp,
+                    SortDirection::Desc => cmp.reverse(),
+                };
+                if cmp != std::cmp::Ordering::Equal {
+                    return cmp;
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+    }
+
+    /// Compare two values by a specific field name.
+    fn compare_values_by_field(&self, a: &Value, b: &Value, field: &str) -> std::cmp::Ordering {
+        let val_a = Self::get_field_value(a, field);
+        let val_b = Self::get_field_value(b, field);
+        Self::compare_values(&val_a, &val_b)
+    }
+
+    /// Extract a field value from a Value (Row or Object).
+    fn get_field_value(value: &Value, field: &str) -> Option<Value> {
+        match value {
+            Value::Row(row) => row.get(field).cloned(),
+            Value::Object(obj) => obj.get(field).cloned(),
+            _ => None,
+        }
+    }
+
+    /// Compare two optional values for sorting.
+    fn compare_values(a: &Option<Value>, b: &Option<Value>) -> std::cmp::Ordering {
+        match (a, b) {
+            (None, None) => std::cmp::Ordering::Equal,
+            (None, Some(_)) => std::cmp::Ordering::Less, // NULLs first
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (Some(va), Some(vb)) => Self::compare_value_inner(va, vb),
+        }
+    }
+
+    /// Compare two concrete values.
+    fn compare_value_inner(a: &Value, b: &Value) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+
+        match (a, b) {
+            // Integer comparisons (same type)
+            (Value::Int32(ia), Value::Int32(ib)) => ia.cmp(ib),
+            (Value::Int64(ia), Value::Int64(ib)) => ia.cmp(ib),
+
+            // Integer cross-type comparisons
+            (Value::Int32(i32a), Value::Int64(i64b)) => (*i32a as i64).cmp(i64b),
+            (Value::Int64(i64a), Value::Int32(i32b)) => i64a.cmp(&(*i32b as i64)),
+
+            // Float comparisons (same type)
+            (Value::Float32(fa), Value::Float32(fb)) => {
+                fa.partial_cmp(fb).unwrap_or(Ordering::Equal)
+            }
+            (Value::Float64(fa), Value::Float64(fb)) => {
+                fa.partial_cmp(fb).unwrap_or(Ordering::Equal)
+            }
+
+            // Float cross-type comparisons
+            (Value::Float32(f32a), Value::Float64(f64b)) => {
+                (*f32a as f64).partial_cmp(f64b).unwrap_or(Ordering::Equal)
+            }
+            (Value::Float64(f64a), Value::Float32(f32b)) => {
+                f64a.partial_cmp(&(*f32b as f64)).unwrap_or(Ordering::Equal)
+            }
+
+            // Int-Float cross-type comparisons
+            (Value::Int32(i), Value::Float64(f)) => {
+                (*i as f64).partial_cmp(f).unwrap_or(Ordering::Equal)
+            }
+            (Value::Int64(i), Value::Float64(f)) => {
+                (*i as f64).partial_cmp(f).unwrap_or(Ordering::Equal)
+            }
+            (Value::Float64(f), Value::Int32(i)) => {
+                f.partial_cmp(&(*i as f64)).unwrap_or(Ordering::Equal)
+            }
+            (Value::Float64(f), Value::Int64(i)) => {
+                f.partial_cmp(&(*i as f64)).unwrap_or(Ordering::Equal)
+            }
+            (Value::Int32(i), Value::Float32(f)) => {
+                (*i as f32).partial_cmp(f).unwrap_or(Ordering::Equal)
+            }
+            (Value::Int64(i), Value::Float32(f)) => {
+                (*i as f32).partial_cmp(f).unwrap_or(Ordering::Equal)
+            }
+            (Value::Float32(f), Value::Int32(i)) => {
+                f.partial_cmp(&(*i as f32)).unwrap_or(Ordering::Equal)
+            }
+            (Value::Float32(f), Value::Int64(i)) => {
+                f.partial_cmp(&(*i as f32)).unwrap_or(Ordering::Equal)
+            }
+
+            // String comparison
+            (Value::String(sa), Value::String(sb)) => sa.cmp(sb),
+
+            // Boolean comparison
+            (Value::Bool(ba), Value::Bool(bb)) => ba.cmp(bb),
+
+            // Date/time comparison
+            (Value::Date(da), Value::Date(db)) => da.cmp(db),
+            (Value::DateTime(dta), Value::DateTime(dtb)) => dta.cmp(dtb),
+
+            // Fallback: convert to string and compare
+            _ => a.to_string().cmp(&b.to_string()),
         }
     }
 }

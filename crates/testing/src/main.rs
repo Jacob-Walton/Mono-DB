@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use futures::stream::{FuturesUnordered, StreamExt};
-use monodb_client::Client;
+use monodb_client::{Client, connection::Connection};
 use monodb_common::{
     Value,
     protocol::{ExecutionResult, Response},
@@ -11,6 +11,10 @@ use tokio::sync::Mutex as AsyncMutex;
 struct BenchConfig {
     name: &'static str,
     builder: Arc<dyn Fn(usize, usize) -> (String, usize) + Send + Sync>,
+}
+
+async fn get_count(conn: &mut Connection, table: &str) -> Result<u64> {
+    Ok(1) // Placeholder implementation
 }
 
 /// Run a write benchmark against the configured target.
@@ -201,13 +205,17 @@ make table sessions
     // Batch size: number of logical inserts per Execute request
     const BATCH_SIZE: usize = 256;
 
+    let relational_existing = get_count(&mut conn, "users").await?;
+    let collection_existing = get_count(&mut conn, "testing").await?;
+    let keyspace_existing = get_count(&mut conn, "sessions").await?;
+
     let relational = BenchConfig {
         name: "Relational table (users)",
-        builder: Arc::new(|base, batch_size| {
+        builder: Arc::new(move |base, batch_size| {
             let mut batch_sql = String::new();
             let mut actual = 0usize;
             for j in 0..batch_size {
-                let i = base + j;
+                let i = base + j + relational_existing as usize;
                 if i >= COUNT {
                     break;
                 }
@@ -225,11 +233,11 @@ make table sessions
 
     let collection = BenchConfig {
         name: "Document collection (testing)",
-        builder: Arc::new(|base, batch_size| {
+        builder: Arc::new(move |base, batch_size| {
             let mut batch_sql = String::new();
             let mut actual = 0usize;
             for j in 0..batch_size {
-                let i = base + j;
+                let i = base + j + collection_existing as usize;
                 if i >= COUNT {
                     break;
                 }
@@ -244,11 +252,11 @@ make table sessions
 
     let keyspace = BenchConfig {
         name: "In-memory keyspace (sessions)",
-        builder: Arc::new(|base, batch_size| {
+        builder: Arc::new(move |base, batch_size| {
             let mut batch_sql = String::new();
             let mut actual = 0usize;
             for j in 0..batch_size {
-                let i = base + j;
+                let i = base + j + keyspace_existing as usize;
                 if i >= COUNT {
                     break;
                 }

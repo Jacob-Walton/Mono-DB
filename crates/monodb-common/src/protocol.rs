@@ -480,10 +480,13 @@ impl ProtocolCodec {
                         } => {
                             body.put_u8(0); // Tag
                             body.put_u32_le(data.len() as u32);
+                            // Reuse buffer to avoid per-value allocation
+                            let mut value_buf = Vec::with_capacity(256);
                             for value in data {
-                                let value_bytes = value.to_bytes();
-                                body.put_u32_le(value_bytes.len() as u32);
-                                body.put_slice(&value_bytes);
+                                value_buf.clear();
+                                value.write_to(&mut value_buf);
+                                body.put_u32_le(value_buf.len() as u32);
+                                body.put_slice(&value_buf);
                             }
                             body.put_u64_le(*time);
                             put_opt_u64(&mut body, commit_timestamp);
@@ -614,7 +617,7 @@ impl ProtocolCodec {
                             let mut data = Vec::with_capacity(len as usize);
                             for _ in 0..len {
                                 let value_len = data_buf.get_u32_le() as usize;
-                                let value_bytes = data_buf.split_to(value_len).to_vec();
+                                let value_bytes = data_buf.split_to(value_len);
                                 let value = Value::from_bytes(&value_bytes).map_err(|e| {
                                     MonoError::Network(format!("Decode error: {e}"))
                                 })?;

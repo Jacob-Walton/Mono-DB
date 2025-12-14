@@ -58,6 +58,45 @@ pub enum MonoError {
 
 pub type Result<T> = std::result::Result<T, MonoError>;
 
+impl MonoError {
+    /// Get the inner message without the type prefix.
+    /// Useful when re-wrapping errors to avoid "Invalid operation: Invalid operation: ..."
+    pub fn message(&self) -> &str {
+        match self {
+            MonoError::Io(msg) => msg,
+            MonoError::Storage(msg) => msg,
+            MonoError::Parse(msg) => msg,
+            MonoError::Execution(msg) => msg,
+            MonoError::Network(msg) => msg,
+            MonoError::TypeError { expected, actual: _ } => expected, // Partial, but acceptable
+            MonoError::NotFound(msg) => msg,
+            MonoError::AlreadyExists(msg) => msg,
+            MonoError::InvalidOperation(msg) => msg,
+            MonoError::Transaction(msg) => msg,
+            MonoError::Config(msg) => msg,
+            MonoError::WriteConflict(msg) => msg,
+        }
+    }
+
+    /// Get a short error kind name
+    pub fn kind(&self) -> &'static str {
+        match self {
+            MonoError::Io(_) => "io_error",
+            MonoError::Storage(_) => "storage_error",
+            MonoError::Parse(_) => "parse_error",
+            MonoError::Execution(_) => "execution_error",
+            MonoError::Network(_) => "network_error",
+            MonoError::TypeError { .. } => "type_error",
+            MonoError::NotFound(_) => "not_found",
+            MonoError::AlreadyExists(_) => "already_exists",
+            MonoError::InvalidOperation(_) => "invalid_operation",
+            MonoError::Transaction(_) => "transaction_error",
+            MonoError::Config(_) => "config_error",
+            MonoError::WriteConflict(_) => "write_conflict",
+        }
+    }
+}
+
 /// Convert std::io::Error to MonoError
 ///
 /// Shortcut as it's a common error we need

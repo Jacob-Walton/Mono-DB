@@ -2,8 +2,8 @@ use monodb_common::Result;
 
 pub use crate::pool::ConnectionPool;
 
-mod connection;
-mod pool;
+pub mod connection;
+pub mod pool;
 
 #[derive(Clone)]
 pub struct Client {
