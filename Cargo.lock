@@ -682,7 +682,7 @@ dependencies = [
 
 [[package]]
 name = "monodb-client"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "bytes",
  "monodb-common",
@@ -692,7 +692,7 @@ dependencies = [
 
 [[package]]
 name = "monodb-common"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "base64",
  "bytes",
@@ -713,7 +713,7 @@ dependencies = [
 
 [[package]]
 name = "monodb-repl"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "colored",
@@ -726,7 +726,7 @@ dependencies = [
 
 [[package]]
 name = "monodb-server"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "annotate-snippets",
  "anyhow",

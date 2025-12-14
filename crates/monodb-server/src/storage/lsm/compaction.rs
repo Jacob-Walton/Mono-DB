@@ -3,7 +3,7 @@
 use monodb_common::Result;
 use parking_lot::RwLock;
 use std::{
-    collections::BinaryHeap,
+    collections::{BinaryHeap, HashSet},
     path::Path,
     sync::{
         Arc,
@@ -12,10 +12,46 @@ use std::{
 };
 use tracing::{debug, error, info};
 
+use crate::storage::engine::{decode_versioned_key, is_versioned_key};
 use crate::storage::lsm::LsmConfig;
 use crate::storage::lsm::sstable::{
     HeapEntry, SsTable, SsTableBuilder, SsTableIterator, is_tombstone,
 };
+
+/// GC context for MVCC garbage collection during compaction.
+#[derive(Default)]
+pub struct GcContext {
+    /// The oldest active transaction timestamp (GC watermark).
+    /// Versions older than this AND superseded by a newer version can be removed.
+    pub oldest_active_ts: u64,
+    /// Set of aborted transaction IDs whose versions should be removed.
+    pub aborted_tx_ids: HashSet<u64>,
+}
+
+impl GcContext {
+    pub fn new(oldest_active_ts: u64, aborted_tx_ids: HashSet<u64>) -> Self {
+        Self {
+            oldest_active_ts,
+            aborted_tx_ids,
+        }
+    }
+
+    /// Check if a versioned entry should be garbage collected.
+    /// Returns true if the entry should be REMOVED.
+    pub fn should_gc(&self, version_ts: u64, has_newer_version: bool) -> bool {
+        // Remove if from an aborted transaction
+        if self.aborted_tx_ids.contains(&version_ts) {
+            return true;
+        }
+
+        // Remove if older than watermark AND there's a newer committed version
+        if has_newer_version && version_ts < self.oldest_active_ts {
+            return true;
+        }
+
+        false
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum CompactionType {
@@ -43,22 +79,28 @@ fn target_bytes_for_level(level: usize, cfg: &LsmConfig) -> usize {
     }
 }
 
-// Merge many SSTables into the next level.
+// Merge many SSTables into the next level with optional MVCC GC.
 async fn merge_sstables(
     inputs: &[SsTable],
     target_level: usize,
     cfg: &LsmConfig,
     data_dir: &Path,
+    gc_ctx: Option<&GcContext>,
 ) -> Result<Vec<SsTable>> {
     if inputs.is_empty() {
         return Ok(Vec::new());
     }
 
     info!(
-        "Merging {} SSTables into L{} (target size {} B)",
+        "Merging {} SSTables into L{} (target size {} B){}",
         inputs.len(),
         target_level,
-        target_bytes_for_level(target_level, cfg)
+        target_bytes_for_level(target_level, cfg),
+        if gc_ctx.is_some() {
+            " with MVCC GC"
+        } else {
+            ""
+        }
     );
 
     let mut heap = BinaryHeap::new();
@@ -101,6 +143,10 @@ async fn merge_sstables(
     let mut outputs = Vec::new();
     let mut current_size = 0usize;
     let mut written = 0usize;
+    let mut gc_removed = 0usize;
+
+    // Track base PKs we've already written a version for (MVCC GC)
+    let mut seen_base_pks: HashSet<Vec<u8>> = HashSet::new();
 
     while let Some(entry) = heap.pop() {
         let key = entry.key;
@@ -122,7 +168,35 @@ async fn merge_sstables(
             }
         }
 
-        if !is_tombstone(&val) {
+        // Apply MVCC GC if context provided
+        let should_write = if let Some(gc) = gc_ctx {
+            if is_versioned_key(&key) {
+                if let Some((base_pk, version_ts)) = decode_versioned_key(&key) {
+                    let has_newer = seen_base_pks.contains(&base_pk);
+
+                    if gc.should_gc(version_ts, has_newer) {
+                        // GC this version
+                        gc_removed += 1;
+                        false
+                    } else {
+                        // Keep this version, mark PK as seen
+                        seen_base_pks.insert(base_pk);
+                        !is_tombstone(&val)
+                    }
+                } else {
+                    // Couldn't decode, keep it
+                    !is_tombstone(&val)
+                }
+            } else {
+                // Non-versioned key, normal tombstone check
+                !is_tombstone(&val)
+            }
+        } else {
+            // No GC context, just skip tombstones
+            !is_tombstone(&val)
+        };
+
+        if should_write {
             builder.add(key.clone(), val.clone())?;
             written += 1;
             current_size += key.len() + val.len() + 16;
@@ -158,11 +232,20 @@ async fn merge_sstables(
         outputs.push(out);
     }
 
-    info!(
-        "Merge finished: {} entries, {} output file(s)",
-        written,
-        outputs.len()
-    );
+    if gc_removed > 0 {
+        info!(
+            "Merge finished: {} entries written, {} GC'd, {} output file(s)",
+            written,
+            gc_removed,
+            outputs.len()
+        );
+    } else {
+        info!(
+            "Merge finished: {} entries, {} output file(s)",
+            written,
+            outputs.len()
+        );
+    }
 
     Ok(outputs)
 }
@@ -198,7 +281,7 @@ pub async fn run_compaction_task(
             }
 
             info!("Starting L0→L1 with {} tables", inputs.len());
-            let outputs = merge_sstables(&inputs, 1, cfg, data_dir).await?;
+            let outputs = merge_sstables(&inputs, 1, cfg, data_dir, None).await?;
             replace_sstables(sstables, &inputs, outputs).await?;
         }
         CompactionType::Level(lv) => {
@@ -212,7 +295,7 @@ pub async fn run_compaction_task(
             }
 
             info!("Starting L{}→L{} with {} tables", lv, lv + 1, inputs.len());
-            let outputs = merge_sstables(&inputs, lv + 1, cfg, data_dir).await?;
+            let outputs = merge_sstables(&inputs, lv + 1, cfg, data_dir, None).await?;
             replace_sstables(sstables, &inputs, outputs).await?;
         }
     }

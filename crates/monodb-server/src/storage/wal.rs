@@ -840,6 +840,85 @@ impl Wal {
         Ok(checkpoint_seq)
     }
 
+    // Transaction WAL Methods (MVCC)
+
+    /// Write a TxBegin entry to the WAL.
+    /// Payload: tx_id (u64) + start_ts (u64)
+    pub fn append_tx_begin(&mut self, tx_id: u64, start_ts: u64) -> Result<u64> {
+        let mut payload = Vec::with_capacity(16);
+        payload.extend_from_slice(&tx_id.to_le_bytes());
+        payload.extend_from_slice(&start_ts.to_le_bytes());
+        self.append_with_type(b"tx", &payload, WalEntryType::TxBegin)
+    }
+
+    /// Write a TxBegin entry using async path.
+    pub fn append_tx_begin_async(&self, tx_id: u64, start_ts: u64) -> Result<u64> {
+        let mut payload = Vec::with_capacity(16);
+        payload.extend_from_slice(&tx_id.to_le_bytes());
+        payload.extend_from_slice(&start_ts.to_le_bytes());
+        self.append_with_type_async(b"tx", &payload, WalEntryType::TxBegin)
+    }
+
+    /// Write a TxCommit entry to the WAL.
+    /// Payload: tx_id (u64) + commit_ts (u64)
+    pub fn append_tx_commit(&mut self, tx_id: u64, commit_ts: u64) -> Result<u64> {
+        let mut payload = Vec::with_capacity(16);
+        payload.extend_from_slice(&tx_id.to_le_bytes());
+        payload.extend_from_slice(&commit_ts.to_le_bytes());
+        self.append_with_type(b"tx", &payload, WalEntryType::TxCommit)
+    }
+
+    /// Write a TxCommit entry using async path.
+    pub fn append_tx_commit_async(&self, tx_id: u64, commit_ts: u64) -> Result<u64> {
+        let mut payload = Vec::with_capacity(16);
+        payload.extend_from_slice(&tx_id.to_le_bytes());
+        payload.extend_from_slice(&commit_ts.to_le_bytes());
+        self.append_with_type_async(b"tx", &payload, WalEntryType::TxCommit)
+    }
+
+    /// Write a TxRollback entry to the WAL.
+    /// Payload: tx_id (u64)
+    pub fn append_tx_rollback(&mut self, tx_id: u64) -> Result<u64> {
+        let mut payload = Vec::with_capacity(8);
+        payload.extend_from_slice(&tx_id.to_le_bytes());
+        self.append_with_type(b"tx", &payload, WalEntryType::TxRollback)
+    }
+
+    /// Write a TxRollback entry using async path.
+    pub fn append_tx_rollback_async(&self, tx_id: u64) -> Result<u64> {
+        let mut payload = Vec::with_capacity(8);
+        payload.extend_from_slice(&tx_id.to_le_bytes());
+        self.append_with_type_async(b"tx", &payload, WalEntryType::TxRollback)
+    }
+
+    /// Parse a TxBegin payload into (tx_id, start_ts)
+    pub fn parse_tx_begin_payload(payload: &[u8]) -> Option<(u64, u64)> {
+        if payload.len() < 16 {
+            return None;
+        }
+        let tx_id = u64::from_le_bytes(payload[0..8].try_into().ok()?);
+        let start_ts = u64::from_le_bytes(payload[8..16].try_into().ok()?);
+        Some((tx_id, start_ts))
+    }
+
+    /// Parse a TxCommit payload into (tx_id, commit_ts)
+    pub fn parse_tx_commit_payload(payload: &[u8]) -> Option<(u64, u64)> {
+        if payload.len() < 16 {
+            return None;
+        }
+        let tx_id = u64::from_le_bytes(payload[0..8].try_into().ok()?);
+        let commit_ts = u64::from_le_bytes(payload[8..16].try_into().ok()?);
+        Some((tx_id, commit_ts))
+    }
+
+    /// Parse a TxRollback payload into tx_id
+    pub fn parse_tx_rollback_payload(payload: &[u8]) -> Option<u64> {
+        if payload.len() < 8 {
+            return None;
+        }
+        Some(u64::from_le_bytes(payload[0..8].try_into().ok()?))
+    }
+
     /// Rotate the WAL log
     fn rotate_log(&mut self) -> Result<()> {
         self.sync()?;

@@ -51,6 +51,9 @@ pub enum MonoError {
 
     #[error("Configuration error: {0}")]
     Config(String),
+
+    #[error("Write conflict: {0}")]
+    WriteConflict(String),
 }
 
 pub type Result<T> = std::result::Result<T, MonoError>;
