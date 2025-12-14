@@ -34,11 +34,7 @@ pub fn encode_sortable(value: &Value) -> Vec<u8> {
             let mut bytes = [0u8; 5];
             bytes[0] = 0x20; // Type tag for f32
             let bits = f.to_bits();
-            let encoded = if *f >= 0.0 {
-                bits ^ 0x80000000
-            } else {
-                !bits
-            };
+            let encoded = if *f >= 0.0 { bits ^ 0x80000000 } else { !bits };
             bytes[1..5].copy_from_slice(&encoded.to_be_bytes());
             bytes.to_vec()
         }
@@ -114,7 +110,7 @@ mod tests {
 
     #[test]
     fn test_i64_sort_order() {
-        let values = vec![-100i64, -1, 0, 1, 10, 100, 1000];
+        let values = [-100i64, -1, 0, 1, 10, 100, 1000];
         let encoded: Vec<_> = values
             .iter()
             .map(|v| encode_sortable(&Value::Int64(*v)))

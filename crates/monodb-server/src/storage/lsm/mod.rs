@@ -251,11 +251,7 @@ impl LsmTree {
         Ok(())
     }
 
-    pub async fn scan(
-        &self,
-        start_key: &[u8],
-        end_key: &[u8],
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    pub async fn scan(&self, start_key: &[u8], end_key: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         self.scan_with_limit(start_key, end_key, None).await
     }
 

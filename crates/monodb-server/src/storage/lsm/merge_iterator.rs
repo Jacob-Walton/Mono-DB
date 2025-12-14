@@ -337,8 +337,8 @@ mod tests {
     fn test_reverse_merge_numeric_keys() {
         // Simulate sortable-encoded numeric keys (larger bytes = larger number)
         let source = vec![
-            (vec![0x10, 0x80, 0x00, 0x00, 0x01], b"1".to_vec()),  // represents 1
-            (vec![0x10, 0x80, 0x00, 0x00, 0x02], b"2".to_vec()),  // represents 2
+            (vec![0x10, 0x80, 0x00, 0x00, 0x01], b"1".to_vec()), // represents 1
+            (vec![0x10, 0x80, 0x00, 0x00, 0x02], b"2".to_vec()), // represents 2
             (vec![0x10, 0x80, 0x00, 0x00, 0x0A], b"10".to_vec()), // represents 10
         ];
 

@@ -249,7 +249,9 @@ impl QueryExecutor {
                                         self.current_tx.as_ref(),
                                     )
                                     .await
-                                    .map_err(|e| ExecutorError::InvalidOperation(e.message().to_string()))?;
+                                    .map_err(|e| {
+                                        ExecutorError::InvalidOperation(e.message().to_string())
+                                    })?;
                                 (results, false)
                             } else {
                                 // Fallback to full scan
@@ -283,7 +285,9 @@ impl QueryExecutor {
                                     self.current_tx.as_ref(),
                                 )
                                 .await
-                                .map_err(|e| ExecutorError::InvalidOperation(e.message().to_string()))?;
+                                .map_err(|e| {
+                                    ExecutorError::InvalidOperation(e.message().to_string())
+                                })?;
                             (results, true) // Used index for ordering
                         }
                         IndexScanType::PrimaryKeyScanAsc | IndexScanType::PrimaryKeyScanDesc => {
@@ -305,7 +309,9 @@ impl QueryExecutor {
                                     self.current_tx.as_ref(),
                                 )
                                 .await
-                                .map_err(|e| ExecutorError::InvalidOperation(e.message().to_string()))?;
+                                .map_err(|e| {
+                                    ExecutorError::InvalidOperation(e.message().to_string())
+                                })?;
                             (results, true) // Data is already in order
                         }
                     }
@@ -327,10 +333,10 @@ impl QueryExecutor {
                 };
 
                 // Apply ordering if specified AND we didn't use index for ordering
-                if let Some(order_fields) = order_by {
-                    if !used_index_for_order {
-                        self.apply_ordering(&mut rows, &order_fields);
-                    }
+                if let Some(order_fields) = order_by
+                    && !used_index_for_order
+                {
+                    self.apply_ordering(&mut rows, &order_fields);
                 }
 
                 // Apply skip (offset) if specified
@@ -457,8 +463,13 @@ impl QueryExecutor {
                 columns,
                 unique,
             } => {
-                self.execute_make_index(index_name.clone(), table_name.clone(), columns.clone(), unique)
-                    .await?;
+                self.execute_make_index(
+                    index_name.clone(),
+                    table_name.clone(),
+                    columns.clone(),
+                    unique,
+                )
+                .await?;
                 ExecutionResult::Ok {
                     data: vec![Value::Object(
                         [
@@ -811,14 +822,16 @@ impl QueryExecutor {
         unique: bool,
     ) -> ExecutorResult<Value> {
         // Validate table exists and get schema
-        let schema = self
-            .storage
-            .get_schema(&table_name)
-            .ok_or_else(|| ExecutorError::InvalidOperation(format!("table '{table_name}' not found")))?;
+        let schema = self.storage.get_schema(&table_name).ok_or_else(|| {
+            ExecutorError::InvalidOperation(format!("table '{table_name}' not found"))
+        })?;
 
         // Validate columns exist in schema
         match &schema {
-            Schema::Table { columns: table_cols, .. } => {
+            Schema::Table {
+                columns: table_cols,
+                ..
+            } => {
                 for col in &columns {
                     if !table_cols.iter().any(|tc| &tc.name == col) {
                         return Err(ExecutorError::InvalidOperation(format!(
@@ -883,10 +896,9 @@ impl QueryExecutor {
         use monodb_common::schema::Schema;
         use std::collections::BTreeMap;
 
-        let schema = self
-            .storage
-            .get_schema(&table_name)
-            .ok_or_else(|| ExecutorError::InvalidOperation(format!("table '{table_name}' not found")))?;
+        let schema = self.storage.get_schema(&table_name).ok_or_else(|| {
+            ExecutorError::InvalidOperation(format!("table '{table_name}' not found"))
+        })?;
 
         let mut result: BTreeMap<String, Value> = BTreeMap::new();
 

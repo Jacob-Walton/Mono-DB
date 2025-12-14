@@ -481,22 +481,22 @@ impl StorageEngine {
 
         // Check if any version is visible
         for (key, value) in pairs {
-            if let Some((found_pk, version_ts)) = decode_versioned_key(&key) {
-                if found_pk == pk {
-                    // Check if this is a tombstone (deleted)
-                    if value.is_empty() {
-                        continue;
-                    }
+            if let Some((found_pk, version_ts)) = decode_versioned_key(&key)
+                && found_pk == pk
+            {
+                // Check if this is a tombstone (deleted)
+                if value.is_empty() {
+                    continue;
+                }
 
-                    let visible = if let Some(tx) = tx {
-                        self.is_version_visible(version_ts, tx)
-                    } else {
-                        self.is_version_visible_no_tx(version_ts)
-                    };
+                let visible = if let Some(tx) = tx {
+                    self.is_version_visible(version_ts, tx)
+                } else {
+                    self.is_version_visible_no_tx(version_ts)
+                };
 
-                    if visible {
-                        return Ok(true);
-                    }
+                if visible {
+                    return Ok(true);
                 }
             }
         }
@@ -2104,9 +2104,8 @@ impl StorageEngine {
             None
         };
 
-        let mut values: Vec<MonoValue> = Vec::with_capacity(
-            early_exit_limit.unwrap_or(pairs.len().min(1024)),
-        );
+        let mut values: Vec<MonoValue> =
+            Vec::with_capacity(early_exit_limit.unwrap_or(pairs.len().min(1024)));
 
         if is_relational {
             // MVCC visibility filtering for relational tables
@@ -2355,7 +2354,9 @@ impl StorageEngine {
         let mut schema = self
             .schemas
             .get(collection_name)
-            .ok_or_else(|| MonoError::NotFound(format!("collection '{collection_name}' not found")))?
+            .ok_or_else(|| {
+                MonoError::NotFound(format!("collection '{collection_name}' not found"))
+            })?
             .value()
             .clone();
 
@@ -2413,7 +2414,12 @@ impl StorageEngine {
 
         tokio::spawn(async move {
             if let Err(e) = engine.backfill_index(&collection, &index, &cols).await {
-                tracing::error!("Failed to backfill index '{}' on '{}': {}", index, collection, e);
+                tracing::error!(
+                    "Failed to backfill index '{}' on '{}': {}",
+                    index,
+                    collection,
+                    e
+                );
             } else {
                 tracing::info!("Index '{}' on '{}' backfill complete", index, collection);
             }
@@ -2499,7 +2505,9 @@ impl StorageEngine {
         };
 
         // Use sortable encoding (same as insert_row)
-        Ok(crate::storage::key_encoding::encode_composite_sortable(&[pk_value]))
+        Ok(crate::storage::key_encoding::encode_composite_sortable(&[
+            pk_value,
+        ]))
     }
 
     /// Find a usable index for a query (simple query planner)
@@ -2520,55 +2528,59 @@ impl StorageEngine {
         // Get schema to find available indexes and primary key
         let schema = self.schemas.get(collection_name)?;
         let (indexes, primary_key) = match schema.value() {
-            Schema::Table { indexes, primary_key, .. } => (indexes, Some(primary_key)),
+            Schema::Table {
+                indexes,
+                primary_key,
+                ..
+            } => (indexes, Some(primary_key)),
             Schema::Collection { indexes, .. } => (indexes, None),
             Schema::KeySpace { .. } => return None,
         };
 
         // Priority 1: Check for equality filter match
-        if !indexes.is_empty() {
-            if let Some(filter) = filter {
-                if let Some(plan) = self.find_index_for_filter(indexes, filter) {
-                    return Some(plan);
-                }
-            }
+        if !indexes.is_empty()
+            && let Some(filter) = filter
+            && let Some(plan) = Self::find_index_for_filter(indexes, filter)
+        {
+            return Some(plan);
         }
 
         // Priority 2: Check for ORDER BY on primary key (fastest - data already sorted!)
-        if let Some(order_fields) = order_by {
-            if let Some(first_order) = order_fields.first() {
-                // Check if ordering by primary key
-                if let Some(pk_cols) = primary_key {
-                    if pk_cols.len() == 1 && pk_cols.first() == Some(&first_order.field) {
-                        let scan_type = match first_order.direction {
-                            AstSortDirection::Asc => IndexScanType::PrimaryKeyScanAsc,
-                            AstSortDirection::Desc => IndexScanType::PrimaryKeyScanDesc,
-                        };
-                        return Some(IndexPlan {
-                            index_name: "__primary__".to_string(),
-                            columns: pk_cols.clone(),
-                            scan_type,
-                            lookup_value: None,
-                        });
-                    }
-                }
+        if let Some(order_fields) = order_by
+            && let Some(first_order) = order_fields.first()
+        {
+            // Check if ordering by primary key
+            if let Some(pk_cols) = primary_key
+                && pk_cols.len() == 1
+                && pk_cols.first() == Some(&first_order.field)
+            {
+                let scan_type = match first_order.direction {
+                    AstSortDirection::Asc => IndexScanType::PrimaryKeyScanAsc,
+                    AstSortDirection::Desc => IndexScanType::PrimaryKeyScanDesc,
+                };
+                return Some(IndexPlan {
+                    index_name: "__primary__".to_string(),
+                    columns: pk_cols.clone(),
+                    scan_type,
+                    lookup_value: None,
+                });
+            }
 
-                // Priority 3: Check secondary indexes for ORDER BY
-                for index in indexes {
-                    if let Some(first_col) = index.columns.first() {
-                        if first_col == &first_order.field {
-                            let scan_type = match first_order.direction {
-                                AstSortDirection::Asc => IndexScanType::OrderedScanAsc,
-                                AstSortDirection::Desc => IndexScanType::OrderedScanDesc,
-                            };
-                            return Some(IndexPlan {
-                                index_name: index.name.clone(),
-                                columns: index.columns.clone(),
-                                scan_type,
-                                lookup_value: None,
-                            });
-                        }
-                    }
+            // Priority 3: Check secondary indexes for ORDER BY
+            for index in indexes {
+                if let Some(first_col) = index.columns.first()
+                    && first_col == &first_order.field
+                {
+                    let scan_type = match first_order.direction {
+                        AstSortDirection::Asc => IndexScanType::OrderedScanAsc,
+                        AstSortDirection::Desc => IndexScanType::OrderedScanDesc,
+                    };
+                    return Some(IndexPlan {
+                        index_name: index.name.clone(),
+                        columns: index.columns.clone(),
+                        scan_type,
+                        lookup_value: None,
+                    });
                 }
             }
         }
@@ -2578,7 +2590,6 @@ impl StorageEngine {
 
     /// Find an index that can satisfy a filter condition
     fn find_index_for_filter(
-        &self,
         indexes: &[monodb_common::schema::Index],
         filter: &crate::storage::models::Filter,
     ) -> Option<crate::storage::models::IndexPlan> {
@@ -2588,15 +2599,15 @@ impl StorageEngine {
             // Direct equality on a single column
             Filter::Eq(column, value) => {
                 for index in indexes {
-                    if let Some(first_col) = index.columns.first() {
-                        if first_col == column {
-                            return Some(IndexPlan {
-                                index_name: index.name.clone(),
-                                columns: index.columns.clone(),
-                                scan_type: IndexScanType::ExactMatch,
-                                lookup_value: Some(value.clone()),
-                            });
-                        }
+                    if let Some(first_col) = index.columns.first()
+                        && first_col == column
+                    {
+                        return Some(IndexPlan {
+                            index_name: index.name.clone(),
+                            columns: index.columns.clone(),
+                            scan_type: IndexScanType::ExactMatch,
+                            lookup_value: Some(value.clone()),
+                        });
                     }
                 }
                 None
@@ -2604,7 +2615,7 @@ impl StorageEngine {
             // For AND filters, try to find an index for any equality condition
             Filter::And(conditions) => {
                 for condition in conditions {
-                    if let Some(plan) = self.find_index_for_filter(indexes, condition) {
+                    if let Some(plan) = Self::find_index_for_filter(indexes, condition) {
                         return Some(plan);
                     }
                 }
@@ -2634,7 +2645,7 @@ impl StorageEngine {
             .ok_or_else(|| MonoError::NotFound(format!("index '{index_name}' not found")))?;
 
         // Encode the lookup value as index key
-        let index_key = Self::encode_composite_key(&[lookup_value.clone()]);
+        let index_key = Self::encode_composite_key(std::slice::from_ref(lookup_value));
 
         // Get primary keys from index
         let primary_keys = match index.get(&index_key) {
@@ -2775,7 +2786,8 @@ impl StorageEngine {
                     lsm.scan_with_limit(&[], &[0xFF], scan_limit).await?
                 } else {
                     // Reverse scan: largest keys first (proper DESC support)
-                    lsm.scan_reverse_with_limit(&[], &[0xFF], scan_limit).await?
+                    lsm.scan_reverse_with_limit(&[], &[0xFF], scan_limit)
+                        .await?
                 }
             } else {
                 return Err(MonoError::NotFound(format!(
@@ -2815,10 +2827,10 @@ impl StorageEngine {
                             seen_pks.insert(pk);
 
                             // Early termination: stop once we have enough
-                            if let Some(lim) = limit {
-                                if results.len() >= lim {
-                                    break;
-                                }
+                            if let Some(lim) = limit
+                                && results.len() >= lim
+                            {
+                                break;
                             }
                         }
                         Err(e) => {
@@ -2838,7 +2850,9 @@ impl StorageEngine {
         let mut schema = self
             .schemas
             .get(collection_name)
-            .ok_or_else(|| MonoError::NotFound(format!("collection '{collection_name}' not found")))?
+            .ok_or_else(|| {
+                MonoError::NotFound(format!("collection '{collection_name}' not found"))
+            })?
             .value()
             .clone();
 

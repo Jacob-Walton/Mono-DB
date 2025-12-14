@@ -68,7 +68,10 @@ impl MonoError {
             MonoError::Parse(msg) => msg,
             MonoError::Execution(msg) => msg,
             MonoError::Network(msg) => msg,
-            MonoError::TypeError { expected, actual: _ } => expected, // Partial, but acceptable
+            MonoError::TypeError {
+                expected,
+                actual: _,
+            } => expected, // Partial, but acceptable
             MonoError::NotFound(msg) => msg,
             MonoError::AlreadyExists(msg) => msg,
             MonoError::InvalidOperation(msg) => msg,
