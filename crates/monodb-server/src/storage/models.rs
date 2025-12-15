@@ -59,8 +59,10 @@ pub struct IndexPlan {
 /// Type of index scan operation
 #[derive(Debug, Clone)]
 pub enum IndexScanType {
-    /// Exact match lookup (WHERE col = value)
+    /// Exact match lookup on secondary index (WHERE col = value)
     ExactMatch,
+    /// Point lookup by primary key (WHERE pk = value)
+    PrimaryKeyLookup,
     /// Forward scan for ORDER BY ASC
     OrderedScanAsc,
     /// Backward scan for ORDER BY DESC

@@ -17,6 +17,7 @@ pub struct FieldDef {
     pub field_type: ValueType,
     pub is_primary: bool,
     pub is_unique: bool,
+    pub is_required: bool,
     pub default: Option<Value>,
 }
 

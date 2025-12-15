@@ -67,4 +67,38 @@ impl BloomFilter {
             (h1.wrapping_add(i.wrapping_mul(h2))) % self.num_bits
         })
     }
+
+    /// Serialize the bloom filter to bytes for persistence.
+    /// Format: [num_bits: u64][num_hashes: u64][bits_len: u64][bits...]
+    #[allow(dead_code)]
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(24 + self.bits.len());
+        out.extend_from_slice(&(self.num_bits as u64).to_le_bytes());
+        out.extend_from_slice(&(self.num_hashes as u64).to_le_bytes());
+        out.extend_from_slice(&(self.bits.len() as u64).to_le_bytes());
+        out.extend_from_slice(&self.bits);
+        out
+    }
+
+    /// Deserialize a bloom filter from bytes.
+    #[allow(dead_code)]
+    pub fn deserialize(data: &[u8]) -> Option<Self> {
+        if data.len() < 24 {
+            return None;
+        }
+        let num_bits = u64::from_le_bytes(data[0..8].try_into().ok()?) as usize;
+        let num_hashes = u64::from_le_bytes(data[8..16].try_into().ok()?) as usize;
+        let bits_len = u64::from_le_bytes(data[16..24].try_into().ok()?) as usize;
+
+        if data.len() < 24 + bits_len {
+            return None;
+        }
+        let bits = data[24..24 + bits_len].to_vec();
+
+        Some(Self {
+            bits,
+            num_bits,
+            num_hashes,
+        })
+    }
 }

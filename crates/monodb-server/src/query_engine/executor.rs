@@ -237,8 +237,27 @@ impl QueryExecutor {
                     use crate::storage::IndexScanType;
 
                     match &plan.scan_type {
+                        IndexScanType::PrimaryKeyLookup => {
+                            // Primary key point lookup
+                            if let Some(ref lookup_val) = plan.lookup_value {
+                                let results = self
+                                    .storage
+                                    .find_by_primary_key(
+                                        &source,
+                                        lookup_val,
+                                        self.current_tx.as_ref(),
+                                    )
+                                    .await
+                                    .map_err(|e| {
+                                        ExecutorError::InvalidOperation(e.message().to_string())
+                                    })?;
+                                (results, false)
+                            } else {
+                                (vec![], false)
+                            }
+                        }
                         IndexScanType::ExactMatch => {
-                            // Use index for equality lookup
+                            // Secondary index equality lookup
                             if let Some(ref lookup_val) = plan.lookup_value {
                                 let results = self
                                     .storage
@@ -729,10 +748,12 @@ impl QueryExecutor {
                 .map(|f| TableColumn {
                     name: f.name.clone(),
                     data_type: f.field_type.clone(),
-                    nullable: f.default.is_none(),
+                    // Primary key and required columns are non-nullable
+                    nullable: !f.is_primary && !f.is_required,
                     default: f.default.clone(),
                     is_primary: f.is_primary,
-                    is_unique: f.is_unique,
+                    // Primary key columns are always unique
+                    is_unique: f.is_primary || f.is_unique,
                 })
                 .collect()
         } else {

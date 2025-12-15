@@ -984,6 +984,7 @@ impl<'a> Parser<'a> {
             // Parse constraints
             let mut is_primary = false;
             let mut is_unique = false;
+            let mut is_required = false;
             let mut default = None;
 
             while self.check(TokenKind::Keyword) {
@@ -994,6 +995,9 @@ impl<'a> Parser<'a> {
                 } else if self.check_keyword("unique") {
                     self.advance();
                     is_unique = true;
+                } else if self.check_keyword("required") {
+                    self.advance();
+                    is_required = true;
                 } else if self.check_keyword("default") {
                     self.advance();
                     let expr = self.parse_expr()?;
@@ -1008,6 +1012,7 @@ impl<'a> Parser<'a> {
                 field_type,
                 is_primary,
                 is_unique,
+                is_required,
                 default,
             });
 

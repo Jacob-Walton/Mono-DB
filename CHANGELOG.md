@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.4] - 2025-12-15
+
+### Added
+
+- SSTable block cache with configurable `block_cache_capacity` and footer-backed sparse index loading
+- Primary key fast path in planner/executor plus `required` column constraint support
+- Point-read benchmark and basic SELECT smoke test in the testing harness
+
+### Changed
+
+- LSM range scans use sparse index blocks and memtable prefix scans to limit primary-key lookups
+- Storage engine avoids redundant unique checks, inlines filtering for early exit, and uses PK point lookup helper
+- SSTable readers now enforce size sanity checks and validate data sections on load
+
 ## [0.2.3] - 2025-12-14
 
 ### Added

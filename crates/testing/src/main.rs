@@ -14,7 +14,107 @@ struct BenchConfig {
 }
 
 async fn get_count(conn: &mut Connection, table: &str) -> Result<u64> {
-    Ok(1) // Placeholder implementation
+    Ok(0) // TODO: replace with a COUNT query when available
+}
+
+/// Run a point-read benchmark against the configured target.
+async fn run_read_benchmark(client: Client, count: usize, concurrency: usize) -> Result<()> {
+    println!("\n--- Read benchmark (users PK) ---");
+
+    let start_time = std::time::Instant::now();
+    let pool = Arc::new(client.pool().await.clone());
+    let latencies = Arc::new(AsyncMutex::new(Vec::with_capacity(count)));
+
+    let mut stream = FuturesUnordered::new();
+    let mut in_flight = 0usize;
+    let mut it = (0..count).into_iter();
+
+    // Prime initial concurrency
+    while in_flight < concurrency {
+        if let Some(i) = it.next() {
+            let pool = Arc::clone(&pool);
+            let lat_clone = Arc::clone(&latencies);
+            stream.push(tokio::spawn(async move {
+                let mut conn = pool
+                    .get()
+                    .await
+                    .expect("Failed to get connection from pool");
+                let sql = format!("get from users where id = {}", i);
+                let start = std::time::Instant::now();
+                let resp = conn.execute(sql).await;
+                let elapsed = start.elapsed().as_nanos();
+                pool.return_connection(conn);
+                (resp, elapsed)
+            }));
+            in_flight += 1;
+        } else {
+            break;
+        }
+    }
+
+    while let Some(res) = stream.next().await {
+        in_flight -= 1;
+        let (resp, elapsed) = res?;
+        match resp {
+            Ok(Response::Success { .. }) => {
+                latencies.lock().await.push(elapsed);
+            }
+            Ok(other) => bail!("Unexpected response type on read: {other:?}"),
+            Err(e) => bail!("Read failed: {e}"),
+        }
+
+        if let Some(i) = it.next() {
+            let pool = Arc::clone(&pool);
+            let lat_clone = Arc::clone(&latencies);
+            stream.push(tokio::spawn(async move {
+                let mut conn = pool
+                    .get()
+                    .await
+                    .expect("Failed to get connection from pool");
+                let sql = format!("get from users where id = {}", i);
+                let start = std::time::Instant::now();
+                let resp = conn.execute(sql).await;
+                let elapsed = start.elapsed().as_nanos();
+                pool.return_connection(conn);
+                (resp, elapsed)
+            }));
+            in_flight += 1;
+        }
+    }
+
+    let duration = start_time.elapsed();
+    let ops_per_sec = count as f64 / duration.as_secs_f64();
+    println!(
+        "Read throughput: {:.2} Mops/s ({} ops in {:?})",
+        ops_per_sec / 1_000_000.0,
+        count,
+        duration
+    );
+
+    let mut lat_vec = latencies.lock().await;
+    if !lat_vec.is_empty() {
+        lat_vec.sort_unstable();
+        let n = lat_vec.len();
+        let sum: u128 = lat_vec.iter().copied().sum();
+        let mean_ns = sum as f64 / n as f64;
+        let idx = |p: f64| -> usize {
+            let mut i = (n as f64 * p).floor() as usize;
+            if i >= n {
+                i = n - 1;
+            }
+            i
+        };
+        let p50 = lat_vec[idx(0.50)];
+        let p90 = lat_vec[idx(0.90)];
+        let p99 = lat_vec[idx(0.99)];
+        let max = *lat_vec.last().unwrap();
+        println!(
+            "Read latency (ns): count={} mean={:.0} p50={} p90={} p99={} max={}",
+            n, mean_ns, p50, p90, p99, max
+        );
+    }
+
+    Ok(())
 }
 
 /// Run a write benchmark against the configured target.
@@ -168,6 +268,21 @@ make table sessions
         _ => bail!("Received unexpected response type"),
     };
 
+    // Basic read test to ensure SELECT works on empty table.
+    let read_sql = "get from users where id = 1";
+    let read_resp = conn
+        .execute(read_sql.to_string())
+        .await
+        .context("Failed to run read test")?;
+    match read_resp {
+        Response::Success { result } => {
+            if result.is_empty() {
+                println!("Read test returned empty as expected");
+            }
+        }
+        other => bail!("Read test failed with response: {other:?}"),
+    }
+
     match result {
         ExecutionResult::Ok { data, .. } => {
             for value in data {
@@ -198,6 +313,24 @@ make table sessions
         }
         _ => bail!("Received unexpected ExecutionResult"),
     }
+
+    // Simple read throughput test on 'users' table (point lookups)
+    let read_count = 100_000usize;
+    let read_start = std::time::Instant::now();
+    for i in 0..read_count {
+        let _ = conn
+            .execute(format!("get from users where id = {}", i))
+            .await
+            .context("Read failed")?;
+    }
+    let read_duration = read_start.elapsed();
+    let read_ops_per_sec = read_count as f64 / read_duration.as_secs_f64();
+    println!(
+        "Read throughput: {:.2} Mops/s ({} ops in {:?})",
+        read_ops_per_sec / 1_000_000.0,
+        read_count,
+        read_duration
+    );
 
     // Test inserting a large number of records using multiple connections
     const COUNT: usize = 1_000_000;
@@ -274,6 +407,9 @@ make table sessions
     run_benchmark(keyspace, client.clone(), COUNT, CONCURRENCY, BATCH_SIZE).await?;
 
     pool.return_connection(conn);
+
+    // Run read benchmark on populated table
+    run_read_benchmark(client.clone(), 200_000, CONCURRENCY).await?;
 
     Ok(())
 }

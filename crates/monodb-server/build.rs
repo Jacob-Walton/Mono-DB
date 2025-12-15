@@ -33,6 +33,7 @@ fn main() {
     map.entry(b"primary", "TokenKind::Keyword");
     map.entry(b"key", "TokenKind::Keyword");
     map.entry(b"unique", "TokenKind::Keyword");
+    map.entry(b"required", "TokenKind::Keyword");
     map.entry(b"default", "TokenKind::Keyword");
     map.entry(b"ttl", "TokenKind::Keyword");
 

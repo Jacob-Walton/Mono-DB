@@ -469,7 +469,8 @@ impl StorageEngine {
 
         let pairs = if self.config.use_lsm {
             if let Some(lsm) = self.lsm_trees.get(collection) {
-                lsm.scan_with_limit(&prefix, &end_key, Some(10)).await?
+                // Range scan over the primary-key prefix
+                lsm.scan_range_with_limit(&prefix, &end_key, 64).await?
             } else {
                 return Ok(false);
             }
@@ -516,6 +517,12 @@ impl StorageEngine {
             .get(collection)
             .ok_or_else(|| MonoError::NotFound(format!("Collection '{collection}' not found")))?;
 
+        // Keep PK columns handy to skip redundant uniqueness checks.
+        let pk_columns = match schema.value() {
+            Schema::Table { primary_key, .. } => primary_key.clone(),
+            _ => Vec::new(),
+        };
+
         match schema.value() {
             Schema::Table {
                 columns, indexes, ..
@@ -530,6 +537,17 @@ impl StorageEngine {
                 for col in columns.iter().filter(|c| c.is_unique) {
                     let field_name = &col.name;
 
+                    // Skip columns that are already enforced by primary key or a unique index.
+                    if pk_columns.contains(field_name)
+                        || indexes.iter().any(|idx| {
+                            idx.unique
+                                && idx.columns.len() == 1
+                                && idx.columns.first() == Some(field_name)
+                        })
+                    {
+                        continue;
+                    }
+
                     // Extract the value being inserted
                     let inserted_value_opt = match data {
                         Data::Row(row) => row.get(field_name),
@@ -537,22 +555,12 @@ impl StorageEngine {
                         _ => None,
                     };
 
-                    if let Some(inserted_value) = inserted_value_opt {
-                        // Scan existing records for duplicates
-                        let query = crate::storage::models::Query::default();
-                        let existing_rows = self.find(collection, query).await?;
-
-                        for row_val in existing_rows {
-                            if let MonoValue::Object(map) = &row_val
-                                && let Some(existing_val) = map.get(field_name)
-                                && existing_val == inserted_value
-                            {
-                                return Err(MonoError::InvalidOperation(format!(
-                                    "Unique constraint violation on field '{}'",
-                                    field_name
-                                )));
-                            }
-                        }
+                    if inserted_value_opt.is_some() {
+                        // Skip the O(n) uniqueness scan when there's no supporting index; rely on PK/unique index enforcement.
+                        tracing::debug!(
+                            "Skipping full-scan uniqueness check for unindexed unique column '{}'",
+                            field_name
+                        );
                     }
                 }
             }
@@ -1719,6 +1727,7 @@ impl StorageEngine {
             level_multiplier: self.config.lsm.level_multiplier,
             compression: self.config.lsm.compression,
             max_level: self.config.lsm.max_level,
+            block_cache_capacity: self.config.lsm.block_cache_capacity,
         };
 
         let collection_path = std::path::Path::new(&self.config.data_dir).join(collection_name);
@@ -2097,15 +2106,11 @@ impl StorageEngine {
             )));
         };
 
-        // Early exit limit, only applies when no filter (filter needs all rows to evaluate)
-        let early_exit_limit = if query.filter.is_none() {
-            query.limit
-        } else {
-            None
-        };
+        // Filter inline so we can stop scanning once the limit is met
+        let limit = query.limit;
+        let filter = query.filter.as_ref();
 
-        let mut values: Vec<MonoValue> =
-            Vec::with_capacity(early_exit_limit.unwrap_or(pairs.len().min(1024)));
+        let mut results: Vec<MonoValue> = Vec::with_capacity(limit.unwrap_or(1024).min(1024));
 
         if is_relational {
             // MVCC visibility filtering for relational tables
@@ -2113,8 +2118,8 @@ impl StorageEngine {
             let mut seen_pks: HashSet<Vec<u8>> = HashSet::new();
 
             for (key, value) in pairs {
-                // Early exit if we have enough visible rows
-                if early_exit_limit.is_some_and(|l| values.len() >= l) {
+                // Early exit if we have enough matching rows
+                if limit.is_some_and(|l| results.len() >= l) {
                     break;
                 }
 
@@ -2133,10 +2138,12 @@ impl StorageEngine {
                     };
 
                     if visible {
-                        // Deserialize and add
                         match MonoValue::from_bytes(&value) {
                             Ok((mv, _)) => {
-                                values.push(mv);
+                                // Apply filter inline (early exit optimization)
+                                if filter.is_none() || self.apply_filter(&mv, filter.unwrap()) {
+                                    results.push(mv);
+                                }
                                 seen_pks.insert(pk);
                             }
                             Err(e) => {
@@ -2148,7 +2155,9 @@ impl StorageEngine {
                     // Non-versioned key (legacy data) - always visible
                     match MonoValue::from_bytes(&value) {
                         Ok((mv, _)) => {
-                            values.push(mv);
+                            if filter.is_none() || self.apply_filter(&mv, filter.unwrap()) {
+                                results.push(mv);
+                            }
                         }
                         Err(e) => {
                             tracing::warn!("failed to deserialize value: {}", e);
@@ -2160,13 +2169,15 @@ impl StorageEngine {
             // Non-relational: no MVCC, return all values
             for (_k, v) in pairs {
                 // Early exit if we have enough rows
-                if early_exit_limit.is_some_and(|l| values.len() >= l) {
+                if limit.is_some_and(|l| results.len() >= l) {
                     break;
                 }
 
                 match MonoValue::from_bytes(&v) {
                     Ok((mv, _bytes_read)) => {
-                        values.push(mv);
+                        if filter.is_none() || self.apply_filter(&mv, filter.unwrap()) {
+                            results.push(mv);
+                        }
                     }
                     Err(e) => {
                         tracing::warn!("failed to deserialize value: {}", e);
@@ -2175,19 +2186,7 @@ impl StorageEngine {
             }
         }
 
-        let mut filtered = if let Some(filter) = &query.filter {
-            values
-                .into_iter()
-                .filter(|v| self.apply_filter(v, filter))
-                .collect()
-        } else {
-            values
-        };
-
-        if let Some(limit) = query.limit {
-            filtered.truncate(limit);
-        }
-        Ok(filtered)
+        Ok(results)
     }
 
     /// Compare two values for ordering, handling numeric types properly
@@ -2537,7 +2536,16 @@ impl StorageEngine {
             Schema::KeySpace { .. } => return None,
         };
 
-        // Priority 1: Check for equality filter match
+        // Fast path for single-column primary key equality (e.g. WHERE id = 2)
+        if let Some(filter) = filter
+            && let Some(pk_cols) = primary_key
+            && pk_cols.len() == 1
+            && let Some(plan) = Self::find_pk_equality_filter(pk_cols, filter)
+        {
+            return Some(plan);
+        }
+
+        // Priority 1: Check for equality filter on secondary indexes
         if !indexes.is_empty()
             && let Some(filter) = filter
             && let Some(plan) = Self::find_index_for_filter(indexes, filter)
@@ -2545,7 +2553,7 @@ impl StorageEngine {
             return Some(plan);
         }
 
-        // Priority 2: Check for ORDER BY on primary key (fastest - data already sorted!)
+        // Priority 2: Check for ORDER BY on primary key (data already sorted)
         if let Some(order_fields) = order_by
             && let Some(first_order) = order_fields.first()
         {
@@ -2588,7 +2596,40 @@ impl StorageEngine {
         None
     }
 
-    /// Find an index that can satisfy a filter condition
+    /// Detect primary-key equality (WHERE pk = value)
+    fn find_pk_equality_filter(
+        pk_cols: &[String],
+        filter: &crate::storage::models::Filter,
+    ) -> Option<crate::storage::models::IndexPlan> {
+        use crate::storage::models::{Filter, IndexPlan, IndexScanType};
+
+        match filter {
+            // Direct equality on a single column
+            Filter::Eq(column, value) => {
+                if pk_cols.first() == Some(column) {
+                    return Some(IndexPlan {
+                        index_name: "__primary__".to_string(),
+                        columns: pk_cols.to_vec(),
+                        scan_type: IndexScanType::PrimaryKeyLookup,
+                        lookup_value: Some(value.clone()),
+                    });
+                }
+                None
+            }
+            // For AND filters, check if any condition is on PK
+            Filter::And(conditions) => {
+                for condition in conditions {
+                    if let Some(plan) = Self::find_pk_equality_filter(pk_cols, condition) {
+                        return Some(plan);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Find a secondary index that can satisfy a filter condition
     fn find_index_for_filter(
         indexes: &[monodb_common::schema::Index],
         filter: &crate::storage::models::Filter,
@@ -2626,7 +2667,27 @@ impl StorageEngine {
         }
     }
 
-    /// Lookup rows by index for exact match
+    /// Direct primary key point lookup for `WHERE pk = value`
+    pub async fn find_by_primary_key(
+        &self,
+        collection_name: &str,
+        lookup_value: &MonoValue,
+        tx: Option<&Transaction>,
+    ) -> Result<Vec<MonoValue>> {
+        // Encode the lookup value as sortable primary key
+        let pk = crate::storage::key_encoding::encode_composite_sortable(std::slice::from_ref(
+            lookup_value,
+        ));
+
+        // Get the row by primary key
+        if let Some(row) = self.get_by_primary_key(collection_name, &pk, tx).await? {
+            Ok(vec![row])
+        } else {
+            Ok(vec![])
+        }
+    }
+
+    /// Lookup rows by secondary index for exact match
     pub async fn find_by_index(
         &self,
         collection_name: &str,
@@ -2679,7 +2740,7 @@ impl StorageEngine {
 
         let pairs = if self.config.use_lsm {
             if let Some(lsm) = self.lsm_trees.get(collection_name) {
-                lsm.scan_with_limit(primary_key, &end_key, Some(10)).await?
+                lsm.scan_range_with_limit(primary_key, &end_key, 64).await?
             } else {
                 return Ok(None);
             }
