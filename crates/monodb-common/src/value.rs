@@ -699,7 +699,7 @@ impl Value {
         Ok((value, offset))
     }
 
-    fn write_to(&self, out: &mut Vec<u8>) {
+    pub fn write_to(&self, out: &mut Vec<u8>) {
         match self {
             Value::Null => out.push(0),
 

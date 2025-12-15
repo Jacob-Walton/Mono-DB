@@ -82,6 +82,9 @@ async fn execute_get_query(
         source: source.to_string(),
         filter,
         fields,
+        order_by: None,
+        take: None,
+        skip: None,
         extensions: vec![],
     };
 
@@ -649,6 +652,9 @@ async fn test_aggregation_count_sum_avg() {
             "sum(amount)".to_string(),
             "avg(score)".to_string(),
         ]),
+        order_by: None,
+        take: None,
+        skip: None,
         extensions: vec![],
     };
 

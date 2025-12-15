@@ -8,15 +8,18 @@
 
 pub mod bloom_filter;
 pub mod compaction;
+pub mod merge_iterator;
 pub mod sstable;
 
 use crate::config::{LsmConfig, WalConfig};
 use crate::storage::wal::Wal;
 pub use compaction::{CompactionType, run_compaction_task};
 use crossbeam_skiplist::SkipMap;
+use lru::LruCache;
 use monodb_common::Result;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use sstable::SsTable;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -25,6 +28,8 @@ use tracing::{debug, error, info};
 
 type Memtable = Arc<SkipMap<Vec<u8>, Vec<u8>>>;
 type ImmutableMemtables = Arc<RwLock<Vec<Memtable>>>;
+type BlockEntries = Vec<(Vec<u8>, Vec<u8>)>;
+type BlockEntriesArc = Arc<BlockEntries>;
 
 pub struct LsmTree {
     memtable: Arc<RwLock<Memtable>>,
@@ -42,9 +47,45 @@ pub struct LsmTree {
     data_dir: PathBuf,
     /// Track if memtable contains only replayed WAL data (no new writes)
     memtable_is_replay_only: Arc<AtomicBool>,
+    block_cache: Option<Arc<BlockCache>>,
     /// Collection name for this LSM tree (used in system WAL)
     #[allow(dead_code)]
     collection_name: String,
+}
+
+#[derive(Hash, Eq, PartialEq, Clone)]
+struct BlockKey {
+    path: PathBuf,
+    offset: u64,
+}
+
+struct BlockCache {
+    inner: Mutex<LruCache<BlockKey, BlockEntriesArc>>,
+}
+
+impl BlockCache {
+    fn new(capacity: usize) -> Self {
+        let cap = NonZeroUsize::new(capacity.max(1)).unwrap();
+        Self {
+            inner: Mutex::new(LruCache::new(cap)),
+        }
+    }
+
+    // TODO: reuse the buffer_pool LRU-K once it's generic; current cache is plain LRU.
+    fn get_or_load(&self, table: &SsTable, offset: u64, end: u64) -> Result<BlockEntriesArc> {
+        let key = BlockKey {
+            path: table.path.clone(),
+            offset,
+        };
+
+        if let Some(v) = self.inner.lock().get(&key).cloned() {
+            return Ok(v);
+        }
+
+        let block = Arc::new(table.read_block(offset, end)?);
+        self.inner.lock().put(key, block.clone());
+        Ok(block)
+    }
 }
 
 impl LsmTree {
@@ -96,6 +137,11 @@ impl LsmTree {
         let (compaction_sender, mut compaction_receiver) = mpsc::channel(1);
         let sstables = Arc::new(RwLock::new(Vec::new()));
         let compaction_in_progress = Arc::new(AtomicBool::new(false));
+        let block_cache = if config.block_cache_capacity > 0 {
+            Some(Arc::new(BlockCache::new(config.block_cache_capacity)))
+        } else {
+            None
+        };
 
         let lsm = Self {
             memtable: Arc::new(RwLock::new(Arc::new(SkipMap::new()))),
@@ -109,6 +155,7 @@ impl LsmTree {
             compaction_in_progress,
             data_dir: data_dir.clone(),
             memtable_is_replay_only: Arc::new(AtomicBool::new(true)),
+            block_cache,
             collection_name,
         };
 
@@ -250,42 +297,170 @@ impl LsmTree {
         Ok(())
     }
 
-    pub async fn scan(
-        &self,
-        _start_key: &[u8],
-        _end_key: &[u8],
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let mut results = Vec::new();
+    pub async fn scan(&self, start_key: &[u8], end_key: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.scan_with_limit(start_key, end_key, None).await
+    }
 
-        // Scan memtable
-        for entry in self.memtable.read().iter() {
-            if entry.key().as_slice() >= _start_key && entry.key().as_slice() <= _end_key {
-                results.push((entry.key().clone(), entry.value().clone()));
+    /// Range scan tuned for small key spans (e.g., a single primary key).
+    /// Uses memtable prefix scans and sparse SSTable index blocks to avoid full-file walks.
+    pub async fn scan_range_with_limit(
+        &self,
+        start_key: &[u8],
+        end_key: &[u8],
+        limit: usize,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        use merge_iterator::MergeIterator;
+
+        let mut sources: Vec<Vec<(Vec<u8>, Vec<u8>)>> = Vec::new();
+        let mut remaining = limit;
+
+        // Memtable (most recent)
+        let mem_entries = Self::collect_range(&self.memtable.read(), start_key, end_key, remaining);
+        remaining = remaining.saturating_sub(mem_entries.len());
+        sources.push(mem_entries);
+
+        // Immutable memtables (newest last in vec, so iterate in reverse)
+        for immutable_memtable in self.immutable_memtables.read().iter().rev() {
+            if remaining == 0 {
+                break;
+            }
+            let entries = Self::collect_range(immutable_memtable, start_key, end_key, remaining);
+            remaining = remaining.saturating_sub(entries.len());
+            sources.push(entries);
+        }
+
+        // SSTables (iterate newest to oldest)
+        for sstable in self.sstables.read().iter().rev() {
+            if remaining == 0 {
+                break;
+            }
+            if sstable.max_key.as_slice() < start_key || sstable.min_key.as_slice() > end_key {
+                continue;
+            }
+            let entries = self.scan_range_sstable_cached(sstable, start_key, end_key, remaining)?;
+            let count = entries.len();
+            if count > 0 {
+                sources.push(entries);
+                remaining = remaining.saturating_sub(count);
             }
         }
 
-        // Scan immutable memtables
-        for immutable_memtable in self.immutable_memtables.read().iter() {
-            for entry in immutable_memtable.iter() {
-                if entry.key().as_slice() >= _start_key && entry.key().as_slice() <= _end_key {
-                    results.push((entry.key().clone(), entry.value().clone()));
+        let merger = MergeIterator::new(sources);
+        Ok(merger.collect_sorted_limit(limit))
+    }
+
+    fn scan_range_sstable_cached(
+        &self,
+        sstable: &SsTable,
+        start_key: &[u8],
+        end_key: &[u8],
+        limit: usize,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        if sstable.index.entries.is_empty() {
+            return sstable.scan_range(start_key, end_key, Some(limit));
+        }
+
+        let mut results = Vec::new();
+        let mut block_idx = sstable
+            .index
+            .entries
+            .partition_point(|e| e.key.as_slice() < start_key);
+
+        if block_idx > 0 {
+            block_idx = block_idx.saturating_sub(1);
+        }
+
+        while block_idx < sstable.index.entries.len() && results.len() < limit {
+            let block_start = sstable.index.entries[block_idx].offset;
+            let block_end = if block_idx + 1 < sstable.index.entries.len() {
+                sstable.index.entries[block_idx + 1].offset
+            } else {
+                sstable.data_end_offset
+            };
+
+            let entries = if let Some(cache) = &self.block_cache {
+                cache.get_or_load(sstable, block_start, block_end)?
+            } else {
+                Arc::new(sstable.read_block(block_start, block_end)?)
+            };
+
+            for (k, v) in entries.iter() {
+                if k.as_slice() > end_key {
+                    return Ok(results);
+                }
+                if k.as_slice() >= start_key {
+                    results.push((k.clone(), v.clone()));
+                    if results.len() >= limit {
+                        return Ok(results);
+                    }
                 }
             }
+
+            block_idx += 1;
         }
 
-        // Scan SSTables
+        Ok(results)
+    }
+
+    fn collect_range(
+        map: &SkipMap<Vec<u8>, Vec<u8>>,
+        start_key: &[u8],
+        end_key: &[u8],
+        limit: usize,
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let start = start_key.to_vec();
+        let end = end_key.to_vec();
+        map.range(start..=end)
+            .take(limit)
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect()
+    }
+
+    /// Scan the LSM tree in sorted key order using merge iterator
+    /// This properly merges memtable, immutable memtables, and SSTables
+    pub async fn scan_with_limit(
+        &self,
+        start_key: &[u8],
+        end_key: &[u8],
+        limit: Option<usize>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        use merge_iterator::MergeIterator;
+
+        let mut sources: Vec<Vec<(Vec<u8>, Vec<u8>)>> = Vec::new();
+
+        // Source 0: memtable (most recent)
+        let mut memtable_entries = Vec::new();
+        for entry in self.memtable.read().iter() {
+            if entry.key().as_slice() >= start_key && entry.key().as_slice() <= end_key {
+                memtable_entries.push((entry.key().clone(), entry.value().clone()));
+            }
+        }
+        sources.push(memtable_entries);
+
+        // Source 1+: immutable memtables (ordered by recency)
+        for immutable_memtable in self.immutable_memtables.read().iter() {
+            let mut entries = Vec::new();
+            for entry in immutable_memtable.iter() {
+                if entry.key().as_slice() >= start_key && entry.key().as_slice() <= end_key {
+                    entries.push((entry.key().clone(), entry.value().clone()));
+                }
+            }
+            sources.push(entries);
+        }
+
+        // Source N+: SSTables (ordered by level/recency)
         let sstables = self.sstables.read().clone();
         for sstable in sstables.iter() {
             // Check if this SSTable might contain keys in our range
-            if sstable.max_key.as_slice() >= _start_key && sstable.min_key.as_slice() <= _end_key {
-                // Use the iterator to scan the SSTable
-                match sstable::SsTableIterator::new(&sstable.path) {
+            if sstable.max_key.as_slice() >= start_key && sstable.min_key.as_slice() <= end_key {
+                let mut entries = Vec::new();
+                match sstable::SsTableIterator::new(sstable) {
                     Ok(iterator) => {
                         for entry_result in iterator {
                             match entry_result {
                                 Ok((key, value)) => {
-                                    if key.as_slice() >= _start_key && key.as_slice() <= _end_key {
-                                        results.push((key, value));
+                                    if key.as_slice() >= start_key && key.as_slice() <= end_key {
+                                        entries.push((key, value));
                                     }
                                 }
                                 Err(e) => {
@@ -306,12 +481,99 @@ impl LsmTree {
                         );
                     }
                 }
+                sources.push(entries);
             }
         }
 
-        // Remove duplicates, keeping the most recent (last) occurrence
-        let mut seen_keys = std::collections::HashSet::new();
-        results.retain(|(key, _)| seen_keys.insert(key.clone()));
+        // Use merge iterator to get sorted, deduplicated results
+        let merger = MergeIterator::new(sources);
+        let results = if let Some(limit) = limit {
+            merger.collect_sorted_limit(limit)
+        } else {
+            merger.collect_sorted()
+        };
+
+        Ok(results)
+    }
+
+    /// Scan the LSM tree in REVERSE (descending) key order using reverse merge iterator.
+    /// This is the proper way to implement DESC queries, we merge all sources
+    /// using a max-heap so largest keys come out first, allowing early termination.
+    pub async fn scan_reverse_with_limit(
+        &self,
+        start_key: &[u8],
+        end_key: &[u8],
+        limit: Option<usize>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        use merge_iterator::ReverseMergeIterator;
+
+        let mut sources: Vec<Vec<(Vec<u8>, Vec<u8>)>> = Vec::new();
+
+        // Source 0: memtable (most recent) - iterate in ascending order,
+        // the ReverseMergeIterator will handle the descending output
+        let mut memtable_entries = Vec::new();
+        for entry in self.memtable.read().iter() {
+            if entry.key().as_slice() >= start_key && entry.key().as_slice() <= end_key {
+                memtable_entries.push((entry.key().clone(), entry.value().clone()));
+            }
+        }
+        sources.push(memtable_entries);
+
+        // Source 1+: immutable memtables (ordered by recency)
+        for immutable_memtable in self.immutable_memtables.read().iter() {
+            let mut entries = Vec::new();
+            for entry in immutable_memtable.iter() {
+                if entry.key().as_slice() >= start_key && entry.key().as_slice() <= end_key {
+                    entries.push((entry.key().clone(), entry.value().clone()));
+                }
+            }
+            sources.push(entries);
+        }
+
+        // Source N+: SSTables (ordered by level/recency)
+        let sstables = self.sstables.read().clone();
+        for sstable in sstables.iter() {
+            // Check if this SSTable might contain keys in our range
+            if sstable.max_key.as_slice() >= start_key && sstable.min_key.as_slice() <= end_key {
+                let mut entries = Vec::new();
+                match sstable::SsTableIterator::new(sstable) {
+                    Ok(iterator) => {
+                        for entry_result in iterator {
+                            match entry_result {
+                                Ok((key, value)) => {
+                                    if key.as_slice() >= start_key && key.as_slice() <= end_key {
+                                        entries.push((key, value));
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Error reading from SSTable {:?}: {}",
+                                        sstable.path,
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to create iterator for SSTable {:?}: {}",
+                            sstable.path,
+                            e
+                        );
+                    }
+                }
+                sources.push(entries);
+            }
+        }
+
+        // Use REVERSE merge iterator to get sorted results in DESCENDING order
+        let merger = ReverseMergeIterator::new(sources);
+        let results = if let Some(limit) = limit {
+            merger.collect_sorted_limit(limit)
+        } else {
+            merger.collect_sorted()
+        };
 
         Ok(results)
     }

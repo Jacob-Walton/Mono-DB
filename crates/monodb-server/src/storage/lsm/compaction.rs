@@ -108,7 +108,7 @@ async fn merge_sstables(
 
     // Open iterators for all inputs and seed the heap with first entries
     for (rank, t) in inputs.iter().enumerate() {
-        match SsTableIterator::new(&t.path) {
+        match SsTableIterator::new(t) {
             Ok(mut it) => {
                 if let Some(Ok((k, v))) = it.next() {
                     heap.push(HeapEntry {

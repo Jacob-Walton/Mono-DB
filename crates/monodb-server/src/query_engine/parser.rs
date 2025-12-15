@@ -4,7 +4,10 @@ use annotate_snippets::renderer::DecorStyle;
 use monodb_common::{Value, ValueType};
 
 use crate::query_engine::{
-    ast::{Assignment, BinaryOp, Expr, Extension, FieldDef, Statement, TableProperty, TableType},
+    ast::{
+        Assignment, BinaryOp, Expr, Extension, FieldDef, OrderByField, SortDirection, Statement,
+        TableProperty, TableType,
+    },
     lexer::{Lexer, Span, Token, TokenKind},
 };
 
@@ -373,10 +376,16 @@ impl<'a> Parser<'a> {
                 } else if self.check_keyword("rollback") {
                     self.advance(); // consume 'rollback'
                     Ok(Statement::Rollback)
+                } else if self.check_keyword("drop") {
+                    self.parse_drop()
+                } else if self.check_keyword("describe") {
+                    self.parse_describe()
+                } else if self.check_keyword("count") {
+                    self.parse_count()
                 } else {
                     Err(self
                         .error("unexpected keyword at statement level")
-                        .with_note("valid statements: get, put, change, remove, make"))
+                        .with_note("valid statements: get, put, change, remove, make, drop, describe, count"))
                 }
             }
             _ => Err(self.error("expected statement verb")),
@@ -392,12 +401,21 @@ impl<'a> Parser<'a> {
 
         let mut filter = None;
         let fields = None;
+        let mut order_by = None;
+        let mut take = None;
+        let mut skip = None;
         let mut extensions = Vec::new();
 
         // Parse optional clauses
         while !self.is_at_end() && !self.check(TokenKind::Newline) {
             if self.check_keyword("where") {
                 filter = Some(self.parse_where_clause()?);
+            } else if self.check_keyword("order") {
+                order_by = Some(self.parse_order_by_clause()?);
+            } else if self.check_keyword("take") {
+                take = Some(self.parse_take_clause()?);
+            } else if self.check_keyword("skip") {
+                skip = Some(self.parse_skip_clause()?);
             } else if self.check_keyword("with") {
                 extensions.push(self.parse_extension()?);
             } else {
@@ -409,8 +427,99 @@ impl<'a> Parser<'a> {
             source,
             filter,
             fields,
+            order_by,
+            take,
+            skip,
             extensions,
         })
+    }
+
+    /// Parse ORDER BY clause: `order by field [asc|desc], field2 [asc|desc], ...`
+    fn parse_order_by_clause(&mut self) -> ParseResult<Vec<OrderByField>> {
+        self.expect_keyword("order")?;
+        self.expect_keyword("by")?;
+
+        let mut fields = Vec::new();
+
+        loop {
+            let field = self.expect_identifier()?;
+            let direction = self.parse_sort_direction()?;
+
+            fields.push(OrderByField { field, direction });
+
+            // Check for comma to continue
+            if self.check(TokenKind::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        Ok(fields)
+    }
+
+    /// Parse sort direction: `asc`, `desc`, or default to asc
+    fn parse_sort_direction(&mut self) -> ParseResult<SortDirection> {
+        if self.check_keyword("asc") {
+            self.advance();
+            Ok(SortDirection::Asc)
+        } else if self.check_keyword("desc") {
+            self.advance();
+            Ok(SortDirection::Desc)
+        } else if self.check_identifier("ascending") {
+            // Helpful error for common mistake
+            self.advance();
+            Err(self
+                .error("unknown keyword 'ascending'")
+                .with_note("use 'asc' instead of 'ascending'"))
+        } else if self.check_identifier("descending") {
+            // Helpful error for common mistake
+            self.advance();
+            Err(self
+                .error("unknown keyword 'descending'")
+                .with_note("use 'desc' instead of 'descending'"))
+        } else {
+            // Default to ascending
+            Ok(SortDirection::Asc)
+        }
+    }
+
+    /// Check if current token is an identifier matching the given string
+    fn check_identifier(&self, name: &str) -> bool {
+        if let Some(token) = self.current()
+            && token.kind == TokenKind::Identifier
+        {
+            let text = self.token_text(token);
+            return text == name.as_bytes();
+        }
+        false
+    }
+
+    /// Parse TAKE clause: `take <number>`
+    fn parse_take_clause(&mut self) -> ParseResult<u64> {
+        self.expect_keyword("take")?;
+        self.expect_integer()
+    }
+
+    /// Parse SKIP clause: `skip <number>`
+    fn parse_skip_clause(&mut self) -> ParseResult<u64> {
+        self.expect_keyword("skip")?;
+        self.expect_integer()
+    }
+
+    /// Expect an integer literal and return its value
+    fn expect_integer(&mut self) -> ParseResult<u64> {
+        match self.current() {
+            Some(token) if token.kind == TokenKind::Number => {
+                let text = self.token_text(token);
+                let text_str = String::from_utf8_lossy(text).to_string();
+                self.advance();
+                text_str
+                    .parse::<u64>()
+                    .map_err(|_| self.error("expected a positive integer"))
+            }
+            _ => Err(self.error("expected a number")),
+        }
     }
 
     fn parse_put(&mut self) -> ParseResult<Statement> {
@@ -574,6 +683,12 @@ impl<'a> Parser<'a> {
 
     fn parse_make(&mut self) -> ParseResult<Statement> {
         self.expect_keyword("make")?;
+
+        // Check for "make index" or "make unique index"
+        if self.check_keyword("index") || self.check_keyword("unique") {
+            return self.parse_make_index();
+        }
+
         self.expect_keyword("table")?;
         let name = self.expect_identifier()?;
 
@@ -635,6 +750,90 @@ impl<'a> Parser<'a> {
             schema,
             properties,
         })
+    }
+
+    /// Parse: make [unique] index <name> on <table>(<columns>)
+    fn parse_make_index(&mut self) -> ParseResult<Statement> {
+        // Check for optional "unique"
+        let unique = if self.check_keyword("unique") {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
+        self.expect_keyword("index")?;
+        let index_name = self.expect_identifier()?;
+        self.expect_keyword("on")?;
+        let table_name = self.expect_identifier()?;
+
+        // Parse column list: (col1, col2, ...)
+        self.expect(TokenKind::LeftParen)?;
+        let mut columns = Vec::new();
+        loop {
+            columns.push(self.expect_identifier()?);
+            if self.check(TokenKind::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.expect(TokenKind::RightParen)?;
+
+        if columns.is_empty() {
+            return Err(self.error("index must have at least one column"));
+        }
+
+        Ok(Statement::MakeIndex {
+            index_name,
+            table_name,
+            columns,
+            unique,
+        })
+    }
+
+    /// Parse: describe <table>
+    fn parse_describe(&mut self) -> ParseResult<Statement> {
+        self.expect_keyword("describe")?;
+        let table_name = self.expect_identifier()?;
+        Ok(Statement::Describe { table_name })
+    }
+
+    /// Parse: count <table> OR count from <table>
+    fn parse_count(&mut self) -> ParseResult<Statement> {
+        self.expect_keyword("count")?;
+        // Allow optional "from" keyword for SQL-like syntax
+        if self.check_keyword("from") {
+            self.advance();
+        }
+        let table_name = self.expect_identifier()?;
+        Ok(Statement::Count { table_name })
+    }
+
+    /// Parse: drop index <name> on <table> OR drop table <name>
+    fn parse_drop(&mut self) -> ParseResult<Statement> {
+        self.expect_keyword("drop")?;
+
+        if self.check_keyword("index") {
+            self.expect_keyword("index")?;
+            let index_name = self.expect_identifier()?;
+            self.expect_keyword("on")?;
+            let table_name = self.expect_identifier()?;
+
+            Ok(Statement::DropIndex {
+                index_name,
+                table_name,
+            })
+        } else if self.check_keyword("table") {
+            self.expect_keyword("table")?;
+            let table_name = self.expect_identifier()?;
+
+            Ok(Statement::DropTable { table_name })
+        } else {
+            Err(self
+                .error("expected 'index' or 'table' after 'drop'")
+                .with_note("usage: drop index <name> on <table> OR drop table <name>"))
+        }
     }
 
     fn parse_where_clause(&mut self) -> ParseResult<Expr> {
@@ -785,6 +984,7 @@ impl<'a> Parser<'a> {
             // Parse constraints
             let mut is_primary = false;
             let mut is_unique = false;
+            let mut is_required = false;
             let mut default = None;
 
             while self.check(TokenKind::Keyword) {
@@ -795,6 +995,9 @@ impl<'a> Parser<'a> {
                 } else if self.check_keyword("unique") {
                     self.advance();
                     is_unique = true;
+                } else if self.check_keyword("required") {
+                    self.advance();
+                    is_required = true;
                 } else if self.check_keyword("default") {
                     self.advance();
                     let expr = self.parse_expr()?;
@@ -809,6 +1012,7 @@ impl<'a> Parser<'a> {
                 field_type,
                 is_primary,
                 is_unique,
+                is_required,
                 default,
             });
 

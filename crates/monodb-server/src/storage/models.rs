@@ -42,3 +42,32 @@ pub enum SortDirection {
     Ascending,
     Descending,
 }
+
+/// Query execution plan that uses an index
+#[derive(Debug, Clone)]
+pub struct IndexPlan {
+    /// Name of the index to use
+    pub index_name: String,
+    /// Columns covered by this index
+    pub columns: Vec<String>,
+    /// Type of index scan to perform
+    pub scan_type: IndexScanType,
+    /// For equality lookups: the exact value to search for
+    pub lookup_value: Option<Value>,
+}
+
+/// Type of index scan operation
+#[derive(Debug, Clone)]
+pub enum IndexScanType {
+    /// Exact match lookup on secondary index (WHERE col = value)
+    ExactMatch,
+    /// Point lookup by primary key (WHERE pk = value)
+    PrimaryKeyLookup,
+    /// Forward scan for ORDER BY ASC
+    OrderedScanAsc,
+    /// Backward scan for ORDER BY DESC
+    OrderedScanDesc,
+    /// Direct primary key scan (data already sorted by PK)
+    PrimaryKeyScanAsc,
+    PrimaryKeyScanDesc,
+}

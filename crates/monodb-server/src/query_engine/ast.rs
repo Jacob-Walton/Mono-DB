@@ -17,7 +17,23 @@ pub struct FieldDef {
     pub field_type: ValueType,
     pub is_primary: bool,
     pub is_unique: bool,
+    pub is_required: bool,
     pub default: Option<Value>,
+}
+
+/// Sort direction for `order by` clauses
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortDirection {
+    #[default]
+    Asc,
+    Desc,
+}
+
+/// Single ordering specification (field + direction)
+#[derive(Debug, Clone)]
+pub struct OrderByField {
+    pub field: String,
+    pub direction: SortDirection,
 }
 
 /// Binary operations supported in expressions
@@ -70,6 +86,9 @@ pub enum Statement {
         source: Identifier,
         filter: Option<Expr>,
         fields: Option<Vec<String>>,
+        order_by: Option<Vec<OrderByField>>,
+        take: Option<u64>,
+        skip: Option<u64>,
         extensions: Vec<Extension>,
     },
     Make {
@@ -95,6 +114,29 @@ pub enum Statement {
     Begin,
     Commit,
     Rollback,
+    // Index management
+    MakeIndex {
+        index_name: String,
+        table_name: Identifier,
+        columns: Vec<String>,
+        unique: bool,
+    },
+    DropIndex {
+        index_name: String,
+        table_name: Identifier,
+    },
+    // Table management
+    DropTable {
+        table_name: Identifier,
+    },
+    // Schema inspection
+    Describe {
+        table_name: Identifier,
+    },
+    // Row count
+    Count {
+        table_name: Identifier,
+    },
 }
 
 /// Conditional operation types

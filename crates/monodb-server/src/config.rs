@@ -4,6 +4,7 @@ use std::path::Path;
 use std::{env, fs};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LsmConfig {
     pub memtable_size: usize,
     pub level0_file_num_compaction_trigger: usize,
@@ -11,6 +12,8 @@ pub struct LsmConfig {
     pub level_multiplier: usize,
     pub compression: bool,
     pub max_level: usize,
+    /// Number of blocks to keep in the SSTable block cache (0 disables cache)
+    pub block_cache_capacity: usize,
 }
 
 impl Default for LsmConfig {
@@ -22,6 +25,7 @@ impl Default for LsmConfig {
             level_multiplier: 10,
             compression: true,
             max_level: 7,
+            block_cache_capacity: 4096,
         }
     }
 }

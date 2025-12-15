@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.2.4] - 2025-12-15
+
+### Added
+
+- SSTable block cache with configurable `block_cache_capacity` and footer-backed sparse index loading
+- Primary key fast path in planner/executor plus `required` column constraint support
+- Point-read benchmark and basic SELECT smoke test in the testing harness
+
+### Changed
+
+- LSM range scans use sparse index blocks and memtable prefix scans to limit primary-key lookups
+- Storage engine avoids redundant unique checks, inlines filtering for early exit, and uses PK point lookup helper
+- SSTable readers now enforce size sanity checks and validate data sections on load
+
+## [0.2.3] - 2025-12-14
+
+### Added
+
+- **Language Extensions** - New keywords and syntax
+  - `make index [index_name] on [table_name]([column_name])` for non-unique indexes
+  - `make unique index [index_name] on [table_name]([column_name])` for unique indexes
+  - `drop index [index_name]` to remove indexes
+  - `describe [table_name]` to show table schema
+  - `count <from> [table_name]` to get row count
+- **Index Support** - Secondary indexes for faster lookups
+  - Index creation and deletion
+  - Index metadata stored in catalog
+  - Indexes updated on row insert/update/delete
+  - Query planner uses indexes for optimization
+
+### Changed
+
+- `QueryExecutor` now handles some basic query planning for index usage
+
 ## [0.2.2] - 2025-12-13
 
 ### Added
