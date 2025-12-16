@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::debug!("Loaded Configuration: {:#?}", config);
     }
 
-    let server = Server::new(config.storage).await?;
+    let server = Server::new(config.server, config.storage).await?;
 
     tracing::info!("MonoDB Server starting on {}", server.address());
 

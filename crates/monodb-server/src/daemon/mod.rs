@@ -19,13 +19,13 @@ pub struct Server {
 }
 
 impl Server {
-    pub async fn new(storage_config: StorageConfig) -> Result<Self> {
+    pub async fn new(server_config: ServerConfig, storage_config: StorageConfig) -> Result<Self> {
         let (shutdown_tx, _) = broadcast::channel(1);
 
         let storage_engine = StorageEngine::new(storage_config).await?;
 
         Ok(Self {
-            config: ServerConfig::default(),
+            config: server_config,
             storage: storage_engine,
             sessions: Arc::new(DashMap::new()),
             shutdown_tx,
