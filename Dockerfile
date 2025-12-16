@@ -13,7 +13,7 @@ COPY . .
 RUN cargo +nightly build --release
 
 # Runtime stage
-FROM gcr.io/distroless/cc-debian13
+FROM debian:bookworm-slim
 
 WORKDIR /opt/monodb
 
