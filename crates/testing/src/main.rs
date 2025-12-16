@@ -1,10 +1,7 @@
 use anyhow::{Context, Result, bail};
 use futures::stream::{FuturesUnordered, StreamExt};
 use monodb_client::Client;
-use monodb_common::{
-    Value,
-    protocol::{ExecutionResult, Response},
-};
+use monodb_common::Value;
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -13,41 +10,18 @@ struct BenchConfig {
     builder: Arc<dyn Fn(usize, usize) -> (String, usize) + Send + Sync>,
 }
 
-async fn get_count(client: &mut Client, table: &str) -> Result<usize> {
-    let pool = client.pool().await.clone();
-    let mut conn = pool
-        .get()
-        .await
-        .context("Failed to get connection from pool")?;
+async fn get_count(client: &Client, table: &str) -> Result<usize> {
     let sql = format!("count from {table}");
-    let response = conn
-        .execute(sql)
+    let result = client
+        .query(&sql)
         .await
         .context("Failed to execute count query")?;
 
-    println!("Count response: {:?}", response);
+    println!("Count response: {:?}", result);
 
-    match response {
-        Response::Success { result } => {
-            let first = result.get(0).cloned().context("No result returned")?;
-            match first {
-                ExecutionResult::Ok { data, .. } => {
-                    let first_row = data.get(0).cloned().context("No data returned")?;
-                    match first_row {
-                        Value::Object(map) => {
-                            let count_value = map.get("count").context("Count field missing")?;
-                            let count =
-                                count_value.as_i64().context("Count field not an integer")?;
-                            Ok(count as usize)
-                        }
-                        _ => bail!("Unexpected data format for count result"),
-                    }
-                }
-                _ => bail!("Unexpected ExecutionResult type for count query"),
-            }
-        }
-        _ => bail!("Unexpected Response type for count query"),
-    }
+    let row = result.one().context("No count result returned")?;
+    let count: i64 = row.get_typed("count").context("Count field missing")?;
+    Ok(count as usize)
 }
 
 /// Run a write benchmark against the configured target.
@@ -62,7 +36,7 @@ async fn run_benchmark(
 
     let start_time = std::time::Instant::now();
 
-    let pool = Arc::new(client.pool().await.clone());
+    let pool = Arc::new(client.pool().clone());
     let latencies = Arc::new(AsyncMutex::new(Vec::with_capacity(count)));
 
     let insert_futures = (0..count).step_by(batch_size).map(|base| {
@@ -78,7 +52,7 @@ async fn run_benchmark(
             let (batch_sql, actual) = builder(base, batch_size);
             if actual == 0 {
                 pool.return_connection(conn);
-                return Ok(Response::Success { result: vec![] });
+                return Ok(());
             }
 
             let start = std::time::Instant::now();
@@ -92,7 +66,7 @@ async fn run_benchmark(
             }
 
             pool.return_connection(conn);
-            response
+            response.map(|_| ())
         }
     });
 
@@ -111,10 +85,8 @@ async fn run_benchmark(
 
     while let Some(res) = stream.next().await {
         in_flight -= 1;
-        match res {
-            Ok(Response::Success { .. }) => {}
-            Ok(other) => bail!("Unexpected response type on insert: {other:?}"),
-            Err(e) => bail!("Insert failed: {e}"),
+        if let Err(e) = res {
+            bail!("Insert failed: {e}");
         }
         if let Some(fut) = insert_iter.next() {
             stream.push(fut);
@@ -185,51 +157,36 @@ make table sessions
     persistence "memory"
 "#;
 
-    let pool = client.pool().await.clone();
-    let mut conn = pool
-        .get()
-        .await
-        .context("Failed to get connection from pool")?;
-
     // Ignore result of table creation
-    let _ = conn.execute(table_code.to_string()).await;
+    let _ = client.execute(table_code).await;
 
-    let response = conn.list_tables().await.context("Failed to list tables")?;
+    let result = client.list_tables().await.context("Failed to list tables")?;
 
-    let result = match response {
-        Response::Success { result } => result.get(0).cloned().context("No result returned")?,
-        _ => bail!("Received unexpected response type"),
-    };
-
-    match result {
-        ExecutionResult::Ok { data, .. } => {
-            for value in data {
-                let arr = match value {
-                    Value::Array(arr) => arr,
-                    _ => bail!("Received unexpected return value"),
-                };
-                println!("Received expected return value");
-                for item in arr {
-                    let arr = match item {
-                        Value::Array(arr) => arr,
-                        _ => bail!("Found unexpected value in table listing"),
-                    };
-                    if arr.len() != 2 {
-                        bail!("Received invalid table array");
-                    }
-                    let name = arr
-                        .get(1)
-                        .and_then(|v| v.as_string())
-                        .context("Table name missing or not a string")?;
-                    let r#type = arr
-                        .get(0)
-                        .and_then(|v| v.as_string())
-                        .context("Table type missing or not a string")?;
-                    println!("{} (type: {})", name, r#type);
-                }
+    println!("Received expected return value");
+    for row in result.rows() {
+        let value = row.value();
+        let arr = match value {
+            Value::Array(arr) => arr,
+            _ => bail!("Received unexpected return value"),
+        };
+        for item in arr {
+            let arr = match item {
+                Value::Array(arr) => arr,
+                _ => bail!("Found unexpected value in table listing"),
+            };
+            if arr.len() != 2 {
+                bail!("Received invalid table array");
             }
+            let name = arr
+                .get(1)
+                .and_then(|v| v.as_string())
+                .context("Table name missing or not a string")?;
+            let r#type = arr
+                .get(0)
+                .and_then(|v| v.as_string())
+                .context("Table type missing or not a string")?;
+            println!("{} (type: {})", name, r#type);
         }
-        _ => bail!("Received unexpected ExecutionResult"),
     }
 
     // Test inserting a large number of records using multiple connections
@@ -258,9 +215,8 @@ make table sessions
     };
 
     // Get existing counts to offset IDs
-    let mut client_mut = client.clone();
-    let users_offset = get_count(&mut client_mut, "users").await.unwrap_or(0);
-    let testing_offset = get_count(&mut client_mut, "testing").await.unwrap_or(0);
+    let users_offset = get_count(&client, "users").await.unwrap_or(0);
+    let testing_offset = get_count(&client, "testing").await.unwrap_or(0);
 
     // Print offsets
     println!(
@@ -317,8 +273,6 @@ make table sessions
     run_benchmark(collection, client.clone(), COUNT, CONCURRENCY, BATCH_SIZE).await?;
     // Keyspace is in-memory, always run
     run_benchmark(keyspace, client.clone(), COUNT, CONCURRENCY, BATCH_SIZE).await?;
-
-    pool.return_connection(conn);
 
     Ok(())
 }

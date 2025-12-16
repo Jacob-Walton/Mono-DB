@@ -1,9 +1,6 @@
 use colored::*;
 use monodb_client::Client;
-use monodb_common::{
-    Value,
-    protocol::{ExecutionResult, Response},
-};
+use monodb_common::Value;
 use std::io::{self, BufRead, Write};
 
 mod formatter;
@@ -139,150 +136,74 @@ async fn handle_command(cmd: &str, lines: &mut Vec<String>, client: &Client) -> 
 
 async fn execute(client: &Client, query: &str) {
     let start = std::time::Instant::now();
-    let pool = client.pool().await;
 
-    match pool.get().await {
-        Ok(mut conn) => {
-            match conn.execute(query.to_string()).await {
-                Ok(response) => {
-                    let elapsed = start.elapsed();
-                    println!();
-                    format_response(&response, elapsed);
-                }
-                Err(e) => {
-                    println!("\n{}: {}\n", "Error".red(), e);
-                }
-            }
-            pool.return_connection(conn);
+    match client.query(query).await {
+        Ok(result) => {
+            let elapsed = start.elapsed();
+            println!();
+            format_result(&result, elapsed);
         }
         Err(e) => {
-            println!("\n{}: {}\n", "Connection error".red(), e);
+            println!("\n{}: {}\n", "Error".red(), e);
         }
     }
 }
 
 async fn get_tables(client: &Client) {
     let start = std::time::Instant::now();
-    let pool = client.pool().await;
 
-    match pool.get().await {
-        Ok(mut conn) => {
-            match conn.list_tables().await {
-                Ok(response) => {
-                    let elapsed = start.elapsed();
-                    println!();
-                    match response {
-                        Response::Success { result } => {
-                            for exec_result in result.iter() {
-                                match exec_result {
-                                    // FIXME: Temporary solution
-                                    ExecutionResult::Ok { data, .. } => {
-                                        if data.len() == 1 {
-                                            if let Value::Array(arr) = &data[0] {
-                                                for item in arr {
-                                                    match item {
-                                                        Value::Array(table) => {
-                                                            let fallback = Value::String(
-                                                                "unknown".to_string(),
-                                                            );
+    match client.list_tables().await {
+        Ok(result) => {
+            let elapsed = start.elapsed();
+            println!();
+            
+            for row in result.rows() {
+                if let Some(Value::Array(arr)) = row.value().as_array().and_then(|a| a.first()) {
+                    for item in arr {
+                        if let Value::Array(table) = item {
+                            let fallback = Value::String("unknown".to_string());
+                            let table_type = table.first().unwrap_or(&fallback);
+                            let table_name = table.get(1).unwrap_or(&fallback);
 
-                                                            let table_type =
-                                                                table.first().unwrap_or(&fallback);
-                                                            let table_name =
-                                                                table.get(1).unwrap_or(&fallback);
-
-                                                            println!(
-                                                                "{}: {}",
-                                                                table_name.as_string().unwrap(),
-                                                                table_type.as_string().unwrap()
-                                                            );
-                                                        }
-                                                        _ => eprintln!(
-                                                            "Found unexpected type when getting tables"
-                                                        ),
-                                                    }
-                                                }
-                                            } else {
-                                                eprintln!(
-                                                    "Found unexpected type when getting tables"
-                                                );
-                                            }
-                                        } else {
-                                            eprintln!("Found unexpected type when getting tables");
-                                        }
-                                    }
-                                    _ => eprintln!(
-                                        "Got an unexpected type when attempting to list tables"
-                                    ),
-                                }
+                            if let (Some(name), Some(ttype)) = (table_name.as_string(), table_type.as_string()) {
+                                println!("{}\t{}", name, ttype);
                             }
-                            println!("({:.2?})\n", elapsed);
-                        }
-                        Response::Error { code, message } => {
-                            println!("{}: [{:?}] {}\n", "Error".red(), code, message);
-                        }
-                        _ => {
-                            println!("{:?}\n", response);
                         }
                     }
                 }
-                Err(e) => {
-                    println!("\n{}: {}\n", "Error".red(), e);
-                }
-            }
-            pool.return_connection(conn);
-        }
-        Err(e) => {
-            println!("\n{}: {}\n", "Connection error".red(), e);
-        }
-    }
-}
-
-fn format_response(response: &Response, elapsed: std::time::Duration) {
-    match response {
-        Response::Success { result } => {
-            for exec_result in result.iter() {
-                format_execution_result(exec_result);
             }
             println!("({:.2?})\n", elapsed);
         }
-        Response::Error { code, message } => {
-            println!("{}: [{:?}] {}\n", "Error".red(), code, message);
-        }
-        _ => {
-            println!("{:?}\n", response);
+        Err(e) => {
+            println!("\n{}: {}\n", "Error".red(), e);
         }
     }
 }
 
-fn format_execution_result(result: &ExecutionResult) {
-    match result {
-        // FIXME: Temporary solution
-        ExecutionResult::Ok {
-            data, row_count, ..
-        } => {
-            for value in data {
-                format_value(value, 0);
-            }
+fn format_result(result: &monodb_client::QueryResult, elapsed: std::time::Duration) {
+    // Check result type
+    if result.is_created() {
+        println!("{}", "Created".green());
+    } else if result.is_modified() {
+        let rows = result.rows_affected();
+        println!(
+            "{} ({} row{})",
+            "Modified".green(),
+            rows,
+            if rows == 1 { "" } else { "s" }
+        );
+    } else {
+        // Display data rows
+        let rows = result.rows();
+        for row in &rows {
+            format_value(row.value(), 0);
+        }
 
-            if let Some(count) = row_count {
-                println!("\n{} row{}", count, if *count == 1 { "" } else { "s" });
-            }
-        }
-        ExecutionResult::Created { .. } => {
-            println!("{}", "Created".green());
-        }
-        ExecutionResult::Modified { rows_affected, .. } => {
-            if let Some(rows) = rows_affected {
-                println!(
-                    "{} ({} row{})",
-                    "Modified".green(),
-                    rows,
-                    if *rows == 1 { "" } else { "s" }
-                );
-            } else {
-                println!("{}", "Modified".green());
-            }
+        if !rows.is_empty() {
+            let count = rows.len();
+            println!("\n{} row{}", count, if count == 1 { "" } else { "s" });
         }
     }
+    
+    println!("({:.2?})\n", elapsed);
 }

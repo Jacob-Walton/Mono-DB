@@ -835,6 +835,7 @@ name = "monodb-client"
 version = "0.2.4"
 dependencies = [
  "bytes",
+ "indexmap",
  "monodb-common",
  "parking_lot",
  "tokio",

@@ -9,5 +9,6 @@ repository.workspace = true
 [dependencies]
 tokio.workspace = true
 bytes.workspace = true
+indexmap.workspace = true
 monodb-common = { path = "../monodb-common" }
 parking_lot = "0.12.5"
