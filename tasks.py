@@ -1,35 +1,82 @@
 #!/usr/bin/env python3
 
 import os
+import sys
 import shutil
 import subprocess
+import ctypes
 
 import colorama
 import invoke
-import psutil
 
 PROJECT_NAME = os.path.basename(os.getcwd())
 BINARIES = ["monod", "mdb"]
 MANDIR = "/usr/share/man/man1"  # Only on Unix
 
+def _windows_total_ram_gb():
+    class MEMORYSTATUSEX(ctypes.Structure):
+        _fields_ = [
+            ("dwLength", ctypes.c_ulong),
+            ("dwMemoryLoad", ctypes.c_ulong),
+            ("ullTotalPhys", ctypes.c_ulonglong),
+            ("ullAvailPhys", ctypes.c_ulonglong),
+            ("ullTotalPageFile", ctypes.c_ulonglong),
+            ("ullAvailPageFile", ctypes.c_ulonglong),
+            ("ullTotalVirtual", ctypes.c_ulonglong),
+            ("ullAvailVirtual", ctypes.c_ulonglong),
+            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+        ]
+
+    stat = MEMORYSTATUSEX()
+    stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+        return None
+
+    return stat.ullTotalPhys / (1024 ** 3)
 
 def get_cores():
-    cpu_count = psutil.cpu_count(logical=True) or 4
-    total_gb = psutil.virtual_memory().total / (1024**3)
+    cpu_count = os.cpu_count() or 4
+    total_gb = None
 
-    # Rust builds are CPU-bound; assume around 1GB per job
-    memory_limited_cores = int(total_gb / 1.0)
+    if sys.platform.startswith("linux"):
+        try:
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        kb = int(line.split()[1])
+                        total_gb = kb / (1024 ** 2)
+                        break
+        except Exception:
+            pass
 
-    # Favour CPU, only constrain if memory clearly insufficient
-    optimal = min(cpu_count, max(memory_limited_cores, cpu_count // 2))
+    elif sys.platform == "darwin":
+        try:
+            out = subprocess.check_output(["sysctl", "-n", "hw.memsize"])
+            total_gb = int(out) / (1024 ** 3)
+        except Exception:
+            pass
+
+    elif sys.platform == "win32":
+        try:
+            total_gb = _windows_total_ram_gb()
+        except Exception:
+            pass
+
+    # If RAM detection failed, fall back conservatively
+    if total_gb is None:
+        return max(1, min(cpu_count, 8))
+
+    # ~1 GB per job
+    memory_limited = int(total_gb)
+
+    optimal = min(cpu_count, max(memory_limited, cpu_count // 2))
     optimal = max(1, min(optimal, 32))
 
-    # Prefer even numbers for better scheduling
-    if optimal > 4 and optimal % 2 != 0:
+    if optimal > 4 and optimal % 2:
         optimal -= 1
 
     return optimal
-
 
 CORES = get_cores()
 GUI_DIR = "./monodb-admin"
