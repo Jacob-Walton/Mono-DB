@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 
 use indexmap::IndexMap;
 use monodb_common::{
-    protocol::{ExecutionResult, Response},
     MonoError, Result, Value,
+    protocol::{ExecutionResult, Response},
 };
 
 /// Result of a query execution with convenient access methods
@@ -59,7 +59,9 @@ impl QueryResult {
     pub fn rows_from_first(&self) -> Vec<Row> {
         self.first()
             .and_then(|r| match r {
-                ExecutionResult::Ok { data, .. } => Some(data.iter().map(Row::from_value).collect()),
+                ExecutionResult::Ok { data, .. } => {
+                    Some(data.iter().map(Row::from_value).collect())
+                }
                 _ => None,
             })
             .unwrap_or_default()

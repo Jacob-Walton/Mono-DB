@@ -75,5 +75,8 @@ async fn mdb_is_ready(addr: &str) -> anyhow::Result<()> {
 
 async fn try_monodb_client(addr: &str) -> anyhow::Result<()> {
     use monodb_client::connection::Connection;
-    Connection::connect(addr).await.map(|_| ()).map_err(|e| anyhow::anyhow!(e))
+    Connection::connect(addr)
+        .await
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!(e))
 }

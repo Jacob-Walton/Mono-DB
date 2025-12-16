@@ -156,7 +156,7 @@ async fn get_tables(client: &Client) {
         Ok(result) => {
             let elapsed = start.elapsed();
             println!();
-            
+
             for row in result.rows() {
                 if let Some(Value::Array(arr)) = row.value().as_array().and_then(|a| a.first()) {
                     for item in arr {
@@ -165,7 +165,9 @@ async fn get_tables(client: &Client) {
                             let table_type = table.first().unwrap_or(&fallback);
                             let table_name = table.get(1).unwrap_or(&fallback);
 
-                            if let (Some(name), Some(ttype)) = (table_name.as_string(), table_type.as_string()) {
+                            if let (Some(name), Some(ttype)) =
+                                (table_name.as_string(), table_type.as_string())
+                            {
                                 println!("{}\t{}", name, ttype);
                             }
                         }
@@ -204,6 +206,6 @@ fn format_result(result: &monodb_client::QueryResult, elapsed: std::time::Durati
             println!("\n{} row{}", count, if count == 1 { "" } else { "s" });
         }
     }
-    
+
     println!("({:.2?})\n", elapsed);
 }

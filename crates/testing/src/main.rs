@@ -160,7 +160,10 @@ make table sessions
     // Ignore result of table creation
     let _ = client.execute(table_code).await;
 
-    let result = client.list_tables().await.context("Failed to list tables")?;
+    let result = client
+        .list_tables()
+        .await
+        .context("Failed to list tables")?;
 
     println!("Received expected return value");
     for row in result.rows() {

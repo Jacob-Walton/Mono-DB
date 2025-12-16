@@ -863,7 +863,9 @@ impl StorageEngine {
             end_key.push(0xFF);
 
             if let Some(tree) = self.storage_trees.get(collection) {
-                let pairs = tree.scan_range_with_limit(&encoded_pk, &end_key, 100).await?;
+                let pairs = tree
+                    .scan_range_with_limit(&encoded_pk, &end_key, 100)
+                    .await?;
                 for (stored_key, _) in pairs {
                     // Delete each versioned key
                     self.tree_delete_with_wal(collection, stored_key).await?;
@@ -871,9 +873,7 @@ impl StorageEngine {
             }
 
             // Also try deleting the base encoded key (non-versioned/legacy data)
-            self.tree_delete_with_wal(collection, encoded_pk)
-                .await
-                .ok(); // Ignore error if key doesn't exist
+            self.tree_delete_with_wal(collection, encoded_pk).await.ok(); // Ignore error if key doesn't exist
         } else {
             // Non-relational (keyspace/collection): delete the key directly
             self.tree_delete_with_wal(collection, key_bytes.to_vec())
@@ -915,14 +915,13 @@ impl StorageEngine {
                 matched_values
                     .into_iter()
                     .filter_map(|v| {
-                        Self::get_field(&v, "_id")
-                            .map(|id_val| match id_val {
-                                MonoValue::ObjectId(oid) => oid.to_hex(),
-                                MonoValue::String(s) => s.clone(),
-                                MonoValue::Int32(i) => i.to_string(),
-                                MonoValue::Int64(i) => i.to_string(),
-                                _ => format!("{id_val}"),
-                            })
+                        Self::get_field(&v, "_id").map(|id_val| match id_val {
+                            MonoValue::ObjectId(oid) => oid.to_hex(),
+                            MonoValue::String(s) => s.clone(),
+                            MonoValue::Int32(i) => i.to_string(),
+                            MonoValue::Int64(i) => i.to_string(),
+                            _ => format!("{id_val}"),
+                        })
                     })
                     .collect()
             }
@@ -944,13 +943,12 @@ impl StorageEngine {
                     matched_values
                         .into_iter()
                         .filter_map(|v| {
-                            Self::get_field(&v, pk_name)
-                                .map(|pk_val| match pk_val {
-                                    MonoValue::String(s) => s.clone(),
-                                    MonoValue::Int32(i) => i.to_string(),
-                                    MonoValue::Int64(i) => i.to_string(),
-                                    _ => format!("{pk_val}"),
-                                })
+                            Self::get_field(&v, pk_name).map(|pk_val| match pk_val {
+                                MonoValue::String(s) => s.clone(),
+                                MonoValue::Int32(i) => i.to_string(),
+                                MonoValue::Int64(i) => i.to_string(),
+                                _ => format!("{pk_val}"),
+                            })
                         })
                         .collect()
                 } else {
@@ -2178,7 +2176,7 @@ impl StorageEngine {
                 crate::storage::models::Filter::Eq(field, MonoValue::String(s))
                     if field == "key" && s.ends_with(':')
             );
-            
+
             if is_prefix_query {
                 values
             } else {
@@ -2224,7 +2222,7 @@ impl StorageEngine {
                 }
             });
 
-        let mut values: Vec<MonoValue> = store
+        let values: Vec<MonoValue> = store
             .iter()
             .filter_map(|entry| {
                 let key = entry.key();
@@ -2260,7 +2258,7 @@ impl StorageEngine {
                 crate::storage::models::Filter::Eq(field, MonoValue::String(s))
                     if field == "key" && s.ends_with(':')
             );
-            
+
             if is_prefix_query {
                 values
             } else {
@@ -2993,13 +2991,13 @@ impl StorageEngine {
         tx: Option<&Transaction>,
     ) -> Result<Option<MonoValue>> {
         // First try direct lookup for non-versioned key
-        if let Some(tree) = self.storage_trees.get(collection_name) {
-            if let Some(value) = tree.get(primary_key).await? {
-                match MonoValue::from_bytes(&value) {
-                    Ok((mv, _)) => return Ok(Some(mv)),
-                    Err(e) => {
-                        tracing::warn!("Failed to deserialize non-versioned row: {}", e);
-                    }
+        if let Some(tree) = self.storage_trees.get(collection_name)
+            && let Some(value) = tree.get(primary_key).await?
+        {
+            match MonoValue::from_bytes(&value) {
+                Ok((mv, _)) => return Ok(Some(mv)),
+                Err(e) => {
+                    tracing::warn!("Failed to deserialize non-versioned row: {}", e);
                 }
             }
         }
