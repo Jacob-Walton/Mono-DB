@@ -450,6 +450,14 @@ impl QueryExecutor {
                     ExecutorError::InvalidOperation("No active transaction to ROLLBACK".into())
                 })?;
 
+                // Delete all versioned entries written by this transaction
+                self.storage
+                    .rollback_transaction_writes(tx.tx_id)
+                    .await
+                    .map_err(|e| {
+                        ExecutorError::InvalidOperation(format!("Rollback failed: {}", e))
+                    })?;
+
                 // Write TxRollback to WAL
                 self.storage.wal_tx_rollback(tx.tx_id).map_err(|e| {
                     ExecutorError::InvalidOperation(format!("WAL write failed: {}", e))
@@ -1225,14 +1233,35 @@ impl QueryExecutor {
 
     async fn execute_change(
         &mut self,
-        _target: String,
-        _filter: Option<Expr>,
-        _changes: Vec<Assignment>,
+        target: String,
+        filter: Option<Expr>,
+        changes: Vec<Assignment>,
         _extensions: Vec<Extension>,
     ) -> ExecutorResult<(u64, Value)> {
-        // TODO: Implement update
-        Err(ExecutorError::InvalidOperation(
-            "change operations not yet implemented".to_string(),
+        // Convert filter expression
+        let filter = if let Some(expr) = filter {
+            Some(self.translate_filter(expr).await?)
+        } else {
+            None
+        };
+
+        // Convert changes to HashMap<String, Value>
+        let mut updates = std::collections::HashMap::new();
+        for assignment in changes {
+            let value = self.evaluate_expression(assignment.value).await?;
+            updates.insert(assignment.key, value);
+        }
+
+        // Call storage engine update with transaction context
+        let count = self
+            .storage
+            .update_many_with_tx(&target, filter, updates, self.current_tx.as_ref())
+            .await
+            .map_err(|e| ExecutorError::InvalidOperation(e.message().to_string()))?;
+
+        Ok((
+            count,
+            Value::String(format!("Updated {count} rows in '{target}'")),
         ))
     }
 
