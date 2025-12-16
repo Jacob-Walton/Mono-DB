@@ -912,6 +912,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "monodb-utils"
+version = "0.2.4"
+dependencies = [
+ "anyhow",
+ "monodb-client",
+ "monodb-common",
+ "tokio",
+]
+
+[[package]]
 name = "munge"
 version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

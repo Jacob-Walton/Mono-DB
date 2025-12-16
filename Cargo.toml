@@ -5,6 +5,7 @@ members = [
     "crates/monodb-server", # Server daemon
     "crates/monodb-client", # Rust client library
     "crates/monodb-repl",   # TUI REPL similar to psql
+    "crates/monodb-utils",  # Utility binaries
     "crates/testing",       # Test playground
 ]
 
@@ -13,6 +14,7 @@ default-members = [
     "crates/monodb-server",
     "crates/monodb-client",
     "crates/monodb-repl",
+    "crates/monodb-utils",
 ]
 
 [workspace.package]
