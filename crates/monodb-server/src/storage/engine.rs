@@ -843,9 +843,44 @@ impl StorageEngine {
             return Ok(());
         }
 
-        // Delete from storage (using system WAL)
-        self.tree_delete_with_wal(collection, key_bytes.to_vec())
-            .await
+        // Check if this is a relational table (uses encoded sortable keys)
+        let is_relational = self
+            .schemas
+            .get(collection)
+            .map(|s| matches!(s.value(), Schema::Table { .. }))
+            .unwrap_or(false);
+
+        if is_relational {
+            // For relational tables, keys are encoded with encode_composite_sortable
+            // We need to encode the primary key value to match the stored format
+            let pk_value = MonoValue::String(key.to_string());
+            let encoded_pk = crate::storage::key_encoding::encode_composite_sortable(
+                std::slice::from_ref(&pk_value),
+            );
+
+            // Scan for all versions of this key: from {encoded_pk} to {encoded_pk}\xFF
+            let mut end_key = encoded_pk.clone();
+            end_key.push(0xFF);
+
+            if let Some(tree) = self.storage_trees.get(collection) {
+                let pairs = tree.scan_range_with_limit(&encoded_pk, &end_key, 100).await?;
+                for (stored_key, _) in pairs {
+                    // Delete each versioned key
+                    self.tree_delete_with_wal(collection, stored_key).await?;
+                }
+            }
+
+            // Also try deleting the base encoded key (non-versioned/legacy data)
+            self.tree_delete_with_wal(collection, encoded_pk)
+                .await
+                .ok(); // Ignore error if key doesn't exist
+        } else {
+            // Non-relational (keyspace/collection): delete the key directly
+            self.tree_delete_with_wal(collection, key_bytes.to_vec())
+                .await?;
+        }
+
+        Ok(())
     }
 
     /// Delete all entries from a collection that match a given filter.
@@ -880,8 +915,7 @@ impl StorageEngine {
                 matched_values
                     .into_iter()
                     .filter_map(|v| {
-                        v.as_object()
-                            .and_then(|m| m.get("_id"))
+                        Self::get_field(&v, "_id")
                             .map(|id_val| match id_val {
                                 MonoValue::ObjectId(oid) => oid.to_hex(),
                                 MonoValue::String(s) => s.clone(),
@@ -897,8 +931,7 @@ impl StorageEngine {
                 matched_values
                     .into_iter()
                     .filter_map(|v| {
-                        v.as_object()
-                            .and_then(|m| m.get("key"))
+                        Self::get_field(&v, "key")
                             .and_then(|v| v.as_string())
                             .map(|s| s.to_string())
                     })
@@ -911,8 +944,7 @@ impl StorageEngine {
                     matched_values
                         .into_iter()
                         .filter_map(|v| {
-                            v.as_object()
-                                .and_then(|m| m.get(pk_name))
+                            Self::get_field(&v, pk_name)
                                 .map(|pk_val| match pk_val {
                                     MonoValue::String(s) => s.clone(),
                                     MonoValue::Int32(i) => i.to_string(),
@@ -2119,13 +2151,15 @@ impl StorageEngine {
             match MonoValue::from_bytes(&v) {
                 Ok((mut mv, _bytes_read)) => {
                     if let MonoValue::Object(ref mut obj) = mv {
-                        obj.insert("_key".to_string(), MonoValue::String(key_str.clone()));
-                        obj.insert("key".to_string(), MonoValue::String(key_str));
+                        // If the object doesn't have a key field, add it
+                        if !obj.contains_key("key") {
+                            obj.insert("key".to_string(), MonoValue::String(key_str));
+                        }
                     } else {
+                        // For non-object values, wrap in a simple key-value object
                         let mut map = BTreeMap::new();
-                        map.insert("_key".to_string(), MonoValue::String(key_str.clone()));
                         map.insert("key".to_string(), MonoValue::String(key_str));
-                        map.insert("_value".to_string(), mv);
+                        map.insert("value".to_string(), mv);
                         mv = MonoValue::Object(map);
                     }
                     values.push(mv);
@@ -2136,17 +2170,22 @@ impl StorageEngine {
             }
         }
 
+        // Apply filter if provided (skip if we already did prefix filtering)
         let filtered = if let Some(filter) = &query.filter {
-            match filter {
+            // If we already filtered by prefix, skip re-filtering for that same prefix query
+            let is_prefix_query = matches!(
+                filter,
                 crate::storage::models::Filter::Eq(field, MonoValue::String(s))
-                    if field == "key" && s.ends_with(':') =>
-                {
-                    values
-                }
-                _ => values
+                    if field == "key" && s.ends_with(':')
+            );
+            
+            if is_prefix_query {
+                values
+            } else {
+                values
                     .into_iter()
                     .filter(|v| self.apply_filter(v, filter))
-                    .collect(),
+                    .collect()
             }
         } else {
             values
@@ -2197,21 +2236,45 @@ impl StorageEngine {
                 let value = entry.value();
                 let obj = if let MonoValue::Object(map) = value.clone() {
                     let mut m = map;
-                    m.insert("_key".to_string(), MonoValue::String(key.clone()));
-                    m.insert("key".to_string(), MonoValue::String(key.clone()));
+                    // If the object doesn't have a key field, add it
+                    if !m.contains_key("key") {
+                        m.insert("key".to_string(), MonoValue::String(key.clone()));
+                    }
                     MonoValue::Object(m)
                 } else {
+                    // For non-object values, wrap in a simple key-value object
                     let mut map = BTreeMap::new();
-                    map.insert("_key".to_string(), MonoValue::String(key.clone()));
                     map.insert("key".to_string(), MonoValue::String(key.clone()));
-                    map.insert("_value".to_string(), value.clone());
+                    map.insert("value".to_string(), value.clone());
                     MonoValue::Object(map)
                 };
                 Some(obj)
             })
             .collect();
 
-        values.sort_by(|a, b| {
+        // Apply filter if provided (skip if we already did prefix filtering)
+        let filtered = if let Some(filter) = &query.filter {
+            // If we already filtered by prefix, skip re-filtering for that same prefix query
+            let is_prefix_query = matches!(
+                filter,
+                crate::storage::models::Filter::Eq(field, MonoValue::String(s))
+                    if field == "key" && s.ends_with(':')
+            );
+            
+            if is_prefix_query {
+                values
+            } else {
+                values
+                    .into_iter()
+                    .filter(|v| self.apply_filter(v, filter))
+                    .collect()
+            }
+        } else {
+            values
+        };
+
+        let mut out = filtered;
+        out.sort_by(|a, b| {
             let ka = a
                 .as_object()
                 .and_then(|o| o.get("_key"))
@@ -2228,9 +2291,9 @@ impl StorageEngine {
         });
 
         if let Some(limit) = query.limit {
-            values.truncate(limit);
+            out.truncate(limit);
         }
-        Ok(values)
+        Ok(out)
     }
 
     async fn find_with_filter(
@@ -2409,7 +2472,8 @@ impl StorageEngine {
         use crate::storage::models::Filter as F;
         match filter {
             F::Eq(field, v) => {
-                Self::get_field(row, field).is_some_and(|x| Self::values_equal(x, v))
+                let field_val = Self::get_field(row, field);
+                field_val.is_some_and(|x| Self::values_equal(x, v))
             }
             F::Neq(field, v) => {
                 Self::get_field(row, field).is_some_and(|x| !Self::values_equal(x, v))
@@ -2466,6 +2530,20 @@ impl StorageEngine {
             (MonoValue::Float32(x), MonoValue::Int32(y)) => *x == (*y as f32),
             (MonoValue::Int64(x), MonoValue::Float32(y)) => (*x as f32) == *y,
             (MonoValue::Float32(x), MonoValue::Int64(y)) => *x == (*y as f32),
+
+            // String vs numeric/uuid/bool comparisons (helpful for keyspace filters)
+            (MonoValue::String(s), MonoValue::Int32(n)) => s == &n.to_string(),
+            (MonoValue::String(s), MonoValue::Int64(n)) => s == &n.to_string(),
+            (MonoValue::String(s), MonoValue::Float32(n)) => s == &n.to_string(),
+            (MonoValue::String(s), MonoValue::Float64(n)) => s == &n.to_string(),
+            (MonoValue::String(s), MonoValue::Bool(b)) => s == &b.to_string(),
+            (MonoValue::String(s), MonoValue::Uuid(u)) => s == &u.to_string(),
+            (MonoValue::Int32(n), MonoValue::String(s)) => &n.to_string() == s,
+            (MonoValue::Int64(n), MonoValue::String(s)) => &n.to_string() == s,
+            (MonoValue::Float32(n), MonoValue::String(s)) => &n.to_string() == s,
+            (MonoValue::Float64(n), MonoValue::String(s)) => &n.to_string() == s,
+            (MonoValue::Bool(b), MonoValue::String(s)) => &b.to_string() == s,
+            (MonoValue::Uuid(u), MonoValue::String(s)) => &u.to_string() == s,
 
             // All other types - direct equality
             _ => a == b,
@@ -2914,6 +2992,18 @@ impl StorageEngine {
         primary_key: &[u8],
         tx: Option<&Transaction>,
     ) -> Result<Option<MonoValue>> {
+        // First try direct lookup for non-versioned key
+        if let Some(tree) = self.storage_trees.get(collection_name) {
+            if let Some(value) = tree.get(primary_key).await? {
+                match MonoValue::from_bytes(&value) {
+                    Ok((mv, _)) => return Ok(Some(mv)),
+                    Err(e) => {
+                        tracing::warn!("Failed to deserialize non-versioned row: {}", e);
+                    }
+                }
+            }
+        }
+
         // Create scan range for this primary key (all versions)
         // Versioned keys are: {pk_bytes}{separator}{timestamp}
         // We scan from pk_bytes to pk_bytes + high byte to get all versions
