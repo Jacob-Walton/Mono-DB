@@ -102,11 +102,7 @@ impl<K: Ord + Clone + Serializable, V: Clone + Serializable> BTree<K, V> {
             (root, 0)
         };
 
-        Ok(Self {
-            store,
-            root,
-            len,
-        })
+        Ok(Self { store, root, len })
     }
     fn save_metadata(&mut self) -> Result<()> {
         let meta = self.store.get_mut(META_PAGE_ID)?;
@@ -123,6 +119,7 @@ impl<K: Ord + Clone + Serializable, V: Clone + Serializable> BTree<K, V> {
     }
 
     #[inline(always)]
+    #[allow(dead_code)]
     fn split_point(&self) -> usize {
         MAX_KEYS / 2
     }

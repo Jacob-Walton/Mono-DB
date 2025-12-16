@@ -297,6 +297,7 @@ impl StorageEngine {
 
     /// Batch insert multiple key-value pairs with WAL durability.
     /// This is much more efficient than calling tree_put_with_wal in a loop.
+    #[allow(dead_code)]
     async fn tree_put_batch_with_wal(
         &self,
         collection: &str,
@@ -945,7 +946,8 @@ impl StorageEngine {
         filter: Option<crate::storage::models::Filter>,
         updates: HashMap<String, MonoValue>,
     ) -> Result<u64> {
-        self.update_many_with_tx(collection, filter, updates, None).await
+        self.update_many_with_tx(collection, filter, updates, None)
+            .await
     }
 
     /// Update with optional transaction context for MVCC.
@@ -985,9 +987,10 @@ impl StorageEngine {
         }
 
         // Scan for all key-value pairs and find matching rows WITH their actual storage keys
-        let tree = self.storage_trees.get(collection).ok_or_else(|| {
-            MonoError::NotFound(format!("collection '{collection}' not found"))
-        })?;
+        let tree = self
+            .storage_trees
+            .get(collection)
+            .ok_or_else(|| MonoError::NotFound(format!("collection '{collection}' not found")))?;
 
         let pairs: Vec<(Vec<u8>, Vec<u8>)> = tree.scan(&[], &[0xFF]).await?;
 
@@ -1035,10 +1038,10 @@ impl StorageEngine {
             };
 
             // Apply filter if present
-            if let Some(ref f) = filter {
-                if !self.apply_filter(&value, f) {
-                    continue;
-                }
+            if let Some(ref f) = filter
+                && !self.apply_filter(&value, f)
+            {
+                continue;
             }
 
             // Extract current row data
@@ -1079,20 +1082,21 @@ impl StorageEngine {
                 // The old version remains; visibility rules will show the new one
                 let tx = tx.unwrap();
                 let pk = base_pk.as_ref().unwrap();
-                
+
                 // Check for write-write conflicts
                 self.check_write_conflict(collection, pk, tx).await?;
-                
+
                 // Create versioned key with this transaction's ID
                 let versioned_key = encode_versioned_key(pk, tx.tx_id);
-                
+
                 // Track in transaction's write set for rollback
-                self.tx_manager.add_to_write_set(tx.tx_id, collection.to_string(), pk.clone());
-                
+                self.tx_manager
+                    .add_to_write_set(tx.tx_id, collection.to_string(), pk.clone());
+
                 // Write the new version
                 self.tree_put_with_wal(collection, versioned_key, new_value_bytes)
                     .await?;
-                
+
                 seen_pks.insert(pk.clone());
             } else {
                 // Auto-commit mode: overwrite the EXACT SAME KEY in place
@@ -1410,17 +1414,17 @@ impl StorageEngine {
         tx: Option<&Transaction>,
     ) -> Result<()> {
         // FAST PATH: In-memory keyspace - bypass all validation/schema lookups
-        if let Data::Row(row) = data {
-            if let Some(memory_store) = self.memory_keyspaces.get(collection_name) {
-                // Extract key and value directly, minimal overhead
-                if let (Some(key), Some(value)) = (row.get("key"), row.get("value")) {
-                    let key_str = match key {
-                        MonoValue::String(s) => s.clone(),
-                        _ => key.to_string(),
-                    };
-                    memory_store.insert(key_str, value.clone());
-                    return Ok(());
-                }
+        if let Data::Row(row) = data
+            && let Some(memory_store) = self.memory_keyspaces.get(collection_name)
+        {
+            // Extract key and value directly, minimal overhead
+            if let (Some(key), Some(value)) = (row.get("key"), row.get("value")) {
+                let key_str = match key {
+                    MonoValue::String(s) => s.clone(),
+                    _ => key.to_string(),
+                };
+                memory_store.insert(key_str, value.clone());
+                return Ok(());
             }
         }
 
@@ -1509,6 +1513,7 @@ impl StorageEngine {
     }
 
     /// Insert a row with a specific version timestamp (for auto-commit or MVCC).
+    #[allow(dead_code)]
     async fn insert_row_with_version(
         &self,
         collection: &str,

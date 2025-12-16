@@ -4,7 +4,10 @@
 
 use std::{collections::VecDeque, path::Path};
 
-use crate::storage::{disk_manager::DiskManager, page::{DiskPage, PAGE_DATA_SIZE, PageId, Serializable}};
+use crate::storage::{
+    disk_manager::DiskManager,
+    page::{DiskPage, PAGE_DATA_SIZE, PageId, Serializable},
+};
 use ahash::AHashMap;
 use monodb_common::Result;
 
@@ -107,12 +110,14 @@ fn deserialize_interior_page<K: Serializable>(buf: &[u8]) -> Result<(Vec<K>, Vec
 // LRU Replacer
 
 /// LRU eviction polciy
+#[allow(dead_code)]
 pub struct LruReplacer {
     lru_list: VecDeque<PageId>,
     page_set: AHashMap<PageId, usize>,
 }
 
 impl LruReplacer {
+    #[allow(dead_code)]
     pub fn new(capacity: usize) -> Self {
         Self {
             lru_list: VecDeque::with_capacity(capacity),
@@ -121,6 +126,7 @@ impl LruReplacer {
     }
 
     #[inline]
+    #[allow(dead_code)]
     pub fn access(&mut self, page_id: PageId) {
         if self.page_set.contains_key(&page_id) {
             self.lru_list.retain(|&p| p != page_id);
@@ -130,6 +136,7 @@ impl LruReplacer {
     }
 
     #[inline]
+    #[allow(dead_code)]
     pub fn pin(&mut self, page_id: PageId) {
         if self.page_set.remove(&page_id).is_some() {
             self.lru_list.retain(|&p| p != page_id);
@@ -137,6 +144,7 @@ impl LruReplacer {
     }
 
     #[inline]
+    #[allow(dead_code)]
     pub fn unpin(&mut self, page_id: PageId) {
         if !self.page_set.contains_key(&page_id) {
             self.lru_list.push_back(page_id);
@@ -145,6 +153,7 @@ impl LruReplacer {
     }
 
     #[inline]
+    #[allow(dead_code)]
     pub fn victim(&mut self) -> Option<PageId> {
         let page_id = self.lru_list.pop_front()?;
         self.page_set.remove(&page_id);
@@ -152,6 +161,7 @@ impl LruReplacer {
     }
 
     #[inline]
+    #[allow(dead_code)]
     pub fn size(&self) -> usize {
         self.lru_list.len()
     }
@@ -364,13 +374,12 @@ impl<K: Clone + Serializable, V: Clone + Serializable> TypedPageStore<K, V> {
     }
 
     fn evict_one(&mut self) -> Result<()> {
-        if let Some(victim_id) = self.lru.pop_front() {
-            if let Some(page) = self.pages.remove(&victim_id) {
-                if page.dirty {
-                    let disk_page = typed_to_disk(&page);
-                    self.disk_manager.write_page(&disk_page)?;
-                }
-            }
+        if let Some(victim_id) = self.lru.pop_front()
+            && let Some(page) = self.pages.remove(&victim_id)
+            && page.dirty
+        {
+            let disk_page = typed_to_disk(&page);
+            self.disk_manager.write_page(&disk_page)?;
         }
         Ok(())
     }

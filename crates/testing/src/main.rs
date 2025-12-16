@@ -20,7 +20,10 @@ async fn get_count(client: &mut Client, table: &str) -> Result<usize> {
         .await
         .context("Failed to get connection from pool")?;
     let sql = format!("count from {table}");
-    let response = conn.execute(sql).await.context("Failed to execute count query")?;
+    let response = conn
+        .execute(sql)
+        .await
+        .context("Failed to execute count query")?;
 
     println!("Count response: {:?}", response);
 
@@ -33,9 +36,8 @@ async fn get_count(client: &mut Client, table: &str) -> Result<usize> {
                     match first_row {
                         Value::Object(map) => {
                             let count_value = map.get("count").context("Count field missing")?;
-                            let count = count_value
-                                .as_i64()
-                                .context("Count field not an integer")?;
+                            let count =
+                                count_value.as_i64().context("Count field not an integer")?;
                             Ok(count as usize)
                         }
                         _ => bail!("Unexpected data format for count result"),
@@ -261,8 +263,14 @@ make table sessions
     let testing_offset = get_count(&mut client_mut, "testing").await.unwrap_or(0);
 
     // Print offsets
-    println!("Existing users count: {}, offsetting IDs by this amount", users_offset);
-    println!("Existing testing count: {}, offsetting IDs by this amount", testing_offset);
+    println!(
+        "Existing users count: {}, offsetting IDs by this amount",
+        users_offset
+    );
+    println!(
+        "Existing testing count: {}, offsetting IDs by this amount",
+        testing_offset
+    );
 
     let relational = BenchConfig {
         name: "Relational table (users)",

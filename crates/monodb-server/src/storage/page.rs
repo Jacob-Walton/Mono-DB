@@ -103,7 +103,9 @@ impl DiskPage {
         if self.data.len() > PAGE_DATA_SIZE {
             panic!(
                 "Page {} data overflow: {} bytes exceeds {} byte limit. This indicates a bug in max_keys calculation.",
-                self.page_id.0, self.data.len(), PAGE_DATA_SIZE
+                self.page_id.0,
+                self.data.len(),
+                PAGE_DATA_SIZE
             );
         }
 
@@ -301,11 +303,15 @@ impl Serializable for String {
 
     fn deserialize_from(buf: &[u8]) -> Result<(Self, usize)> {
         if buf.len() < 4 {
-            return Err(MonoError::Storage("Not enough bytes for String length".into()));
+            return Err(MonoError::Storage(
+                "Not enough bytes for String length".into(),
+            ));
         }
         let len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
         if buf.len() < 4 + len {
-            return Err(MonoError::Storage("Not enough bytes for String data".into()));
+            return Err(MonoError::Storage(
+                "Not enough bytes for String data".into(),
+            ));
         }
         let s = String::from_utf8(buf[4..4 + len].to_vec())
             .map_err(|e| MonoError::Storage(e.to_string()))?;

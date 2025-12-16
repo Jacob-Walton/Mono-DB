@@ -1,5 +1,10 @@
-use std::{fs::{File, OpenOptions}, io::{Read, Seek, SeekFrom, Write}, path::Path, sync::atomic::{AtomicU32, Ordering}};
 use monodb_common::Result;
+use std::{
+    fs::{File, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write},
+    path::Path,
+    sync::atomic::{AtomicU32, Ordering},
+};
 
 use crate::storage::page::{DiskPage, PAGE_SIZE, PageId};
 
@@ -33,6 +38,7 @@ impl DiskManager {
     }
 
     /// Allocate a new page ID
+    #[allow(dead_code)]
     pub fn allocate_page(&self) -> PageId {
         PageId(self.next_page_id.fetch_add(1, Ordering::SeqCst))
     }
@@ -46,6 +52,7 @@ impl DiskManager {
     }
 
     /// Write a page to disk with immediate sync
+    #[allow(dead_code)]
     pub fn write_page_sync(&mut self, page: &DiskPage) -> Result<()> {
         self.write_page(page)?;
         self.file.sync_data()?;
@@ -56,7 +63,7 @@ impl DiskManager {
     pub fn read_page(&mut self, page_id: PageId) -> Result<DiskPage> {
         let offset = page_id.0 as u64 * PAGE_SIZE as u64;
         self.file.seek(SeekFrom::Start(offset))?;
-        
+
         let mut buf = [0u8; PAGE_SIZE];
         self.file.read_exact(&mut buf)?;
 
