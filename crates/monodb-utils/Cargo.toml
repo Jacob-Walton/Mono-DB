@@ -13,5 +13,5 @@ path = "src/mdb_ready.rs"
 [dependencies]
 monodb-common = { path = "../monodb-common" }
 monodb-client = { path = "../monodb-client" }
-tokio = { workspace = true, features = ["full"] }
+tokio.workspace = true
 anyhow.workspace = true
