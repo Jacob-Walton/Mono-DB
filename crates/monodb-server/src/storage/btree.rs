@@ -15,7 +15,6 @@ use crate::storage::{
 };
 
 /// Branchless binary search - finds first index where keys[i] >= key
-/// (faster than branching version for small arrays)
 #[inline(always)]
 fn lower_bound<K: Ord>(keys: &[K], key: &K) -> usize {
     let mut len = keys.len();
@@ -736,5 +735,214 @@ impl StorageTree {
 
     pub fn is_empty(&self) -> bool {
         self.shards.iter().all(|s| s.lock().is_empty())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    pub use super::*;
+
+    #[test]
+    fn test_btree_sequential_inserts() -> Result<()> {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("btree_test.db");
+
+        let mut btree: BTree<i32, String> = BTree::new(&path, 1024)?;
+
+        for i in 0..1000 {
+            btree.insert(i, format!("value{}", i))?;
+        }
+
+        for i in 0..1000 {
+            let value = btree.get(&i)?;
+            assert_eq!(value, Some(format!("value{}", i)));
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_btree_random_inserts() -> Result<()> {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("btree_test_random.db");
+
+        let mut btree: BTree<i32, String> = BTree::new(&path, 1024)?;
+
+        let mut keys: Vec<i32> = (0..1000).collect();
+        use rand::seq::SliceRandom;
+        let mut rng = rand::rng();
+        keys.shuffle(&mut rng);
+
+        for &key in &keys {
+            btree.insert(key, format!("value{}", key))?;
+        }
+
+        for i in 0..1000 {
+            let value = btree.get(&i)?;
+            assert_eq!(value, Some(format!("value{}", i)));
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_point_lookup() -> Result<()> {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("btree_test_lookup.db");
+
+        let mut btree: BTree<i32, String> = BTree::new(&path, 1024)?;
+
+        for i in 0..500 {
+            btree.insert(i, format!("value{}", i))?;
+        }
+
+        for i in 0..500 {
+            let value = btree.get(&i)?;
+            assert_eq!(value, Some(format!("value{}", i)));
+        }
+
+        let missing = btree.get(&1000)?;
+        assert_eq!(missing, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn range_scan_correctness() -> Result<()> {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("btree_test_range.db");
+
+        let mut btree: BTree<i32, String> = BTree::new(&path, 1024)?;
+
+        for i in 0..1000 {
+            btree.insert(i, format!("value{}", i))?;
+        }
+
+        let results = btree.range(&200, &300)?;
+        assert_eq!(results.len(), 100);
+        for (i, (key, value)) in results.iter().enumerate() {
+            assert_eq!(*key, 200 + i as i32);
+            assert_eq!(value, &format!("value{}", 200 + i as i32));
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn page_split_during_insert() -> Result<()> {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("btree_test_split.db");
+
+        let mut btree: BTree<i32, String> = BTree::new(&path, 1024)?;
+
+        for i in 0..200 {
+            btree.insert(i, format!("value{}", i))?;
+        }
+
+        for i in 0..200 {
+            let value = btree.get(&i)?;
+            assert_eq!(value, Some(format!("value{}", i)));
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn delete_operations() -> Result<()> {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("btree_test_delete.db");
+
+        let mut btree: BTree<i32, String> = BTree::new(&path, 1024)?;
+
+        for i in 0..100 {
+            btree.insert(i, format!("value{}", i))?;
+        }
+
+        for i in 0..50 {
+            let deleted = btree.delete(&i)?;
+            assert_eq!(deleted, Some(format!("value{}", i)));
+        }
+
+        for i in 0..50 {
+            let value = btree.get(&i)?;
+            assert_eq!(value, None);
+        }
+
+        for i in 50..100 {
+            let value = btree.get(&i)?;
+            assert_eq!(value, Some(format!("value{}", i)));
+        }
+
+        Ok(())
+    }
+
+    // Sharded storage tests
+    #[tokio::test]
+    async fn test_shard_distribution() -> Result<()> {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("storage_tree_test.db");
+
+        let storage_tree = StorageTree::new(&path, "test_tree".to_string(), 2048)?;
+
+        let mut counts = [0; NUM_SHARDS];
+
+        for i in 0..1000 {
+            let key = format!("key{}", i).into_bytes();
+            let shard_idx = shard_for_key(&key);
+            counts[shard_idx] += 1;
+            storage_tree
+                .put_no_wal(key, format!("value{}", i).into_bytes())
+                .await?;
+        }
+
+        // Ensure that each shard has received some entries
+        for (i, count) in counts.iter().enumerate() {
+            assert!(*count > 0, "Shard {} received no entries", i);
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_access_across_shards() -> Result<()> {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("storage_tree_concurrent_test.db");
+
+        use std::sync::Arc;
+        let storage_tree = Arc::new(StorageTree::new(
+            &path,
+            "concurrent_tree".to_string(),
+            4096,
+        )?);
+
+        let mut handles = Vec::new();
+
+        for shard_idx in 0..NUM_SHARDS {
+            let tree_clone = Arc::clone(&storage_tree);
+            let handle = tokio::spawn(async move {
+                for i in 0..250 {
+                    let key = format!("shard{}_key{}", shard_idx, i).into_bytes();
+                    let value = format!("shard{}_value{}", shard_idx, i).into_bytes();
+                    tree_clone.put_no_wal(key, value).await.unwrap();
+                }
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // Verify entries
+        for shard_idx in 0..NUM_SHARDS {
+            for i in 0..250 {
+                let key = format!("shard{}_key{}", shard_idx, i).into_bytes();
+                let expected_value = format!("shard{}_value{}", shard_idx, i).into_bytes();
+                let value = storage_tree.get(&key).await?;
+                assert_eq!(value, Some(expected_value));
+            }
+        }
+
+        Ok(())
     }
 }

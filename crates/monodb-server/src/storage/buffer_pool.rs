@@ -447,3 +447,192 @@ impl<K: Clone + Serializable, V: Clone + Serializable> Drop for TypedPageStore<K
         let _ = self.flush_all();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use monodb_common::Result;
+
+    /// Create auto-cleanup test directory that deletes itself when dropped
+    struct TestDir {
+        path: std::path::PathBuf,
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn create_test_dir(name: &str) -> TestDir {
+        let test_dir = std::path::PathBuf::from(format!("test_data/{}", name));
+        if test_dir.exists() {
+            std::fs::remove_dir_all(&test_dir).unwrap();
+        }
+        std::fs::create_dir_all(&test_dir).unwrap();
+        TestDir { path: test_dir }
+    }
+
+    // TypedPageStore tests
+
+    #[test]
+    fn page_allocation_and_caching() -> Result<()> {
+        let test_dir = create_test_dir("page_allocation_and_caching");
+        let db_path = test_dir.path.join("test_db");
+        let mut store: TypedPageStore<u32, String> = TypedPageStore::new(&db_path, 2)?;
+
+        let page_id1 = store.alloc_leaf()?;
+        let page_id2 = store.alloc_interior()?;
+
+        {
+            let leaf_page = store.get_mut(page_id1)?;
+            leaf_page.keys.push(1);
+            leaf_page.values.push("value1".to_string());
+        }
+
+        {
+            let interior_page = store.get_mut(page_id2)?;
+            interior_page.keys.push(10);
+            interior_page.children.push(PageId(3));
+        }
+
+        // Access pages to ensure they are cached
+        let _ = store.get(page_id1)?;
+        let _ = store.get(page_id2)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn lru_eviction() -> Result<()> {
+        let test_dir = create_test_dir("lru_eviction");
+        let db_path = test_dir.path.join("test_db");
+        let mut store: TypedPageStore<u32, String> = TypedPageStore::new(&db_path, 2)?;
+
+        let page_id1 = store.alloc_leaf()?;
+        let page_id2 = store.alloc_interior()?;
+
+        // Access both pages
+        let _ = store.get(page_id1)?;
+        let _ = store.get(page_id2)?;
+
+        // Allocate a third page, should evict the least recently used (page_id1)
+        let page_id3 = store.alloc_leaf()?;
+
+        assert!(store.pages.contains_key(&page_id2));
+        assert!(store.pages.contains_key(&page_id3));
+        assert!(!store.pages.contains_key(&page_id1));
+
+        Ok(())
+    }
+
+    #[test]
+    fn dirty_page_flushing() -> Result<()> {
+        let test_dir = create_test_dir("dirty_page_flushing");
+        let db_path = test_dir.path.join("test_db");
+        let mut store: TypedPageStore<u32, String> = TypedPageStore::new(&db_path, 2)?;
+
+        let page_id = store.alloc_leaf()?;
+
+        {
+            let leaf_page = store.get_mut(page_id)?;
+            leaf_page.keys.push(1);
+            leaf_page.values.push("value1".to_string());
+        }
+
+        store.flush_all()?;
+
+        let disk_page = store.disk_manager.read_page(page_id)?;
+        let restored_leaf = disk_to_typed::<u32, String>(&disk_page)?;
+
+        assert_eq!(restored_leaf.keys, vec![1]);
+        assert_eq!(restored_leaf.values, vec!["value1".to_string()]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn cache_hit_rate() -> Result<()> {
+        let test_dir = create_test_dir("cache_hit_rate");
+        let db_path = test_dir.path.join("test_db");
+        let mut store: TypedPageStore<u32, String> = TypedPageStore::new(&db_path, 2)?;
+
+        let page_id = store.alloc_leaf()?;
+
+        // First access, should be a miss
+        let _ = store.get(page_id)?;
+
+        // Second access, should be a hit
+        let _ = store.get(page_id)?;
+
+        assert_eq!(store.stats().used_frames, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn disk_page_round_trip() -> Result<()> {
+        let mut leaf_page = TypedPage::new_leaf(PageId(1));
+        leaf_page.keys = vec![1u32, 2, 3];
+        leaf_page.values = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+
+        let disk_page = typed_to_disk(&leaf_page);
+        let restored_leaf = disk_to_typed::<u32, String>(&disk_page)?;
+
+        assert_eq!(leaf_page.keys, restored_leaf.keys);
+        assert_eq!(leaf_page.values, restored_leaf.values);
+        assert!(restored_leaf.is_leaf);
+
+        let mut interior_page: TypedPage<u32, String> = TypedPage::new_interior(PageId(2));
+        interior_page.keys = vec![10u32, 20, 30];
+        interior_page.children = vec![PageId(3), PageId(4), PageId(5), PageId(6)];
+
+        let disk_page = typed_to_disk(&interior_page);
+        let restored_interior = disk_to_typed::<u32, String>(&disk_page)?;
+
+        assert_eq!(interior_page.keys, restored_interior.keys);
+        assert_eq!(interior_page.children, restored_interior.children);
+        assert!(!restored_interior.is_leaf);
+
+        Ok(())
+    }
+
+    #[test]
+    fn checksum_validation() -> Result<()> {
+        let mut leaf_page = TypedPage::new_leaf(PageId(1));
+        leaf_page.keys = vec![1u32, 2, 3];
+        leaf_page.values = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+
+        let disk_page = typed_to_disk(&leaf_page);
+        let mut corrupted_disk_page = disk_page.clone();
+        corrupted_disk_page.data[0] ^= 0xFF; // Corrupt the data
+
+        let result = disk_to_typed::<u32, String>(&corrupted_disk_page);
+        assert!(
+            result.is_err(),
+            "Checksum validation should fail for corrupted data"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn variable_length_key_serialization() -> Result<()> {
+        let mut leaf_page = TypedPage::new_leaf(PageId(1));
+        leaf_page.keys = vec![
+            "short".to_string(),
+            "a bit longer key".to_string(),
+            "the longest key of all three".to_string(),
+        ];
+        leaf_page.values = vec!["val1".to_string(), "val2".to_string(), "val3".to_string()];
+
+        let disk_page = typed_to_disk(&leaf_page);
+        let restored_leaf = disk_to_typed::<String, String>(&disk_page)?;
+
+        assert_eq!(leaf_page.keys, restored_leaf.keys);
+        assert_eq!(leaf_page.values, restored_leaf.values);
+        assert!(restored_leaf.is_leaf);
+
+        Ok(())
+    }
+}
