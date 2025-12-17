@@ -597,55 +597,52 @@ impl<'a> Parser<'a> {
             filter = Some(self.parse_where_clause()?);
         }
 
-        // Parse set clause
-        if self.check_keyword("set") {
-            self.advance();
+        // Parse assignments (multi-line with indent or one-liner)
+        if self.check(TokenKind::Newline) {
+            self.skip_newlines();
+            if self.check(TokenKind::Indent) {
+                self.advance();
 
-            // Handle both one-liner and multi-line
-            if self.check(TokenKind::Newline) {
-                self.skip_newlines();
-                if self.check(TokenKind::Indent) {
-                    self.advance();
-
-                    while !self.check(TokenKind::Dedent) && !self.is_at_end() {
-                        self.skip_newlines();
-                        if self.check(TokenKind::Dedent) {
-                            break;
-                        }
-
-                        if self.check_keyword("with") {
-                            extensions.push(self.parse_extension()?);
-                        } else {
-                            let key = self.expect_identifier()?;
-                            self.expect(TokenKind::Equals)?;
-                            let value = self.parse_expr()?;
-                            changes.push(Assignment { key, value });
-                        }
-                        self.skip_newlines();
+                while !self.check(TokenKind::Dedent) && !self.is_at_end() {
+                    self.skip_newlines();
+                    if self.check(TokenKind::Dedent) {
+                        break;
                     }
 
-                    self.expect(TokenKind::Dedent)?;
-                }
-            } else {
-                // One-liner
-                loop {
                     if self.check_keyword("with") {
                         extensions.push(self.parse_extension()?);
-                        if !self.check(TokenKind::Comma) {
-                            break;
-                        }
-                        self.advance();
                     } else {
                         let key = self.expect_identifier()?;
                         self.expect(TokenKind::Equals)?;
                         let value = self.parse_expr()?;
                         changes.push(Assignment { key, value });
-
-                        if !self.check(TokenKind::Comma) {
-                            break;
-                        }
-                        self.advance();
                     }
+                    self.skip_newlines();
+                }
+
+                self.expect(TokenKind::Dedent)?;
+            }
+        } else {
+            // One-liner: change users where id = 1, name = "new"
+            loop {
+                if self.check_keyword("with") {
+                    extensions.push(self.parse_extension()?);
+                    if !self.check(TokenKind::Comma) {
+                        break;
+                    }
+                    self.advance();
+                } else if self.check(TokenKind::Identifier) {
+                    let key = self.expect_identifier()?;
+                    self.expect(TokenKind::Equals)?;
+                    let value = self.parse_expr()?;
+                    changes.push(Assignment { key, value });
+
+                    if !self.check(TokenKind::Comma) {
+                        break;
+                    }
+                    self.advance();
+                } else {
+                    break;
                 }
             }
         }

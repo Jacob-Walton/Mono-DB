@@ -101,9 +101,17 @@ pub struct Config {
 
 impl Config {
     /// Load config from a TOML file. If the file does not exist, returns Default.
-    /// After loading from file, environment variables (MONODB_*) are applied to override values.
+    /// After loading from file, environment variables (MONODB_*, MDB_*) are applied to override values.
+    /// If MDB_CONFIG is set, it overrides the config file path.
     pub fn load_from_path<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
-        let content = match fs::read_to_string(&path) {
+        // Check for MDB_CONFIG env var to override config file path
+        let config_path = if let Ok(env_path) = env::var("MDB_CONFIG") {
+            env_path.into()
+        } else {
+            path.as_ref().to_path_buf()
+        };
+
+        let content = match fs::read_to_string(&config_path) {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // No config file: use defaults
@@ -125,42 +133,17 @@ impl Config {
     /// MONODB_DATA_DIR, MONODB_BUFFER_POOL_SIZE, MONODB_USE_LSM, MONODB_PAGE_SIZE,
     /// MONODB_MEMTABLE_SIZE
     pub fn apply_env_overrides(&mut self) {
-        if let Ok(v) = env::var("MONODB_HOST") {
+        // Only MDB_* overrides
+        if let Ok(v) = env::var("MDB_HOST") {
             self.server.host = v;
         }
-        if let Ok(v) = env::var("MONODB_PORT")
+        if let Ok(v) = env::var("MDB_PORT")
             && let Ok(p) = v.parse::<u16>()
         {
             self.server.port = p;
         }
-        // if let Ok(v) = env::var("MONODB_MAX_CONNECTIONS") {
-        //     if let Ok(n) = v.parse::<usize>() {
-        //         self.server.max_connections = n;
-        //     }
-        // }
-        if let Ok(v) = env::var("MONODB_DATA_DIR") {
+        if let Ok(v) = env::var("MDB_DATA_DIR") {
             self.storage.data_dir = v;
         }
-        if let Ok(v) = env::var("MONODB_BUFFER_POOL_SIZE")
-            && let Ok(n) = v.parse::<usize>()
-        {
-            self.storage.buffer_pool_size = n;
-        }
-        if let Ok(v) = env::var("MONODB_USE_LSM")
-            && let Ok(b) = v.parse::<bool>()
-        {
-            self.storage.use_lsm = b;
-        }
-        if let Ok(v) = env::var("MONODB_PAGE_SIZE")
-            && let Ok(n) = v.parse::<usize>()
-        {
-            self.storage.page_size = n;
-        }
-        if let Ok(v) = env::var("MONODB_MEMTABLE_SIZE")
-            && let Ok(n) = v.parse::<usize>()
-        {
-            self.storage.lsm.memtable_size = n;
-        }
-        // Additional overrides will be added
     }
 }

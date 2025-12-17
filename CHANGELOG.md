@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.2.5] - 2025-12-17
+
+### Added
+
+- Introduced a new B+Tree data structure for efficient indexing and range queries.
+- Added a new utility crate with the `mdb_ready` tool for server readiness checks.
+- Added `Serializable` trait implementations for common types (i32, i64, u32, u64, String, Vec<u8>).
+
+### Changed
+
+- Improved cross-platform build logic in `tasks.py` (now detects RAM and CPU count on Windows, Linux, macOS; removed psutil dependency).
+- Refactored and expanded test coverage for database operations and performance.
+
+### Removed
+
+- Old in-memory BTree and legacy test code in favor of client-driven, end-to-end benchmarks.
+- LSM tree storage backend.
+
 ## [0.2.4] - 2025-12-15
 
 ### Added

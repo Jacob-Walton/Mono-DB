@@ -15,6 +15,8 @@ use tokio::{
     net::TcpStream,
 };
 
+use crate::results::QueryResult;
+
 /// Represents a connection to the server.
 ///
 /// Handles sending requests and receiving responses.
@@ -111,7 +113,7 @@ impl Connection {
         }
     }
 
-    pub async fn execute(&mut self, query: String) -> Result<Response> {
+    pub async fn execute(&mut self, query: String) -> Result<QueryResult> {
         let request = Request::Execute {
             query,
             params: Vec::new(),
@@ -124,16 +126,10 @@ impl Connection {
             .await
             .map_err(|e| MonoError::Execution(e.to_string()))?;
 
-        match response {
-            Response::Success { .. } => Ok(response),
-            Response::Error { code: _, message } => Err(MonoError::Execution(message)),
-            other => Err(MonoError::Execution(format!(
-                "Unexpected response: {other:?}"
-            ))),
-        }
+        QueryResult::from_response(response)
     }
 
-    pub async fn list_tables(&mut self) -> Result<Response> {
+    pub async fn list_tables(&mut self) -> Result<QueryResult> {
         let request = Request::List {};
 
         let response = self
@@ -141,12 +137,6 @@ impl Connection {
             .await
             .map_err(|e| MonoError::Execution(e.to_string()))?;
 
-        match response {
-            Response::Success { .. } => Ok(response),
-            Response::Error { code: _, message } => Err(MonoError::Execution(message)),
-            other => Err(MonoError::Execution(format!(
-                "Unexpected response: {other:?}"
-            ))),
-        }
+        QueryResult::from_response(response)
     }
 }

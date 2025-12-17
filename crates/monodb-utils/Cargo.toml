@@ -1,14 +1,17 @@
 [package]
-name = "monodb-client"
+name = "monodb-utils"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "mdb_ready"
+path = "src/mdb_ready.rs"
+
 [dependencies]
-tokio.workspace = true
-bytes.workspace = true
-indexmap.workspace = true
 monodb-common = { path = "../monodb-common" }
-parking_lot = "0.12.5"
+monodb-client = { path = "../monodb-client" }
+tokio.workspace = true
+anyhow.workspace = true

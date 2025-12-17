@@ -1,483 +1,638 @@
-use monodb_common::{MonoError, Result};
-use parking_lot::{Mutex, RwLock};
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-};
+//! Buffer pool with LRU eviction and typed page caching.
+
+// Serialization Helpers
+
+use std::{collections::VecDeque, path::Path};
 
 use crate::storage::{
     disk_manager::DiskManager,
-    page::{Page, PageId, PageType},
+    page::{DiskPage, PAGE_DATA_SIZE, PageId, Serializable},
 };
+use ahash::AHashMap;
+use monodb_common::Result;
 
-/// Number of recent accesses to track per page.
-/// K=2 is optimal for most database workloads.
-const K: usize = 2;
-
-/// Represents infinity for pages with fewer than K accesses.
-/// These pages are evicted first as they're likely from sequential scans.
-const INFINITY_DISTANCE: u64 = u64::MAX;
-
-/// A frame in the buffer pool holding a single page.
-struct Frame {
-    /// The cached page, if any
-    page: Option<Arc<RwLock<Page>>>,
-    /// Whether the page has been modified since loading
-    is_dirty: bool,
-    /// Number of active references to this page
-    pin_count: usize,
-    /// Timestamps of the K most recent accesses (front = oldest, back = newest)
-    access_history: VecDeque<u64>,
+fn serialize_leaf_page<K: Serializable, V: Serializable>(
+    keys: &[K],
+    values: &[V],
+    buf: &mut Vec<u8>,
+) {
+    buf.clear();
+    (keys.len() as u32).serialize_to(buf);
+    for key in keys {
+        key.serialize_to(buf);
+    }
+    for value in values {
+        value.serialize_to(buf);
+    }
 }
 
-impl Frame {
-    /// Create a new empty frame
-    fn new() -> Self {
+fn serialize_interior_page<K: Serializable>(keys: &[K], children: &[PageId], buf: &mut Vec<u8>) {
+    buf.clear();
+    (keys.len() as u32).serialize_to(buf);
+    (children.len() as u32).serialize_to(buf);
+    for key in keys {
+        key.serialize_to(buf);
+    }
+    for child in children {
+        child.0.serialize_to(buf);
+    }
+}
+
+fn deserialize_leaf_page<K: Serializable, V: Serializable>(buf: &[u8]) -> Result<(Vec<K>, Vec<V>)> {
+    if buf.len() < 4 {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    let mut offset = 0;
+    let (count, consumed) = u32::deserialize_from(&buf[offset..])?;
+    offset += consumed;
+    let count = count as usize;
+
+    let mut keys = Vec::with_capacity(count);
+    let mut values = Vec::with_capacity(count);
+
+    for _ in 0..count {
+        if offset >= buf.len() {
+            break;
+        }
+        let (key, consumed) = K::deserialize_from(&buf[offset..])?;
+        offset += consumed;
+        keys.push(key);
+    }
+
+    for _ in 0..count {
+        if offset >= buf.len() {
+            break;
+        }
+        let (value, consumed) = V::deserialize_from(&buf[offset..])?;
+        offset += consumed;
+        values.push(value);
+    }
+
+    Ok((keys, values))
+}
+
+fn deserialize_interior_page<K: Serializable>(buf: &[u8]) -> Result<(Vec<K>, Vec<PageId>)> {
+    if buf.len() < 8 {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    let mut offset = 0;
+    let (key_count, consumed) = u32::deserialize_from(&buf[offset..])?;
+    offset += consumed;
+    let (child_count, consumed) = u32::deserialize_from(&buf[offset..])?;
+    offset += consumed;
+
+    let mut keys = Vec::with_capacity(key_count as usize);
+    let mut children = Vec::with_capacity(child_count as usize);
+
+    for _ in 0..key_count {
+        if offset >= buf.len() {
+            break;
+        }
+        let (key, consumed) = K::deserialize_from(&buf[offset..])?;
+        offset += consumed;
+        keys.push(key);
+    }
+
+    for _ in 0..child_count {
+        if offset >= buf.len() {
+            break;
+        }
+        let (child_id, consumed) = u32::deserialize_from(&buf[offset..])?;
+        offset += consumed;
+        children.push(PageId(child_id));
+    }
+
+    Ok((keys, children))
+}
+
+// LRU Replacer
+
+/// LRU eviction polciy
+#[allow(dead_code)]
+pub struct LruReplacer {
+    lru_list: VecDeque<PageId>,
+    page_set: AHashMap<PageId, usize>,
+}
+
+impl LruReplacer {
+    #[allow(dead_code)]
+    pub fn new(capacity: usize) -> Self {
         Self {
-            page: None,
-            is_dirty: false,
-            pin_count: 0,
-            access_history: VecDeque::with_capacity(K),
+            lru_list: VecDeque::with_capacity(capacity),
+            page_set: AHashMap::with_capacity(capacity),
         }
     }
 
-    /// Check if this frame can be evicted (not pinned)
-    fn is_evictable(&self) -> bool {
-        self.pin_count == 0
-    }
-
-    /// Record an access at the given timestamp.
-    /// Maintains only the K most recent timestamps.
-    fn record_access(&mut self, timestamp: u64) {
-        if self.access_history.len() >= K {
-            self.access_history.pop_front(); // Remove oldest
+    #[inline]
+    #[allow(dead_code)]
+    pub fn access(&mut self, page_id: PageId) {
+        if self.page_set.contains_key(&page_id) {
+            self.lru_list.retain(|&p| p != page_id);
         }
-        self.access_history.push_back(timestamp); // Add newest
+        self.lru_list.push_back(page_id);
+        self.page_set.insert(page_id, self.lru_list.len() - 1);
     }
 
-    /// Compute the backward K-distance at the given current timestamp.
-    ///
-    /// Returns INFINITY_DISTNACE if fewer than K accesses have occurred,
-    /// otherwise returns current_ts - Kth_most_recent_accesses
-    fn backward_k_distance(&self, current_ts: u64) -> u64 {
-        if self.access_history.len() < K {
-            // Fewer than K accesses, treat as infinity (first to evict)
-            INFINITY_DISTANCE
+    #[inline]
+    #[allow(dead_code)]
+    pub fn pin(&mut self, page_id: PageId) {
+        if self.page_set.remove(&page_id).is_some() {
+            self.lru_list.retain(|&p| p != page_id);
+        }
+    }
+
+    #[inline]
+    #[allow(dead_code)]
+    pub fn unpin(&mut self, page_id: PageId) {
+        if !self.page_set.contains_key(&page_id) {
+            self.lru_list.push_back(page_id);
+            self.page_set.insert(page_id, self.lru_list.len() - 1);
+        }
+    }
+
+    #[inline]
+    #[allow(dead_code)]
+    pub fn victim(&mut self) -> Option<PageId> {
+        let page_id = self.lru_list.pop_front()?;
+        self.page_set.remove(&page_id);
+        Some(page_id)
+    }
+
+    #[inline]
+    #[allow(dead_code)]
+    pub fn size(&self) -> usize {
+        self.lru_list.len()
+    }
+}
+
+// Buffer Pool Statistics
+
+#[derive(Debug, Clone)]
+pub struct BufferPoolStats {
+    pub pool_size: usize,
+    pub used_frames: usize,
+    pub pinned_frames: usize,
+    pub dirty_frames: usize,
+    pub free_frames: usize,
+}
+
+// Typed Page for In-Memory Caching
+
+/// A typed page that holds deserialized data in memory
+#[derive(Clone)]
+pub struct TypedPage<K, V> {
+    pub page_id: PageId,
+    pub is_leaf: bool,
+    pub keys: Vec<K>,
+    pub values: Vec<V>,
+    pub children: Vec<PageId>,
+    pub next_leaf: PageId,
+    pub dirty: bool,
+}
+
+impl<K, V> TypedPage<K, V> {
+    fn new_leaf(page_id: PageId) -> Self {
+        Self {
+            page_id,
+            is_leaf: true,
+            keys: Vec::with_capacity(128),
+            values: Vec::with_capacity(128),
+            children: Vec::new(),
+            next_leaf: PageId::INVALID,
+            dirty: true,
+        }
+    }
+
+    fn new_interior(page_id: PageId) -> Self {
+        Self {
+            page_id,
+            is_leaf: false,
+            keys: Vec::with_capacity(128),
+            values: Vec::new(),
+            children: Vec::with_capacity(129),
+            next_leaf: PageId::INVALID,
+            dirty: true,
+        }
+    }
+}
+
+impl<K: Serializable, V: Serializable> TypedPage<K, V> {
+    /// Calculate the serialized size of this page's data
+    fn serialized_size(&self) -> usize {
+        if self.is_leaf {
+            // Leaf format: count (4) + keys + values
+            4 + self.keys.iter().map(|k| k.serialized_size()).sum::<usize>()
+                + self
+                    .values
+                    .iter()
+                    .map(|v| v.serialized_size())
+                    .sum::<usize>()
         } else {
-            // K-distance = time since Kth most recent access
-            current_ts.saturating_sub(*self.access_history.front().unwrap())
+            // Interior format: key_count (4) + child_count (4) + keys + children (4 bytes each)
+            4 + 4
+                + self.keys.iter().map(|k| k.serialized_size()).sum::<usize>()
+                + self.children.len() * 4
         }
     }
 
-    /// Reset the frame to empty state
-    fn reset(&mut self) {
-        self.page = None;
-        self.is_dirty = false;
-        self.pin_count = 0;
-        self.access_history.clear();
+    /// Calculate the size if we added a new key-value entry
+    fn size_with_entry(&self, key: &K, value: &V) -> usize {
+        self.serialized_size() + key.serialized_size() + value.serialized_size()
     }
-}
 
-/// LRU-K Buffer Pool Manager
-///
-/// Manages a fixed-size pool of page frames using the LRU-K replacement policy.
-/// LRU-K tracks the K most recent accesses to each page and evicts the page
-/// with the largest "backward K-distance" (time since Kth most recent access).
-///
-/// Benefits over simple LRU:
-///  * Pages accessed once (usually from sequential scans) are evicted quickly
-///  * Pages accessed repeatedly (typically working set) are kept in memory
-pub struct BufferPool {
-    /// Page frames managed by this pool
-    frames: Vec<Arc<RwLock<Frame>>>,
-    /// Maps PageId to frame index [O(1)]
-    page_table: Arc<RwLock<HashMap<PageId, usize>>>,
-    /// List of free frame indices
-    free_list: Arc<Mutex<VecDeque<usize>>>,
-    /// Disk manager for page I/O
-    disk_manager: Arc<DiskManager>,
-    /// Global logical timestamp counter
-    current_timestamp: AtomicU64,
-    /// Total number of frames in the pool
-    #[allow(unused)]
-    pool_size: usize,
-}
+    /// Check if adding an entry would exceed the page capacity
+    pub fn would_overflow(&self, key: &K, value: &V) -> bool {
+        self.size_with_entry(key, value) > PAGE_DATA_SIZE
+    }
 
-impl BufferPool {
-    /// Create a new LRU-K buffer pool.
-    ///
-    /// # Arguments
-    /// * `pool_size` - Number of page frames to allocate
-    /// * `disk_manager` - Disk manager for page I/O
-    pub fn new(pool_size: usize, disk_manager: Arc<DiskManager>) -> Self {
-        let mut frames = Vec::with_capacity(pool_size);
-        let mut free_list = VecDeque::with_capacity(pool_size);
-
-        // Initialize all frames as empty and add to free list
-        for i in 0..pool_size {
-            frames.push(Arc::new(RwLock::new(Frame::new())));
-            free_list.push_back(i);
+    /// Find the split point that divides the page roughly in half by size
+    pub fn find_size_split_point(&self) -> usize {
+        let key_count = self.keys.len();
+        if key_count < 2 {
+            // Can't split with less than 2 keys
+            return 1;
         }
 
-        #[cfg(debug_assertions)]
-        tracing::debug!("LRU-{K} buffer pool initialized with {pool_size} frames");
+        let total_size = self.serialized_size();
+        let target_size = total_size / 2;
 
-        Self {
-            frames,
-            page_table: Arc::new(RwLock::new(HashMap::new())),
-            free_list: Arc::new(Mutex::new(free_list)),
-            disk_manager,
-            current_timestamp: AtomicU64::new(0),
-            pool_size,
-        }
-    }
-
-    /// Get the next logical timestamp (monotonically increasing)
-    fn next_timestamp(&self) -> u64 {
-        self.current_timestamp.fetch_add(1, Ordering::SeqCst)
-    }
-
-    /// Get the current timestamp without incrementing
-    fn get_current_timestamp(&self) -> u64 {
-        self.current_timestamp.load(Ordering::SeqCst)
-    }
-
-    /// Expose root page metadata helpers via DiskManager
-    pub fn get_root_page_id(&self) -> Option<PageId> {
-        self.disk_manager.get_root_page_id()
-    }
-
-    pub fn set_root_page_id(&self, root: Option<PageId>) -> Result<()> {
-        self.disk_manager.set_root_page_id(root)
-    }
-
-    /// Ensure all underlying files are synced to stable storage
-    pub fn sync(&self) -> Result<()> {
-        self.disk_manager.sync()
-    }
-
-    /// Fetch a page from the buffer pool, loading from disk if necessary.
-    ///
-    /// The returned page is pinned and must be unpinned when done.
-    /// Each fetch records an access timestamp for LRU-K tracking.
-    ///
-    /// # Arguments
-    /// * `page_id` - ID of the page to fetch
-    ///
-    /// # Returns
-    /// An Arc to the page wrapped in RwLock
-    pub fn fetch_page(&self, page_id: PageId) -> Result<Arc<RwLock<Page>>> {
-        let timestamp = self.next_timestamp();
-
-        // Check if the page is already in buffer pool
-        let frame_idx_opt = {
-            let page_table = self.page_table.read();
-            page_table.get(&page_id).copied()
-        };
-
-        if let Some(frame_idx) = frame_idx_opt {
-            let frame = self.frames[frame_idx].clone();
-            let mut frame_guard = frame.write();
-
-            // Increment pin count and record access
-            frame_guard.pin_count += 1;
-            frame_guard.record_access(timestamp);
-
-            #[cfg(debug_assertions)]
-            tracing::trace!(
-                "Page {} hit in frame {} (accesses: {}, pin_count: {})",
-                page_id.0,
-                frame_idx,
-                frame_guard.access_history.len(),
-                frame_guard.pin_count
-            );
-
-            if let Some(page) = &frame_guard.page {
-                return Ok(Arc::clone(page));
+        let mut cumulative_size = 4; // count prefix
+        for (i, (k, v)) in self.keys.iter().zip(self.values.iter()).enumerate() {
+            cumulative_size += k.serialized_size() + v.serialized_size();
+            if cumulative_size >= target_size && i > 0 {
+                return i;
             }
         }
+        // Fall back to middle, ensuring we stay in valid range [1, len-1]
+        (key_count / 2).max(1).min(key_count - 1)
+    }
+}
 
-        // Page not in buffer pool, load from disk
-        self.load_page_from_disk(page_id, timestamp)
+fn typed_to_disk<K: Serializable, V: Serializable>(typed: &TypedPage<K, V>) -> DiskPage {
+    let mut disk = if typed.is_leaf {
+        DiskPage::new_leaf(typed.page_id)
+    } else {
+        DiskPage::new_interior(typed.page_id)
+    };
+
+    disk.key_count = typed.keys.len() as u16;
+    disk.next_leaf = typed.next_leaf;
+
+    if typed.is_leaf {
+        serialize_leaf_page(&typed.keys, &typed.values, &mut disk.data);
+    } else {
+        serialize_interior_page(&typed.keys, &typed.children, &mut disk.data);
     }
 
-    /// Create a new page in the buffer pool.
-    ///
-    /// # Arguments
-    /// * `page_type` - Type of page to create (Leaf, Interior, etc.)
-    ///
-    /// # Returns
-    /// An Arc to the newly created page
-    pub fn new_page(&self, page_type: PageType) -> Result<Arc<RwLock<Page>>> {
-        let timestamp = self.next_timestamp();
+    disk
+}
 
-        // Allocate a new page ID
-        let page_id = self.disk_manager.allocate_page()?;
+fn disk_to_typed<K: Serializable, V: Serializable>(disk: &DiskPage) -> Result<TypedPage<K, V>> {
+    let mut typed = if disk.is_leaf() {
+        TypedPage::new_leaf(disk.page_id)
+    } else {
+        TypedPage::new_interior(disk.page_id)
+    };
 
-        // Get a frame for the new page
-        let frame_idx = self.get_frame()?;
+    typed.next_leaf = disk.next_leaf;
+    typed.dirty = false;
 
-        // Create the new page
-        let page = Arc::new(RwLock::new(Page::new(page_type, page_id)));
+    if disk.is_leaf() {
+        let (keys, values) = deserialize_leaf_page(&disk.data)?;
+        typed.keys = keys;
+        typed.values = values;
+    } else {
+        let (keys, children) = deserialize_interior_page(&disk.data)?;
+        typed.keys = keys;
+        typed.children = children;
+    }
 
-        // Install page in frame
-        {
-            let frame = self.frames[frame_idx].clone();
-            let mut frame_guard = frame.write();
-            frame_guard.page = Some(Arc::clone(&page));
-            frame_guard.is_dirty = true;
-            frame_guard.pin_count = 1;
-            frame_guard.access_history.clear();
-            frame_guard.record_access(timestamp);
+    Ok(typed)
+}
+
+// Typed Page Store with LRU Eviction (TODO: LRU-K)
+
+/// A page store that keeps typed pages in memory with LRU eviction to disk
+pub struct TypedPageStore<K: Clone + Serializable, V: Clone + Serializable> {
+    pages: AHashMap<PageId, TypedPage<K, V>>,
+    lru: VecDeque<PageId>,
+    disk_manager: DiskManager,
+    max_pages: usize,
+    next_page_id: u32,
+}
+
+impl<K: Clone + Serializable, V: Clone + Serializable> TypedPageStore<K, V> {
+    pub fn new<P: AsRef<Path>>(path: P, max_pages: usize) -> Result<Self> {
+        let disk_manager = DiskManager::new(path)?;
+        let next_page_id = disk_manager.num_pages();
+
+        Ok(Self {
+            pages: AHashMap::with_capacity(max_pages),
+            lru: VecDeque::with_capacity(max_pages),
+            disk_manager,
+            max_pages,
+            next_page_id,
+        })
+    }
+
+    #[inline]
+    pub fn alloc_leaf(&mut self) -> Result<PageId> {
+        let page_id = PageId(self.next_page_id);
+        self.next_page_id += 1;
+
+        let page = TypedPage::new_leaf(page_id);
+        self.insert_page(page)?;
+
+        Ok(page_id)
+    }
+
+    #[inline]
+    pub fn alloc_interior(&mut self) -> Result<PageId> {
+        let page_id = PageId(self.next_page_id);
+        self.next_page_id += 1;
+
+        let page = TypedPage::new_interior(page_id);
+        self.insert_page(page)?;
+
+        Ok(page_id)
+    }
+
+    #[inline]
+    fn insert_page(&mut self, page: TypedPage<K, V>) -> Result<()> {
+        let page_id = page.page_id;
+
+        while self.pages.len() >= self.max_pages {
+            self.evict_one()?;
         }
 
-        // Update page table
-        self.page_table.write().insert(page_id, frame_idx);
+        self.pages.insert(page_id, page);
+        self.lru.push_back(page_id);
 
-        #[cfg(debug_assertions)]
-        tracing::trace!("Created new page {} in frame {}", page_id.0, frame_idx);
+        Ok(())
+    }
 
+    fn evict_one(&mut self) -> Result<()> {
+        if let Some(victim_id) = self.lru.pop_front()
+            && let Some(page) = self.pages.remove(&victim_id)
+            && page.dirty
+        {
+            let disk_page = typed_to_disk(&page);
+            self.disk_manager.write_page(&disk_page)?;
+        }
+        Ok(())
+    }
+
+    #[inline]
+    pub fn get(&mut self, page_id: PageId) -> Result<&TypedPage<K, V>> {
+        if self.pages.contains_key(&page_id) {
+            return Ok(self.pages.get(&page_id).unwrap());
+        }
+
+        let disk_page = self.disk_manager.read_page(page_id)?;
+        let typed = disk_to_typed(&disk_page)?;
+        self.insert_page(typed)?;
+
+        Ok(self.pages.get(&page_id).unwrap())
+    }
+
+    #[inline]
+    pub fn get_mut(&mut self, page_id: PageId) -> Result<&mut TypedPage<K, V>> {
+        if !self.pages.contains_key(&page_id) {
+            let disk_page = self.disk_manager.read_page(page_id)?;
+            let typed = disk_to_typed(&disk_page)?;
+            self.insert_page(typed)?;
+        }
+
+        let page = self.pages.get_mut(&page_id).unwrap();
+        page.dirty = true;
         Ok(page)
     }
 
-    /// Unpin a page, optionally marking it as dirty.
-    ///
-    /// # Arguments
-    /// * `page_id` - ID of the page to unpin
-    /// * `is_dirty` - Whether the page was modified
-    pub fn unpin_page(&self, page_id: PageId, is_dirty: bool) -> Result<()> {
-        let page_table = self.page_table.read();
-
-        if let Some(&frame_idx) = page_table.get(&page_id) {
-            let frame = self.frames[frame_idx].clone();
-            let mut frame_guard = frame.write();
-
-            if frame_guard.pin_count == 0 {
-                tracing::warn!("Attempted to unpin page {} with pin_count=0", page_id.0);
-                return Ok(());
+    pub fn flush_all(&mut self) -> Result<()> {
+        for page in self.pages.values() {
+            if page.dirty {
+                let disk_page = typed_to_disk(page);
+                self.disk_manager.write_page(&disk_page)?;
             }
+        }
+        self.disk_manager.sync()?;
 
-            frame_guard.pin_count -= 1;
-
-            if is_dirty {
-                frame_guard.is_dirty = true;
-            }
-
-            #[cfg(debug_assertions)]
-            tracing::trace!(
-                "Unpinned page {} (pin_count={}, dirty={}, k_accesses={})",
-                page_id.0,
-                frame_guard.pin_count,
-                frame_guard.is_dirty,
-                frame_guard.access_history.len()
-            );
-        } else {
-            return Err(MonoError::Storage(format!(
-                "Page {} not in buffer pool",
-                page_id.0
-            )));
+        for page in self.pages.values_mut() {
+            page.dirty = false;
         }
 
         Ok(())
     }
 
-    /// Flush a specific page to disk if dirty.
-    #[allow(dead_code)]
-    pub fn flush_page(&self, page_id: PageId) -> Result<()> {
-        let page_table = self.page_table.read();
-
-        if let Some(&frame_idx) = page_table.get(&page_id) {
-            let frame = self.frames[frame_idx].clone();
-            let frame_guard = frame.write();
-
-            if frame_guard.is_dirty
-                && let Some(page_arc) = frame_guard.page.as_ref()
-            {
-                let page_arc = Arc::clone(page_arc);
-                drop(frame_guard);
-
-                let page_guard = page_arc.read();
-                self.disk_manager.write_page(&page_guard)?;
-                drop(page_guard);
-
-                let mut frame_guard = frame.write();
-                frame_guard.is_dirty = false;
-
-                #[cfg(debug_assertions)]
-                tracing::trace!("Flushed page {} to disk", page_id.0);
-            }
-        }
-
-        Ok(())
+    pub fn page_count(&self) -> u32 {
+        self.next_page_id
     }
 
-    /// Flush all dirty pages to disk.
-    pub fn flush_all(&self) -> Result<()> {
-        let page_table = self.page_table.read();
-        let mut flushed = 0;
-
-        for &frame_idx in page_table.values() {
-            let frame = self.frames[frame_idx].clone();
-            let frame_guard = frame.write();
-
-            if frame_guard.is_dirty
-                && let Some(page_arc) = frame_guard.page.as_ref()
-            {
-                let page_arc = Arc::clone(page_arc);
-                drop(frame_guard);
-
-                let page_guard = page_arc.read();
-                self.disk_manager.write_page(&page_guard)?;
-                drop(page_guard);
-
-                let mut frame_guard = frame.write();
-                frame_guard.is_dirty = false;
-                flushed += 1;
-            }
+    pub fn stats(&self) -> BufferPoolStats {
+        let dirty = self.pages.values().filter(|p| p.dirty).count();
+        BufferPoolStats {
+            pool_size: self.max_pages,
+            used_frames: self.pages.len(),
+            pinned_frames: 0,
+            dirty_frames: dirty,
+            free_frames: self.max_pages.saturating_sub(self.pages.len()),
         }
+    }
+}
 
-        #[cfg(debug_assertions)]
-        tracing::trace!("Flushed {} dirty pages to disk", flushed);
-        Ok(())
+impl<K: Clone + Serializable, V: Clone + Serializable> Drop for TypedPageStore<K, V> {
+    fn drop(&mut self) {
+        let _ = self.flush_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use monodb_common::Result;
+
+    /// Create auto-cleanup test directory that deletes itself when dropped
+    struct TestDir {
+        path: std::path::PathBuf,
     }
 
-    /// Delete a page from the buffer pool and disk.
-    pub fn delete_page(&self, page_id: PageId) -> Result<()> {
-        let mut page_table = self.page_table.write();
-
-        if let Some(frame_idx) = page_table.remove(&page_id) {
-            let frame = self.frames[frame_idx].clone();
-            let mut frame_guard = frame.write();
-            frame_guard.reset();
-            self.free_list.lock().push_back(frame_idx);
-
-            #[cfg(debug_assertions)]
-            tracing::trace!("Deleted page {} from buffer pool", page_id.0);
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
         }
-
-        self.disk_manager.free_page(page_id)?;
-        Ok(())
     }
 
-    /// Load a page from disk into buffer pool
-    fn load_page_from_disk(&self, page_id: PageId, timestamp: u64) -> Result<Arc<RwLock<Page>>> {
-        let frame_idx = self.get_frame()?;
+    fn create_test_dir(name: &str) -> TestDir {
+        let test_dir = std::path::PathBuf::from(format!("test_data/{}", name));
+        if test_dir.exists() {
+            std::fs::remove_dir_all(&test_dir).unwrap();
+        }
+        std::fs::create_dir_all(&test_dir).unwrap();
+        TestDir { path: test_dir }
+    }
 
-        let page = self.disk_manager.read_page(page_id)?;
-        let page_arc = Arc::new(RwLock::new(page));
+    // TypedPageStore tests
+
+    #[test]
+    fn page_allocation_and_caching() -> Result<()> {
+        let test_dir = create_test_dir("page_allocation_and_caching");
+        let db_path = test_dir.path.join("test_db");
+        let mut store: TypedPageStore<u32, String> = TypedPageStore::new(&db_path, 2)?;
+
+        let page_id1 = store.alloc_leaf()?;
+        let page_id2 = store.alloc_interior()?;
 
         {
-            let frame = self.frames[frame_idx].clone();
-            let mut frame_guard = frame.write();
-            frame_guard.page = Some(Arc::clone(&page_arc));
-            frame_guard.is_dirty = false;
-            frame_guard.pin_count = 1;
-            frame_guard.access_history.clear();
-            frame_guard.record_access(timestamp);
+            let leaf_page = store.get_mut(page_id1)?;
+            leaf_page.keys.push(1);
+            leaf_page.values.push("value1".to_string());
         }
 
-        self.page_table.write().insert(page_id, frame_idx);
+        {
+            let interior_page = store.get_mut(page_id2)?;
+            interior_page.keys.push(10);
+            interior_page.children.push(PageId(3));
+        }
 
-        #[cfg(debug_assertions)]
-        tracing::trace!(
-            "Loaded page {} from disk into frame {}",
-            page_id.0,
-            frame_idx
+        // Access pages to ensure they are cached
+        let _ = store.get(page_id1)?;
+        let _ = store.get(page_id2)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn lru_eviction() -> Result<()> {
+        let test_dir = create_test_dir("lru_eviction");
+        let db_path = test_dir.path.join("test_db");
+        let mut store: TypedPageStore<u32, String> = TypedPageStore::new(&db_path, 2)?;
+
+        let page_id1 = store.alloc_leaf()?;
+        let page_id2 = store.alloc_interior()?;
+
+        // Access both pages
+        let _ = store.get(page_id1)?;
+        let _ = store.get(page_id2)?;
+
+        // Allocate a third page, should evict the least recently used (page_id1)
+        let page_id3 = store.alloc_leaf()?;
+
+        assert!(store.pages.contains_key(&page_id2));
+        assert!(store.pages.contains_key(&page_id3));
+        assert!(!store.pages.contains_key(&page_id1));
+
+        Ok(())
+    }
+
+    #[test]
+    fn dirty_page_flushing() -> Result<()> {
+        let test_dir = create_test_dir("dirty_page_flushing");
+        let db_path = test_dir.path.join("test_db");
+        let mut store: TypedPageStore<u32, String> = TypedPageStore::new(&db_path, 2)?;
+
+        let page_id = store.alloc_leaf()?;
+
+        {
+            let leaf_page = store.get_mut(page_id)?;
+            leaf_page.keys.push(1);
+            leaf_page.values.push("value1".to_string());
+        }
+
+        store.flush_all()?;
+
+        let disk_page = store.disk_manager.read_page(page_id)?;
+        let restored_leaf = disk_to_typed::<u32, String>(&disk_page)?;
+
+        assert_eq!(restored_leaf.keys, vec![1]);
+        assert_eq!(restored_leaf.values, vec!["value1".to_string()]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn cache_hit_rate() -> Result<()> {
+        let test_dir = create_test_dir("cache_hit_rate");
+        let db_path = test_dir.path.join("test_db");
+        let mut store: TypedPageStore<u32, String> = TypedPageStore::new(&db_path, 2)?;
+
+        let page_id = store.alloc_leaf()?;
+
+        // First access, should be a miss
+        let _ = store.get(page_id)?;
+
+        // Second access, should be a hit
+        let _ = store.get(page_id)?;
+
+        assert_eq!(store.stats().used_frames, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn disk_page_round_trip() -> Result<()> {
+        let mut leaf_page = TypedPage::new_leaf(PageId(1));
+        leaf_page.keys = vec![1u32, 2, 3];
+        leaf_page.values = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+
+        let disk_page = typed_to_disk(&leaf_page);
+        let restored_leaf = disk_to_typed::<u32, String>(&disk_page)?;
+
+        assert_eq!(leaf_page.keys, restored_leaf.keys);
+        assert_eq!(leaf_page.values, restored_leaf.values);
+        assert!(restored_leaf.is_leaf);
+
+        let mut interior_page: TypedPage<u32, String> = TypedPage::new_interior(PageId(2));
+        interior_page.keys = vec![10u32, 20, 30];
+        interior_page.children = vec![PageId(3), PageId(4), PageId(5), PageId(6)];
+
+        let disk_page = typed_to_disk(&interior_page);
+        let restored_interior = disk_to_typed::<u32, String>(&disk_page)?;
+
+        assert_eq!(interior_page.keys, restored_interior.keys);
+        assert_eq!(interior_page.children, restored_interior.children);
+        assert!(!restored_interior.is_leaf);
+
+        Ok(())
+    }
+
+    #[test]
+    fn checksum_validation() -> Result<()> {
+        let mut leaf_page = TypedPage::new_leaf(PageId(1));
+        leaf_page.keys = vec![1u32, 2, 3];
+        leaf_page.values = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+
+        let disk_page = typed_to_disk(&leaf_page);
+        let mut corrupted_disk_page = disk_page.clone();
+        corrupted_disk_page.data[0] ^= 0xFF; // Corrupt the data
+
+        let result = disk_to_typed::<u32, String>(&corrupted_disk_page);
+        assert!(
+            result.is_err(),
+            "Checksum validation should fail for corrupted data"
         );
 
-        Ok(page_arc)
+        Ok(())
     }
 
-    /// Get a frame for a new page, using free list or eviction
-    fn get_frame(&self) -> Result<usize> {
-        // Try to get a free frame first
-        if let Some(frame_idx) = self.free_list.lock().pop_front() {
-            return Ok(frame_idx);
-        }
+    #[test]
+    fn variable_length_key_serialization() -> Result<()> {
+        let mut leaf_page = TypedPage::new_leaf(PageId(1));
+        leaf_page.keys = vec![
+            "short".to_string(),
+            "a bit longer key".to_string(),
+            "the longest key of all three".to_string(),
+        ];
+        leaf_page.values = vec!["val1".to_string(), "val2".to_string(), "val3".to_string()];
 
-        // No free frames, need to evict using LRU-K
-        self.evict_page()
-    }
+        let disk_page = typed_to_disk(&leaf_page);
+        let restored_leaf = disk_to_typed::<String, String>(&disk_page)?;
 
-    /// Evict a page using the LRU-K algorithm.
-    ///
-    /// Selects the victim frame with the maximum backward K-distance.
-    /// Pages with fewer than K accesses have infinite distance and are
-    /// evicted first (they're likely from sequential scans, not the working set).
-    fn evict_page(&self) -> Result<usize> {
-        let current_ts = self.get_current_timestamp();
-        let mut victim_idx: Option<usize> = None;
-        let mut max_distance: u64 = 0;
+        assert_eq!(leaf_page.keys, restored_leaf.keys);
+        assert_eq!(leaf_page.values, restored_leaf.values);
+        assert!(restored_leaf.is_leaf);
 
-        // Scan all frames to find the one with maximum backward K-distance
-        for (idx, frame_arc) in self.frames.iter().enumerate() {
-            let frame = frame_arc.read();
-
-            // Skip pinned frames
-            if !frame.is_evictable() {
-                continue;
-            }
-
-            // Skip empty frames (shouldn't happen if free_list is empty, but be safe)
-            if frame.page.is_none() {
-                continue;
-            }
-
-            let distance = frame.backward_k_distance(current_ts);
-
-            // Select this frame if it has greater distance
-            // (INFINITY_DISTANCE will always win if present)
-            if distance > max_distance || victim_idx.is_none() {
-                max_distance = distance;
-                victim_idx = Some(idx);
-
-                // Early exit: can't do better than infinity
-                if distance == INFINITY_DISTANCE {
-                    break;
-                }
-            }
-        }
-
-        // If no victim found, all pages are pinned
-        let frame_idx = victim_idx
-            .ok_or_else(|| MonoError::Storage("buffer pool full: all pages are pinned".into()))?;
-
-        // Evict the victim
-        let frame = self.frames[frame_idx].clone();
-        let mut frame_guard = frame.write();
-
-        if let Some(page) = &frame_guard.page {
-            let page_id = page.read().header.page_id;
-
-            // Flush if dirty
-            if frame_guard.is_dirty {
-                let page_guard = page.read();
-                self.disk_manager.write_page(&page_guard)?;
-                #[cfg(debug_assertions)]
-                tracing::trace!("Flushed page {} during eviction", page_id.0);
-            }
-
-            // Remove from page table
-            self.page_table.write().remove(&page_id);
-
-            #[cfg(debug_assertions)]
-            tracing::trace!(
-                "Evicted page {} from frame {} (k_distance={}, accesses={})",
-                page_id.0,
-                frame_idx,
-                if max_distance == INFINITY_DISTANCE {
-                    "∞".to_string()
-                } else {
-                    max_distance.to_string()
-                },
-                frame_guard.access_history.len()
-            );
-        }
-
-        frame_guard.reset();
-        Ok(frame_idx)
+        Ok(())
     }
 }

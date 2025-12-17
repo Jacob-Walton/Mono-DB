@@ -12,22 +12,34 @@ use monodb_common::{MonoError, Result, schema::KeySpacePersistence};
 use once_cell::sync::Lazy;
 
 use crate::config::StorageConfig;
-use crate::storage::{
-    Data, btree::BTree, buffer_pool::BufferPool, disk_manager::DiskManager, lsm::LsmTree, wal::Wal,
-};
+use crate::storage::StorageTree;
+use crate::storage::{Data, wal::Wal};
 use parking_lot::RwLock;
 use tracing::{debug, info};
 
 /// Secondary index entry mapping field values to primary keys
 type IndexEntry = DashMap<Vec<u8>, HashSet<Vec<u8>>>;
 
+/// Default buffer pool size for B+Trees (number of pages in memory)
+const DEFAULT_BTREE_POOL_SIZE: usize = 1024;
+
+/// Cached metadata for faster schema validation
+struct TableMeta {
+    column_names: HashSet<String>,
+    columns: Vec<monodb_common::schema::TableColumn>,
+    primary_key: Vec<String>,
+    /// Pre-computed: does this table have any unique indexes?
+    has_unique_indexes: bool,
+    /// Pre-computed: does this table have any unique columns (outside of indexes)?
+    has_unique_columns: bool,
+}
+
 pub struct StorageEngine {
-    btrees: Arc<DashMap<String, Arc<BTree>>>,
-    lsm_trees: Arc<DashMap<String, Arc<LsmTree>>>,
-    buffer_pool: Option<Arc<BufferPool>>,
-    #[allow(dead_code)]
-    disk_manager: Option<Arc<DiskManager>>,
+    /// Persistent B+Trees for collections/tables/keyspaces
+    storage_trees: Arc<DashMap<String, Arc<StorageTree>>>,
     schemas: Arc<DashMap<String, Schema>>,
+    /// Cached table metadata for faster validation
+    table_meta_cache: Arc<DashMap<String, TableMeta>>,
     memory_keyspaces: Arc<DashMap<String, Arc<DashMap<String, MonoValue>>>>,
     secondary_indexes: Arc<DashMap<String, DashMap<String, Arc<IndexEntry>>>>,
     config: StorageConfig,
@@ -49,11 +61,9 @@ impl StorageEngine {
         let system_wal_is_async = system_wal.is_async();
 
         let engine = Arc::new(Self {
-            btrees: Arc::new(DashMap::new()),
-            lsm_trees: Arc::new(DashMap::new()),
-            buffer_pool: None,
-            disk_manager: None,
+            storage_trees: Arc::new(DashMap::new()),
             schemas: Arc::new(DashMap::new()),
+            table_meta_cache: Arc::new(DashMap::new()),
             memory_keyspaces: Arc::new(DashMap::new()),
             secondary_indexes: Arc::new(DashMap::new()),
             config,
@@ -154,8 +164,8 @@ impl StorageEngine {
                         };
 
                         if should_replay {
-                            if let Some(lsm) = self.lsm_trees.get(&collection) {
-                                lsm.put_no_wal(key, entry.value).await?;
+                            if let Some(tree) = self.storage_trees.get(&collection) {
+                                tree.put_no_wal(key, entry.value).await?;
                                 replayed += 1;
                             }
                         } else {
@@ -177,8 +187,8 @@ impl StorageEngine {
                         };
 
                         if should_replay {
-                            if let Some(lsm) = self.lsm_trees.get(&collection) {
-                                lsm.delete_no_wal(key).await?;
+                            if let Some(tree) = self.storage_trees.get(&collection) {
+                                tree.delete_no_wal(key).await?;
                                 replayed += 1;
                             }
                         } else {
@@ -247,16 +257,21 @@ impl StorageEngine {
         }
     }
 
-    /// Write to LSM tree with system WAL for durability.
+    /// Write to storage tree with system WAL for durability.
     /// This is the primary method for persisting data.
-    async fn lsm_put_with_wal(&self, collection: &str, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
+    async fn tree_put_with_wal(
+        &self,
+        collection: &str,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> Result<()> {
         // Write to system WAL first
         let wal_key = Self::encode_wal_key(collection, &key);
         self.wal_append(&wal_key, &value)?;
 
-        // Then write to LSM (no internal WAL)
-        if let Some(lsm) = self.lsm_trees.get(collection) {
-            lsm.put_no_wal(key, value).await
+        // Then write to storage tree (no internal WAL)
+        if let Some(tree) = self.storage_trees.get(collection) {
+            tree.put_no_wal(key, value).await
         } else {
             Err(MonoError::NotFound(format!(
                 "collection '{collection}' not found"
@@ -264,15 +279,43 @@ impl StorageEngine {
         }
     }
 
-    /// Delete from LSM tree with system WAL for durability.
-    async fn lsm_delete_with_wal(&self, collection: &str, key: Vec<u8>) -> Result<()> {
+    /// Delete from storage tree with system WAL for durability.
+    async fn tree_delete_with_wal(&self, collection: &str, key: Vec<u8>) -> Result<()> {
         // Write delete to system WAL first
         let wal_key = Self::encode_wal_key(collection, &key);
         self.wal_append_with_type(&wal_key, &[], crate::storage::wal::WalEntryType::Delete)?;
 
-        // Then delete from LSM (no internal WAL)
-        if let Some(lsm) = self.lsm_trees.get(collection) {
-            lsm.delete_no_wal(key).await
+        // Then delete from storage tree (no internal WAL)
+        if let Some(tree) = self.storage_trees.get(collection) {
+            tree.delete_no_wal(key).await
+        } else {
+            Err(MonoError::NotFound(format!(
+                "collection '{collection}' not found"
+            )))
+        }
+    }
+
+    /// Batch insert multiple key-value pairs with WAL durability.
+    /// This is much more efficient than calling tree_put_with_wal in a loop.
+    #[allow(dead_code)]
+    async fn tree_put_batch_with_wal(
+        &self,
+        collection: &str,
+        entries: Vec<(Vec<u8>, Vec<u8>)>,
+    ) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        // Write all entries to WAL first
+        for (key, value) in &entries {
+            let wal_key = Self::encode_wal_key(collection, key);
+            self.wal_append(&wal_key, value)?;
+        }
+
+        // Then batch write to storage tree
+        if let Some(tree) = self.storage_trees.get(collection) {
+            tree.put_batch_no_wal(entries).await
         } else {
             Err(MonoError::NotFound(format!(
                 "collection '{collection}' not found"
@@ -313,6 +356,23 @@ impl StorageEngine {
         }
     }
 
+    /// Rollback all writes made by a transaction.
+    /// This deletes the versioned entries from the storage trees.
+    pub async fn rollback_transaction_writes(&self, tx_id: u64) -> Result<()> {
+        let write_set = self.tx_manager.get_write_set(tx_id);
+
+        for (collection, pk) in write_set {
+            // Construct the versioned key that was written
+            let versioned_key = encode_versioned_key(&pk, tx_id);
+
+            // Delete from storage tree with WAL
+            self.tree_delete_with_wal(&collection, versioned_key)
+                .await?;
+        }
+
+        Ok(())
+    }
+
     /// Get access to the system WAL for stats/sync.
     pub fn system_wal(&self) -> &Arc<RwLock<Wal>> {
         &self.system_wal
@@ -326,8 +386,18 @@ impl StorageEngine {
             .ok_or_else(|| MonoError::NotFound(format!("Collection '{collection}' not found")))?;
 
         match (schema.value(), data) {
-            (Schema::Table { columns, .. }, Data::Row(row)) => {
-                self.validate_table_row(columns, row)
+            (Schema::Table { .. }, Data::Row(row)) => {
+                // Use cached table metadata for faster validation
+                if let Some(meta) = self.table_meta_cache.get(collection) {
+                    self.validate_table_row_cached(&meta, row)
+                } else {
+                    // Fallback: extract from schema (shouldn't happen after load)
+                    if let Schema::Table { columns, .. } = schema.value() {
+                        self.validate_table_row_uncached(columns, row)
+                    } else {
+                        Ok(())
+                    }
+                }
             }
             (Schema::Collection { validation, .. }, Data::Document(doc)) => {
                 self.validate_collection_document(validation, doc)
@@ -339,8 +409,53 @@ impl StorageEngine {
         }
     }
 
-    /// Validate a table row against column definitions
-    fn validate_table_row(
+    /// Validate a table row using cached metadata (fast path)
+    fn validate_table_row_cached(
+        &self,
+        meta: &TableMeta,
+        row: &HashMap<String, MonoValue>,
+    ) -> Result<()> {
+        // Check for extra fields using cached HashSet
+        for key in row.keys() {
+            if !meta.column_names.contains(key) {
+                return Err(MonoError::InvalidOperation(format!(
+                    "Unknown field '{key}' in row"
+                )));
+            }
+        }
+
+        // Validate each column
+        for col in &meta.columns {
+            match row.get(&col.name) {
+                Some(value) => {
+                    // Type checking
+                    if value.data_type() != col.data_type {
+                        return Err(MonoError::TypeError {
+                            expected: format!("{:?}", col.data_type),
+                            actual: format!("{:?}", value.data_type()),
+                        });
+                    }
+
+                    // Additional type-specific validation
+                    self.validate_value_constraints(value, &col.name)?;
+                }
+                None => {
+                    // Check if field is required
+                    if !col.nullable && col.default.is_none() {
+                        return Err(MonoError::InvalidOperation(format!(
+                            "Missing required field '{}'",
+                            col.name
+                        )));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate a table row against column definitions (uncached fallback)
+    fn validate_table_row_uncached(
         &self,
         columns: &[monodb_common::schema::TableColumn],
         row: &HashMap<String, MonoValue>,
@@ -460,49 +575,19 @@ impl StorageEngine {
         &self,
         collection: &str,
         pk: &[u8],
-        tx: Option<&Transaction>,
+        _tx: Option<&Transaction>,
     ) -> Result<bool> {
-        // Scan for any version of this key
-        let prefix = pk.to_vec();
-        let mut end_key = prefix.clone();
-        end_key.push(0xFF); // Include all versions
-
-        let pairs = if self.config.use_lsm {
-            if let Some(lsm) = self.lsm_trees.get(collection) {
-                // Range scan over the primary-key prefix
-                lsm.scan_range_with_limit(&prefix, &end_key, 64).await?
-            } else {
-                return Ok(false);
-            }
-        } else if let Some(btree) = self.btrees.get(collection) {
-            btree.scan(&prefix, &end_key).await?
+        // Fast path: just check if the key exists using B+Tree get
+        // For MVCC, we encode pk:version, so we need to check for any version
+        // But for auto-commit (no tx), we use unversioned keys
+        if let Some(tree) = self.storage_trees.get(collection) {
+            // Check if any key with this prefix exists
+            // Since keys are pk:version format, check if we can get any matching key
+            let result = tree.get(pk).await?;
+            Ok(result.is_some())
         } else {
-            return Ok(false);
-        };
-
-        // Check if any version is visible
-        for (key, value) in pairs {
-            if let Some((found_pk, version_ts)) = decode_versioned_key(&key)
-                && found_pk == pk
-            {
-                // Check if this is a tombstone (deleted)
-                if value.is_empty() {
-                    continue;
-                }
-
-                let visible = if let Some(tx) = tx {
-                    self.is_version_visible(version_ts, tx)
-                } else {
-                    self.is_version_visible_no_tx(version_ts)
-                };
-
-                if visible {
-                    return Ok(true);
-                }
-            }
+            Ok(false)
         }
-
-        Ok(false)
     }
 
     /// Check uniqueness constraints before insertion
@@ -512,32 +597,37 @@ impl StorageEngine {
         data: &Data<'_>,
         primary_key: Option<&[u8]>,
     ) -> Result<()> {
+        // Fast path using cached metadata for tables
+        if let Some(meta) = self.table_meta_cache.get(collection) {
+            // If no unique indexes and no unique columns, skip all checks
+            if !meta.has_unique_indexes && !meta.has_unique_columns {
+                return Ok(());
+            }
+        }
+
         let schema = self
             .schemas
             .get(collection)
             .ok_or_else(|| MonoError::NotFound(format!("Collection '{collection}' not found")))?;
 
-        // Keep PK columns handy to skip redundant uniqueness checks.
-        let pk_columns = match schema.value() {
-            Schema::Table { primary_key, .. } => primary_key.clone(),
-            _ => Vec::new(),
-        };
-
         match schema.value() {
             Schema::Table {
-                columns, indexes, ..
+                columns,
+                indexes,
+                primary_key: pk_columns,
+                ..
             } => {
-                // Check explicit unique indexes first
+                // Check explicit unique indexes
                 for index in indexes.iter().filter(|idx| idx.unique) {
                     self.check_unique_index_violation(collection, data, index, primary_key)
                         .await?;
                 }
 
-                // Then check any column marked is_unique
+                // Check unique columns not covered by indexes
                 for col in columns.iter().filter(|c| c.is_unique) {
                     let field_name = &col.name;
 
-                    // Skip columns that are already enforced by primary key or a unique index.
+                    // Skip columns covered by primary key or unique index
                     if pk_columns.contains(field_name)
                         || indexes.iter().any(|idx| {
                             idx.unique
@@ -548,30 +638,20 @@ impl StorageEngine {
                         continue;
                     }
 
-                    // Extract the value being inserted
-                    let inserted_value_opt = match data {
-                        Data::Row(row) => row.get(field_name),
-                        Data::Document(doc) => doc.as_object().and_then(|m| m.get(field_name)),
-                        _ => None,
-                    };
-
-                    if inserted_value_opt.is_some() {
-                        // Skip the O(n) uniqueness scan when there's no supporting index; rely on PK/unique index enforcement.
-                        tracing::debug!(
-                            "Skipping full-scan uniqueness check for unindexed unique column '{}'",
-                            field_name
-                        );
-                    }
+                    // For unindexed unique columns, we'd need a full scan - skip for performance
+                    tracing::debug!(
+                        "Skipping full-scan uniqueness check for unindexed unique column '{}'",
+                        field_name
+                    );
                 }
             }
             Schema::Collection { indexes, .. } => {
-                // Keep existing behavior for collections
                 for index in indexes.iter().filter(|idx| idx.unique) {
                     self.check_unique_index_violation(collection, data, index, primary_key)
                         .await?;
                 }
             }
-            Schema::KeySpace { .. } => return Ok(()),
+            Schema::KeySpace { .. } => {}
         }
 
         Ok(())
@@ -682,6 +762,11 @@ impl StorageEngine {
             Schema::KeySpace { .. } => return Ok(()),
         };
 
+        // Fast path: no indexes to update
+        if indexes.is_empty() {
+            return Ok(());
+        }
+
         let collection_indexes = self
             .secondary_indexes
             .entry(collection.to_string())
@@ -758,17 +843,44 @@ impl StorageEngine {
             return Ok(());
         }
 
-        // Delete from storage (using system WAL)
-        if self.config.use_lsm {
-            self.lsm_delete_with_wal(collection, key_bytes.to_vec())
-                .await
-        } else if let Some(btree) = self.btrees.get(collection) {
-            btree.delete(key_bytes).await
+        // Check if this is a relational table (uses encoded sortable keys)
+        let is_relational = self
+            .schemas
+            .get(collection)
+            .map(|s| matches!(s.value(), Schema::Table { .. }))
+            .unwrap_or(false);
+
+        if is_relational {
+            // For relational tables, keys are encoded with encode_composite_sortable
+            // We need to encode the primary key value to match the stored format
+            let pk_value = MonoValue::String(key.to_string());
+            let encoded_pk = crate::storage::key_encoding::encode_composite_sortable(
+                std::slice::from_ref(&pk_value),
+            );
+
+            // Scan for all versions of this key: from {encoded_pk} to {encoded_pk}\xFF
+            let mut end_key = encoded_pk.clone();
+            end_key.push(0xFF);
+
+            if let Some(tree) = self.storage_trees.get(collection) {
+                let pairs = tree
+                    .scan_range_with_limit(&encoded_pk, &end_key, 100)
+                    .await?;
+                for (stored_key, _) in pairs {
+                    // Delete each versioned key
+                    self.tree_delete_with_wal(collection, stored_key).await?;
+                }
+            }
+
+            // Also try deleting the base encoded key (non-versioned/legacy data)
+            self.tree_delete_with_wal(collection, encoded_pk).await.ok(); // Ignore error if key doesn't exist
         } else {
-            Err(MonoError::NotFound(format!(
-                "collection '{collection}' not found"
-            )))
+            // Non-relational (keyspace/collection): delete the key directly
+            self.tree_delete_with_wal(collection, key_bytes.to_vec())
+                .await?;
         }
+
+        Ok(())
     }
 
     /// Delete all entries from a collection that match a given filter.
@@ -803,15 +915,13 @@ impl StorageEngine {
                 matched_values
                     .into_iter()
                     .filter_map(|v| {
-                        v.as_object()
-                            .and_then(|m| m.get("_id"))
-                            .map(|id_val| match id_val {
-                                MonoValue::ObjectId(oid) => oid.to_hex(),
-                                MonoValue::String(s) => s.clone(),
-                                MonoValue::Int32(i) => i.to_string(),
-                                MonoValue::Int64(i) => i.to_string(),
-                                _ => format!("{id_val}"),
-                            })
+                        Self::get_field(&v, "_id").map(|id_val| match id_val {
+                            MonoValue::ObjectId(oid) => oid.to_hex(),
+                            MonoValue::String(s) => s.clone(),
+                            MonoValue::Int32(i) => i.to_string(),
+                            MonoValue::Int64(i) => i.to_string(),
+                            _ => format!("{id_val}"),
+                        })
                     })
                     .collect()
             }
@@ -820,8 +930,7 @@ impl StorageEngine {
                 matched_values
                     .into_iter()
                     .filter_map(|v| {
-                        v.as_object()
-                            .and_then(|m| m.get("key"))
+                        Self::get_field(&v, "key")
                             .and_then(|v| v.as_string())
                             .map(|s| s.to_string())
                     })
@@ -834,14 +943,12 @@ impl StorageEngine {
                     matched_values
                         .into_iter()
                         .filter_map(|v| {
-                            v.as_object()
-                                .and_then(|m| m.get(pk_name))
-                                .map(|pk_val| match pk_val {
-                                    MonoValue::String(s) => s.clone(),
-                                    MonoValue::Int32(i) => i.to_string(),
-                                    MonoValue::Int64(i) => i.to_string(),
-                                    _ => format!("{pk_val}"),
-                                })
+                            Self::get_field(&v, pk_name).map(|pk_val| match pk_val {
+                                MonoValue::String(s) => s.clone(),
+                                MonoValue::Int32(i) => i.to_string(),
+                                MonoValue::Int64(i) => i.to_string(),
+                                _ => format!("{pk_val}"),
+                            })
                         })
                         .collect()
                 } else {
@@ -861,11 +968,189 @@ impl StorageEngine {
         Ok(deleted)
     }
 
+    /// Update all entries in a collection that match a given filter.
+    /// This scans for the actual stored keys and overwrites them in place.
+    pub async fn update_many(
+        &self,
+        collection: &str,
+        filter: Option<crate::storage::models::Filter>,
+        updates: HashMap<String, MonoValue>,
+    ) -> Result<u64> {
+        self.update_many_with_tx(collection, filter, updates, None)
+            .await
+    }
+
+    /// Update with optional transaction context for MVCC.
+    /// If tx is Some, creates new versioned entries (rollback-able).
+    /// If tx is None, overwrites in place (auto-commit).
+    pub async fn update_many_with_tx(
+        &self,
+        collection: &str,
+        filter: Option<crate::storage::models::Filter>,
+        updates: HashMap<String, MonoValue>,
+        tx: Option<&Transaction>,
+    ) -> Result<u64> {
+        let schema = self
+            .schemas
+            .get(collection)
+            .ok_or_else(|| MonoError::NotFound(format!("collection '{collection}' not found")))?;
+
+        let is_relational = matches!(schema.value(), Schema::Table { .. });
+
+        // Get the primary key field name(s) for PK immutability check
+        let pk_fields: Vec<String> = match schema.value() {
+            Schema::Collection { .. } => vec!["_id".to_string()],
+            Schema::KeySpace { .. } => vec!["key".to_string()],
+            Schema::Table { primary_key, .. } => primary_key.clone(),
+        };
+
+        // For relational tables, check if any update tries to modify PK fields
+        if is_relational {
+            for pk in &pk_fields {
+                if updates.contains_key(pk) {
+                    return Err(MonoError::InvalidOperation(format!(
+                        "Primary key field '{}' cannot be changed in update",
+                        pk
+                    )));
+                }
+            }
+        }
+
+        // Scan for all key-value pairs and find matching rows WITH their actual storage keys
+        let tree = self
+            .storage_trees
+            .get(collection)
+            .ok_or_else(|| MonoError::NotFound(format!("collection '{collection}' not found")))?;
+
+        let pairs: Vec<(Vec<u8>, Vec<u8>)> = tree.scan(&[], &[0xFF]).await?;
+
+        let columns = if let Schema::Table { columns, .. } = schema.value() {
+            Some(columns.clone())
+        } else {
+            None
+        };
+
+        // For transactional updates on relational tables, we need to track seen PKs
+        // to avoid updating the same row multiple times (due to multiple versions)
+        let use_mvcc = tx.is_some() && is_relational;
+        let mut seen_pks: HashSet<Vec<u8>> = HashSet::new();
+
+        let mut updated = 0u64;
+        for (original_key, value_bytes) in pairs {
+            // For MVCC: decode versioned key and check visibility
+            let (base_pk, visible) = if use_mvcc {
+                if let Some((pk, version_ts)) = decode_versioned_key(&original_key) {
+                    // Skip if we already updated this PK
+                    if seen_pks.contains(&pk) {
+                        continue;
+                    }
+                    let vis = self.is_version_visible(version_ts, tx.unwrap());
+                    (Some(pk), vis)
+                } else {
+                    // Non-versioned key - always visible, use key as PK
+                    if seen_pks.contains(&original_key) {
+                        continue;
+                    }
+                    (Some(original_key.clone()), true)
+                }
+            } else {
+                (None, true)
+            };
+
+            if !visible {
+                continue;
+            }
+
+            // Deserialize the stored value
+            let value = match MonoValue::from_bytes(&value_bytes) {
+                Ok((v, _)) => v,
+                Err(_) => continue,
+            };
+
+            // Apply filter if present
+            if let Some(ref f) = filter
+                && !self.apply_filter(&value, f)
+            {
+                continue;
+            }
+
+            // Extract current row data
+            let obj: HashMap<String, MonoValue> = match &value {
+                MonoValue::Row(row) => row.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                MonoValue::Object(obj) => obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                _ => continue,
+            };
+
+            // Build the updated row by merging existing values with updates
+            let mut new_row = obj;
+            for (k, v) in &updates {
+                new_row.insert(k.clone(), v.clone());
+            }
+
+            // Build ordered row for storage
+            let ordered_row = if let Some(ref cols) = columns {
+                let mut ordered = IndexMap::with_capacity(cols.len());
+                for col in cols {
+                    if let Some(v) = new_row.get(&col.name) {
+                        ordered.insert(col.name.clone(), v.clone());
+                    }
+                }
+                ordered
+            } else {
+                let mut ordered = IndexMap::with_capacity(new_row.len());
+                for (k, v) in &new_row {
+                    ordered.insert(k.clone(), v.clone());
+                }
+                ordered
+            };
+
+            let value_to_store = MonoValue::Row(ordered_row);
+            let new_value_bytes = value_to_store.to_bytes();
+
+            if use_mvcc {
+                // MVCC mode: create a NEW versioned entry with tx_id
+                // The old version remains; visibility rules will show the new one
+                let tx = tx.unwrap();
+                let pk = base_pk.as_ref().unwrap();
+
+                // Check for write-write conflicts
+                self.check_write_conflict(collection, pk, tx).await?;
+
+                // Create versioned key with this transaction's ID
+                let versioned_key = encode_versioned_key(pk, tx.tx_id);
+
+                // Track in transaction's write set for rollback
+                self.tx_manager
+                    .add_to_write_set(tx.tx_id, collection.to_string(), pk.clone());
+
+                // Write the new version
+                self.tree_put_with_wal(collection, versioned_key, new_value_bytes)
+                    .await?;
+
+                seen_pks.insert(pk.clone());
+            } else {
+                // Auto-commit mode: overwrite the EXACT SAME KEY in place
+                self.tree_put_with_wal(collection, original_key, new_value_bytes)
+                    .await?;
+            }
+            updated += 1;
+        }
+
+        tracing::debug!(
+            "update_many_with_tx: filter={:?}, updated {} rows, mvcc={}",
+            filter,
+            updated,
+            use_mvcc
+        );
+
+        Ok(updated)
+    }
+
     /// Create a new collection with validation and index setup
     /// Force flush all LSM tree memtables to disk (test-only)
     #[cfg(test)]
     pub async fn flush_all(&self) -> Result<()> {
-        for entry in self.lsm_trees.iter() {
+        for entry in self.storage_trees.iter() {
             entry.value().flush().await?;
         }
         Ok(())
@@ -934,16 +1219,10 @@ impl StorageEngine {
         let mut scan_end = prefix.clone();
         scan_end.push(0xFF); // Scan all versions of this PK
 
-        let versions = if self.config.use_lsm {
-            if let Some(lsm) = self.lsm_trees.get(collection) {
-                lsm.scan(&prefix, &scan_end).await?
-            } else {
-                return Ok(()); // Collection doesn't exist, no conflict
-            }
-        } else if let Some(btree) = self.btrees.get(collection) {
-            btree.scan(&prefix, &scan_end).await?
+        let versions = if let Some(tree) = self.storage_trees.get(collection) {
+            tree.scan(&prefix, &scan_end).await?
         } else {
-            return Ok(());
+            return Ok(()); // Collection doesn't exist, no conflict
         };
 
         for (key, _value) in versions {
@@ -1164,6 +1443,21 @@ impl StorageEngine {
         data: &Data<'_>,
         tx: Option<&Transaction>,
     ) -> Result<()> {
+        // FAST PATH: In-memory keyspace - bypass all validation/schema lookups
+        if let Data::Row(row) = data
+            && let Some(memory_store) = self.memory_keyspaces.get(collection_name)
+        {
+            // Extract key and value directly, minimal overhead
+            if let (Some(key), Some(value)) = (row.get("key"), row.get("value")) {
+                let key_str = match key {
+                    MonoValue::String(s) => s.clone(),
+                    _ => key.to_string(),
+                };
+                memory_store.insert(key_str, value.clone());
+                return Ok(());
+            }
+        }
+
         // Validate data against schema
         self.validate_data(collection_name, data)?;
 
@@ -1175,7 +1469,7 @@ impl StorageEngine {
         let use_mvcc = tx.is_some() && matches!(schema.value(), Schema::Table { .. });
 
         // Check uniqueness constraints (for non-PK unique columns)
-        // PK uniqueness is checked inside insert_row_versioned/insert_row_with_version
+        // PK uniqueness is checked inside insert_row_versioned (only when tx is active)
         self.check_uniqueness_constraints(collection_name, data, None)
             .await?;
 
@@ -1205,10 +1499,8 @@ impl StorageEngine {
                 self.insert_document(collection_name, doc).await?
             }
             (Schema::Table { .. }, Data::Row(row)) => {
-                // Auto-commit: use current timestamp from tx_manager
-                let auto_ts = self.tx_manager.next_timestamp();
-                self.insert_row_with_version(collection_name, row, auto_ts)
-                    .await?
+                // Auto-commit without transaction: use fast path (no PK existence check)
+                self.insert_row(collection_name, row).await?
             }
             (Schema::KeySpace { .. }, Data::Row(row)) => {
                 let key = row.get("key").ok_or_else(|| {
@@ -1251,6 +1543,7 @@ impl StorageEngine {
     }
 
     /// Insert a row with a specific version timestamp (for auto-commit or MVCC).
+    #[allow(dead_code)]
     async fn insert_row_with_version(
         &self,
         collection: &str,
@@ -1305,16 +1598,8 @@ impl StorageEngine {
             let value_bytes = value_to_store.to_bytes();
 
             // Store with versioned key
-            if self.config.use_lsm {
-                self.lsm_put_with_wal(collection, versioned_key, value_bytes)
-                    .await?;
-            } else if let Some(btree) = self.btrees.get(collection) {
-                btree.insert(&versioned_key, &value_bytes).await?;
-            } else {
-                return Err(MonoError::NotFound(format!(
-                    "collection '{collection}' not found"
-                )));
-            }
+            self.tree_put_with_wal(collection, versioned_key, value_bytes)
+                .await?;
 
             Ok(base_pk)
         } else {
@@ -1385,16 +1670,8 @@ impl StorageEngine {
             let value_bytes = value_to_store.to_bytes();
 
             // Store with versioned key
-            if self.config.use_lsm {
-                self.lsm_put_with_wal(collection, versioned_key, value_bytes)
-                    .await?;
-            } else if let Some(btree) = self.btrees.get(collection) {
-                btree.insert(&versioned_key, &value_bytes).await?;
-            } else {
-                return Err(MonoError::NotFound(format!(
-                    "collection '{collection}' not found"
-                )));
-            }
+            self.tree_put_with_wal(collection, versioned_key, value_bytes)
+                .await?;
 
             Ok(base_pk)
         } else {
@@ -1426,18 +1703,8 @@ impl StorageEngine {
         // Serialize
         let serialized_value = value.to_bytes();
 
-        if self.config.use_lsm {
-            self.lsm_put_with_wal(collection, key, serialized_value)
-                .await?;
-        } else if let Some(btree) = self.btrees.get(collection) {
-            btree.insert(&key, &serialized_value).await?;
-        } else {
-            return Err(MonoError::NotFound(format!(
-                "collection '{collection}' not found"
-            )));
-        }
-
-        Ok(())
+        self.tree_put_with_wal(collection, key, serialized_value)
+            .await
     }
 
     /// Fast-path insert for raw key/value bytes into a KeySpace collection.
@@ -1465,17 +1732,7 @@ impl StorageEngine {
         let key_vec = key.to_vec();
         let val_vec = value.to_vec();
 
-        if self.config.use_lsm {
-            self.lsm_put_with_wal(collection, key_vec, val_vec).await?;
-        } else if let Some(btree) = self.btrees.get(collection) {
-            btree.insert(&key_vec, &val_vec).await?;
-        } else {
-            return Err(MonoError::NotFound(format!(
-                "collection '{collection}' not found"
-            )));
-        }
-
-        Ok(())
+        self.tree_put_with_wal(collection, key_vec, val_vec).await
     }
 
     async fn insert_document(&self, collection: &str, doc: &MonoValue) -> Result<Vec<u8>> {
@@ -1511,16 +1768,8 @@ impl StorageEngine {
         // Serialize
         let value_bytes = doc.to_bytes();
 
-        if self.config.use_lsm {
-            self.lsm_put_with_wal(collection, key_bytes.clone(), value_bytes)
-                .await?;
-        } else if let Some(btree) = self.btrees.get(collection) {
-            btree.insert(&key_bytes, &value_bytes).await?;
-        } else {
-            return Err(MonoError::NotFound(format!(
-                "collection '{collection}' not found"
-            )));
-        }
+        self.tree_put_with_wal(collection, key_bytes.clone(), value_bytes)
+            .await?;
 
         Ok(key_bytes)
     }
@@ -1530,60 +1779,86 @@ impl StorageEngine {
         collection: &str,
         row: &HashMap<String, MonoValue>,
     ) -> Result<Vec<u8>> {
-        let schema = self.schemas.get(collection).unwrap();
-        if let Schema::Table {
-            primary_key,
-            columns,
-            ..
-        } = schema.value()
-        {
-            // Validation already done in insert() method
+        // Use cached metadata for faster access
+        let meta = self.table_meta_cache.get(collection);
 
-            if primary_key.is_empty() {
-                return Err(MonoError::InvalidOperation(format!(
-                    "table '{collection}' has no primary key defined"
-                )));
-            }
-
-            let mut pk_values = Vec::new();
-            for pk_field in primary_key {
-                let value = row.get(pk_field);
-                if let Some(v) = value {
-                    pk_values.push(v.to_string());
+        // Build primary key using sortable binary encoding (avoids string allocation)
+        let key_bytes = if let Some(ref meta) = meta {
+            let mut pk_parts = Vec::with_capacity(meta.primary_key.len());
+            for pk_field in &meta.primary_key {
+                if let Some(v) = row.get(pk_field) {
+                    pk_parts.push(v.clone());
                 } else {
                     return Err(MonoError::InvalidOperation(format!(
                         "primary key '{pk_field}' does not exist in '{collection}'"
                     )));
                 }
             }
-            let key_bytes = pk_values.join(":").as_bytes().to_vec();
+            crate::storage::key_encoding::encode_composite_sortable(&pk_parts)
+        } else {
+            // Fallback to schema lookup
+            let schema = self.schemas.get(collection).unwrap();
+            if let Schema::Table { primary_key, .. } = schema.value() {
+                if primary_key.is_empty() {
+                    return Err(MonoError::InvalidOperation(format!(
+                        "table '{collection}' has no primary key defined"
+                    )));
+                }
+                let mut pk_parts = Vec::with_capacity(primary_key.len());
+                for pk_field in primary_key {
+                    if let Some(v) = row.get(pk_field) {
+                        pk_parts.push(v.clone());
+                    } else {
+                        return Err(MonoError::InvalidOperation(format!(
+                            "primary key '{pk_field}' does not exist in '{collection}'"
+                        )));
+                    }
+                }
+                crate::storage::key_encoding::encode_composite_sortable(&pk_parts)
+            } else {
+                unreachable!()
+            }
+        };
 
-            // Store as Value::Row (IndexMap) to preserve column order from schema
-            let mut ordered_row: IndexMap<String, MonoValue> = IndexMap::new();
-            for col in columns {
+        // Build ordered row - use cached column order
+        let ordered_row = if let Some(ref meta) = meta {
+            let mut ordered = IndexMap::with_capacity(meta.columns.len());
+            for col in &meta.columns {
                 if let Some(value) = row.get(&col.name) {
-                    ordered_row.insert(col.name.clone(), value.clone());
+                    ordered.insert(col.name.clone(), value.clone());
                 }
             }
-            let value_to_store = MonoValue::Row(ordered_row);
-            // Serialize
-            let value_bytes = value_to_store.to_bytes();
-
-            if self.config.use_lsm {
-                self.lsm_put_with_wal(collection, key_bytes.clone(), value_bytes)
-                    .await?;
-            } else if let Some(btree) = self.btrees.get(collection) {
-                btree.insert(&key_bytes, &value_bytes).await?;
-            } else {
-                return Err(MonoError::NotFound(format!(
-                    "collection '{collection}' not found"
-                )));
-            }
-
-            Ok(key_bytes)
+            ordered
         } else {
-            unreachable!()
+            let schema = self.schemas.get(collection).unwrap();
+            if let Schema::Table { columns, .. } = schema.value() {
+                let mut ordered = IndexMap::with_capacity(columns.len());
+                for col in columns {
+                    if let Some(value) = row.get(&col.name) {
+                        ordered.insert(col.name.clone(), value.clone());
+                    }
+                }
+                ordered
+            } else {
+                unreachable!()
+            }
+        };
+
+        let value_to_store = MonoValue::Row(ordered_row);
+        let value_bytes = value_to_store.to_bytes();
+
+        // Check if PK already exists (for INSERT, not UPDATE)
+        // This prevents duplicate inserts in auto-commit mode
+        if self.check_pk_exists(collection, &key_bytes, None).await? {
+            return Err(MonoError::InvalidOperation(format!(
+                "Duplicate primary key: row with this key already exists in '{collection}'"
+            )));
         }
+
+        self.tree_put_with_wal(collection, key_bytes.clone(), value_bytes)
+            .await?;
+
+        Ok(key_bytes)
     }
 
     /// Persist schemas to disk atomically using storage-format.md §3
@@ -1719,94 +1994,18 @@ impl StorageEngine {
     // Helper methods for storage structures
 
     #[inline(always)]
-    fn create_lsm_tree(&self, collection_name: &str) -> Result<Arc<LsmTree>> {
-        let lsm_config = crate::config::LsmConfig {
-            memtable_size: self.config.lsm.memtable_size,
-            level0_file_num_compaction_trigger: self.config.lsm.level0_file_num_compaction_trigger,
-            level0_size: self.config.lsm.level0_size,
-            level_multiplier: self.config.lsm.level_multiplier,
-            compression: self.config.lsm.compression,
-            max_level: self.config.lsm.max_level,
-            block_cache_capacity: self.config.lsm.block_cache_capacity,
-        };
-
-        let collection_path = std::path::Path::new(&self.config.data_dir).join(collection_name);
-        // Use external WAL, system WAL handles persistence
-        Ok(Arc::new(crate::storage::lsm::LsmTree::with_external_wal(
-            collection_path,
-            lsm_config,
-            collection_name.to_string(),
-        )?))
-    }
-
-    #[inline(always)]
-    fn create_btree(&self, collection_name: &str) -> Result<Arc<BTree>> {
+    fn create_storage_tree(&self, collection_name: &str) -> Result<Arc<StorageTree>> {
         let collection_dir = std::path::Path::new(&self.config.data_dir).join(collection_name);
         std::fs::create_dir_all(&collection_dir)?;
 
-        let dm = Arc::new(DiskManager::new(&collection_dir)?);
-        let bp = Arc::new(BufferPool::new(
-            self.config.buffer_pool_size,
-            Arc::clone(&dm),
-        ));
+        let db_path = collection_dir.join("data.db");
+        let tree = StorageTree::new(
+            db_path,
+            collection_name.to_string(),
+            self.config.buffer_pool_size.max(DEFAULT_BTREE_POOL_SIZE),
+        )?;
 
-        let wal_path = collection_dir.join("wal.log");
-        let wal = Wal::with_config(&wal_path, self.config.wal.clone())?;
-
-        let btree = BTree::new(collection_name.to_string(), Arc::clone(&bp))
-            .with_wal(Arc::new(RwLock::new(wal)));
-
-        Ok(Arc::new(btree))
-    }
-
-    #[allow(dead_code)]
-    async fn recover_btree_from_wal(
-        &self,
-        collection_name: &str,
-        btree: &Arc<BTree>,
-    ) -> Result<()> {
-        let wal_path = std::path::Path::new(&self.config.data_dir)
-            .join(collection_name)
-            .join("wal.log");
-        let entries = crate::storage::wal::Wal::replay(&wal_path)?;
-        tracing::info!(
-            "Recovering B-Tree '{}' from WAL: {} entries",
-            collection_name,
-            entries.len()
-        );
-
-        let mut processed = 0usize;
-        for entry in entries {
-            use crate::storage::wal::WalEntryType;
-            match entry.entry_type {
-                WalEntryType::Insert | WalEntryType::Update => {
-                    btree.insert_no_wal(&entry.key, &entry.value).await?;
-                }
-                WalEntryType::Delete => {
-                    btree.delete_no_wal(&entry.key).await?;
-                }
-                WalEntryType::Checkpoint => {}
-                WalEntryType::TxBegin | WalEntryType::TxCommit | WalEntryType::TxRollback => {
-                    // Transaction markers are not applied during recovery
-                }
-            }
-            processed += 1;
-            if processed.is_multiple_of(100) {
-                tracing::info!(
-                    "Recovering '{}' from WAL: processed {} entries",
-                    collection_name,
-                    processed
-                );
-            }
-        }
-        tracing::info!(
-            "Finished recovering '{}' from WAL: processed {} entries",
-            collection_name,
-            processed
-        );
-
-        btree.flush().await?;
-        Ok(())
+        Ok(Arc::new(tree))
     }
 
     async fn create_storage_structures_for_schema(
@@ -1828,17 +2027,38 @@ impl StorageEngine {
                 persistence: KeySpacePersistence::Persistent,
                 ..
             }
-            | Schema::Collection { .. }
-            | Schema::Table { .. } => {
-                if self.config.use_lsm {
-                    let lsm_tree = self.create_lsm_tree(collection_name)?;
-                    self.lsm_trees.insert(collection_name.to_string(), lsm_tree);
-                    tracing::debug!("Created LSM tree: {}", collection_name);
-                } else {
-                    let btree = self.create_btree(collection_name)?;
-                    self.btrees.insert(collection_name.to_string(), btree);
-                    tracing::debug!("Created B-Tree: {}", collection_name);
-                }
+            | Schema::Collection { .. } => {
+                let tree = self.create_storage_tree(collection_name)?;
+                self.storage_trees.insert(collection_name.to_string(), tree);
+                tracing::debug!("Created B+Tree storage: {}", collection_name);
+            }
+            Schema::Table {
+                columns,
+                primary_key,
+                indexes,
+                ..
+            } => {
+                // Create storage tree
+                let tree = self.create_storage_tree(collection_name)?;
+                self.storage_trees.insert(collection_name.to_string(), tree);
+                tracing::debug!("Created B+Tree storage: {}", collection_name);
+
+                // Build and cache table metadata for faster validation
+                let column_names: HashSet<String> =
+                    columns.iter().map(|c| c.name.clone()).collect();
+                let has_unique_indexes = indexes.iter().any(|idx| idx.unique);
+                let has_unique_columns = columns.iter().any(|c| c.is_unique);
+
+                let meta = TableMeta {
+                    column_names,
+                    columns: columns.clone(),
+                    primary_key: primary_key.clone(),
+                    has_unique_indexes,
+                    has_unique_columns,
+                };
+                self.table_meta_cache
+                    .insert(collection_name.to_string(), meta);
+                tracing::debug!("Cached table metadata for: {}", collection_name);
             }
         }
         Ok(())
@@ -1906,30 +2126,15 @@ impl StorageEngine {
                 }
             });
 
-        let pairs: Vec<(Vec<u8>, Vec<u8>)> = if self.config.use_lsm {
-            if let Some(lsm) = self.lsm_trees.get(collection) {
-                if let Some(prefix) = namespace_prefix {
-                    let start = format!("{prefix}:").into_bytes();
-                    let mut end = start.clone();
-                    end.push(0xFF);
-                    lsm.scan(&start, &end).await?
-                } else {
-                    lsm.scan(&[], &[0xFF]).await?
-                }
-            } else {
-                return Err(MonoError::NotFound(format!(
-                    "collection {collection} not found"
-                )));
-            }
-        } else if let Some(btree) = self.btrees.get(collection) {
+        let pairs: Vec<(Vec<u8>, Vec<u8>)> = if let Some(tree) = self.storage_trees.get(collection)
+        {
             if let Some(prefix) = namespace_prefix {
                 let start = format!("{prefix}:").into_bytes();
                 let mut end = start.clone();
-                end.extend(std::iter::repeat_n(0xFFu8, 64));
-                btree.scan(&start, &end).await?
+                end.push(0xFF);
+                tree.scan(&start, &end).await?
             } else {
-                let end = vec![0xFFu8; 64];
-                btree.scan(&[], &end).await?
+                tree.scan(&[], &[0xFF]).await?
             }
         } else {
             return Err(MonoError::NotFound(format!(
@@ -1944,13 +2149,15 @@ impl StorageEngine {
             match MonoValue::from_bytes(&v) {
                 Ok((mut mv, _bytes_read)) => {
                     if let MonoValue::Object(ref mut obj) = mv {
-                        obj.insert("_key".to_string(), MonoValue::String(key_str.clone()));
-                        obj.insert("key".to_string(), MonoValue::String(key_str));
+                        // If the object doesn't have a key field, add it
+                        if !obj.contains_key("key") {
+                            obj.insert("key".to_string(), MonoValue::String(key_str));
+                        }
                     } else {
+                        // For non-object values, wrap in a simple key-value object
                         let mut map = BTreeMap::new();
-                        map.insert("_key".to_string(), MonoValue::String(key_str.clone()));
                         map.insert("key".to_string(), MonoValue::String(key_str));
-                        map.insert("_value".to_string(), mv);
+                        map.insert("value".to_string(), mv);
                         mv = MonoValue::Object(map);
                     }
                     values.push(mv);
@@ -1961,17 +2168,22 @@ impl StorageEngine {
             }
         }
 
+        // Apply filter if provided (skip if we already did prefix filtering)
         let filtered = if let Some(filter) = &query.filter {
-            match filter {
+            // If we already filtered by prefix, skip re-filtering for that same prefix query
+            let is_prefix_query = matches!(
+                filter,
                 crate::storage::models::Filter::Eq(field, MonoValue::String(s))
-                    if field == "key" && s.ends_with(':') =>
-                {
-                    values
-                }
-                _ => values
+                    if field == "key" && s.ends_with(':')
+            );
+
+            if is_prefix_query {
+                values
+            } else {
+                values
                     .into_iter()
                     .filter(|v| self.apply_filter(v, filter))
-                    .collect(),
+                    .collect()
             }
         } else {
             values
@@ -2010,7 +2222,7 @@ impl StorageEngine {
                 }
             });
 
-        let mut values: Vec<MonoValue> = store
+        let values: Vec<MonoValue> = store
             .iter()
             .filter_map(|entry| {
                 let key = entry.key();
@@ -2022,21 +2234,45 @@ impl StorageEngine {
                 let value = entry.value();
                 let obj = if let MonoValue::Object(map) = value.clone() {
                     let mut m = map;
-                    m.insert("_key".to_string(), MonoValue::String(key.clone()));
-                    m.insert("key".to_string(), MonoValue::String(key.clone()));
+                    // If the object doesn't have a key field, add it
+                    if !m.contains_key("key") {
+                        m.insert("key".to_string(), MonoValue::String(key.clone()));
+                    }
                     MonoValue::Object(m)
                 } else {
+                    // For non-object values, wrap in a simple key-value object
                     let mut map = BTreeMap::new();
-                    map.insert("_key".to_string(), MonoValue::String(key.clone()));
                     map.insert("key".to_string(), MonoValue::String(key.clone()));
-                    map.insert("_value".to_string(), value.clone());
+                    map.insert("value".to_string(), value.clone());
                     MonoValue::Object(map)
                 };
                 Some(obj)
             })
             .collect();
 
-        values.sort_by(|a, b| {
+        // Apply filter if provided (skip if we already did prefix filtering)
+        let filtered = if let Some(filter) = &query.filter {
+            // If we already filtered by prefix, skip re-filtering for that same prefix query
+            let is_prefix_query = matches!(
+                filter,
+                crate::storage::models::Filter::Eq(field, MonoValue::String(s))
+                    if field == "key" && s.ends_with(':')
+            );
+
+            if is_prefix_query {
+                values
+            } else {
+                values
+                    .into_iter()
+                    .filter(|v| self.apply_filter(v, filter))
+                    .collect()
+            }
+        } else {
+            values
+        };
+
+        let mut out = filtered;
+        out.sort_by(|a, b| {
             let ka = a
                 .as_object()
                 .and_then(|o| o.get("_key"))
@@ -2053,9 +2289,9 @@ impl StorageEngine {
         });
 
         if let Some(limit) = query.limit {
-            values.truncate(limit);
+            out.truncate(limit);
         }
-        Ok(values)
+        Ok(out)
     }
 
     async fn find_with_filter(
@@ -2089,17 +2325,9 @@ impl StorageEngine {
         };
 
         // Scan all key-value pairs
-        let pairs: Vec<(Vec<u8>, Vec<u8>)> = if self.config.use_lsm {
-            if let Some(lsm) = self.lsm_trees.get(collection) {
-                lsm.scan_with_limit(&[], &[0xFF], scan_limit).await?
-            } else {
-                return Err(MonoError::NotFound(format!(
-                    "collection {collection} not found"
-                )));
-            }
-        } else if let Some(btree) = self.btrees.get(collection) {
-            let end = vec![0xFFu8; 64];
-            btree.scan(&[], &end).await? // BTree doesn't have limit support yet
+        let pairs: Vec<(Vec<u8>, Vec<u8>)> = if let Some(tree) = self.storage_trees.get(collection)
+        {
+            tree.scan_with_limit(&[], &[0xFF], scan_limit).await?
         } else {
             return Err(MonoError::NotFound(format!(
                 "collection {collection} not found"
@@ -2153,11 +2381,16 @@ impl StorageEngine {
                     }
                 } else {
                     // Non-versioned key (legacy data) - always visible
+                    // Still need to track seen PKs to avoid duplicates with versioned entries
+                    if seen_pks.contains(&key) {
+                        continue;
+                    }
                     match MonoValue::from_bytes(&value) {
                         Ok((mv, _)) => {
                             if filter.is_none() || self.apply_filter(&mv, filter.unwrap()) {
                                 results.push(mv);
                             }
+                            seen_pks.insert(key);
                         }
                         Err(e) => {
                             tracing::warn!("failed to deserialize value: {}", e);
@@ -2236,8 +2469,13 @@ impl StorageEngine {
     fn apply_filter(&self, row: &MonoValue, filter: &crate::storage::models::Filter) -> bool {
         use crate::storage::models::Filter as F;
         match filter {
-            F::Eq(field, v) => Self::get_field(row, field) == Some(v),
-            F::Neq(field, v) => Self::get_field(row, field).is_some_and(|x| x != v),
+            F::Eq(field, v) => {
+                let field_val = Self::get_field(row, field);
+                field_val.is_some_and(|x| Self::values_equal(x, v))
+            }
+            F::Neq(field, v) => {
+                Self::get_field(row, field).is_some_and(|x| !Self::values_equal(x, v))
+            }
             F::Gt(field, v) => Self::get_field(row, field)
                 .is_some_and(|x| Self::compare_values(x, v) == std::cmp::Ordering::Greater),
             F::Gte(field, v) => Self::get_field(row, field).is_some_and(|x| {
@@ -2255,12 +2493,58 @@ impl StorageEngine {
                 )
             }),
             F::Contains(field, v) => Self::get_field(row, field).is_some_and(|x| match x {
-                MonoValue::Array(a) => a.iter().any(|e| e == v),
+                MonoValue::Array(a) => a.iter().any(|e| Self::values_equal(e, v)),
                 MonoValue::String(s) => v.as_string().map(|pat| s.contains(pat)).unwrap_or(false),
                 other => other.to_string().contains(&v.to_string()),
             }),
             F::And(list) => list.iter().all(|f| self.apply_filter(row, f)),
             F::Or(list) => list.iter().any(|f| self.apply_filter(row, f)),
+        }
+    }
+
+    /// Compare values for equality with type coercion for numeric types
+    fn values_equal(a: &MonoValue, b: &MonoValue) -> bool {
+        match (a, b) {
+            // Same types - direct comparison
+            (MonoValue::Int32(x), MonoValue::Int32(y)) => x == y,
+            (MonoValue::Int64(x), MonoValue::Int64(y)) => x == y,
+            (MonoValue::Float32(x), MonoValue::Float32(y)) => x == y,
+            (MonoValue::Float64(x), MonoValue::Float64(y)) => x == y,
+
+            // Cross-type integer comparisons
+            (MonoValue::Int32(x), MonoValue::Int64(y)) => (*x as i64) == *y,
+            (MonoValue::Int64(x), MonoValue::Int32(y)) => *x == (*y as i64),
+
+            // Cross-type float comparisons
+            (MonoValue::Float32(x), MonoValue::Float64(y)) => (*x as f64) == *y,
+            (MonoValue::Float64(x), MonoValue::Float32(y)) => *x == (*y as f64),
+
+            // Int-float comparisons
+            (MonoValue::Int32(x), MonoValue::Float64(y)) => (*x as f64) == *y,
+            (MonoValue::Float64(x), MonoValue::Int32(y)) => *x == (*y as f64),
+            (MonoValue::Int64(x), MonoValue::Float64(y)) => (*x as f64) == *y,
+            (MonoValue::Float64(x), MonoValue::Int64(y)) => *x == (*y as f64),
+            (MonoValue::Int32(x), MonoValue::Float32(y)) => (*x as f32) == *y,
+            (MonoValue::Float32(x), MonoValue::Int32(y)) => *x == (*y as f32),
+            (MonoValue::Int64(x), MonoValue::Float32(y)) => (*x as f32) == *y,
+            (MonoValue::Float32(x), MonoValue::Int64(y)) => *x == (*y as f32),
+
+            // String vs numeric/uuid/bool comparisons (helpful for keyspace filters)
+            (MonoValue::String(s), MonoValue::Int32(n)) => s == &n.to_string(),
+            (MonoValue::String(s), MonoValue::Int64(n)) => s == &n.to_string(),
+            (MonoValue::String(s), MonoValue::Float32(n)) => s == &n.to_string(),
+            (MonoValue::String(s), MonoValue::Float64(n)) => s == &n.to_string(),
+            (MonoValue::String(s), MonoValue::Bool(b)) => s == &b.to_string(),
+            (MonoValue::String(s), MonoValue::Uuid(u)) => s == &u.to_string(),
+            (MonoValue::Int32(n), MonoValue::String(s)) => &n.to_string() == s,
+            (MonoValue::Int64(n), MonoValue::String(s)) => &n.to_string() == s,
+            (MonoValue::Float32(n), MonoValue::String(s)) => &n.to_string() == s,
+            (MonoValue::Float64(n), MonoValue::String(s)) => &n.to_string() == s,
+            (MonoValue::Bool(b), MonoValue::String(s)) => &b.to_string() == s,
+            (MonoValue::Uuid(u), MonoValue::String(s)) => &u.to_string() == s,
+
+            // All other types - direct equality
+            _ => a == b,
         }
     }
 
@@ -2271,14 +2555,21 @@ impl StorageEngine {
             )));
         }
 
-        if self.config.use_lsm {
-            let _ = self.lsm_trees.remove(collection_name);
-        } else {
-            let _ = self.btrees.remove(collection_name);
-        }
+        let _ = self.storage_trees.remove(collection_name);
+
+        // Remove table metadata cache
+        self.table_meta_cache.remove(collection_name);
 
         // Remove secondary indexes
         self.secondary_indexes.remove(collection_name);
+
+        // Delete the data directory on disk
+        let collection_dir = std::path::Path::new(&self.config.data_dir).join(collection_name);
+        if collection_dir.exists() {
+            std::fs::remove_dir_all(&collection_dir)
+                .map_err(|e| MonoError::Io(format!("failed to delete collection data: {e}")))?;
+            tracing::debug!("Deleted data directory for '{}'", collection_name);
+        }
 
         self.persist_schemas().await?;
         Ok(())
@@ -2294,48 +2585,15 @@ impl StorageEngine {
     pub async fn count_rows(
         &self,
         collection_name: &str,
-        tx: Option<&Transaction>,
+        _tx: Option<&Transaction>,
     ) -> Result<usize> {
-        // Scan all keys and count unique visible primary keys
-        let pairs = if self.config.use_lsm {
-            if let Some(lsm) = self.lsm_trees.get(collection_name) {
-                lsm.scan_with_limit(&[], &[0xFF], None).await?
-            } else {
-                return Err(MonoError::NotFound(format!(
-                    "collection '{collection_name}' not found"
-                )));
-            }
-        } else if let Some(btree) = self.btrees.get(collection_name) {
-            btree.scan(&[], &[0xFF; 64]).await?
+        if let Some(tree) = self.storage_trees.get(collection_name) {
+            Ok(tree.len())
         } else {
-            return Err(MonoError::NotFound(format!(
+            Err(MonoError::NotFound(format!(
                 "collection '{collection_name}' not found"
-            )));
-        };
-
-        let mut count = 0;
-        let mut seen_pks: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
-
-        for (key, _value) in pairs.iter() {
-            if let Some((pk, version_ts)) = decode_versioned_key(key) {
-                if seen_pks.contains(&pk) {
-                    continue;
-                }
-
-                let visible = if let Some(tx) = tx {
-                    self.is_version_visible(version_ts, tx)
-                } else {
-                    self.is_version_visible_no_tx(version_ts)
-                };
-
-                if visible {
-                    count += 1;
-                    seen_pks.insert(pk);
-                }
-            }
+            )))
         }
-
-        Ok(count)
     }
 
     /// Create a secondary index on a collection/table
@@ -2732,20 +2990,27 @@ impl StorageEngine {
         primary_key: &[u8],
         tx: Option<&Transaction>,
     ) -> Result<Option<MonoValue>> {
+        // First try direct lookup for non-versioned key
+        if let Some(tree) = self.storage_trees.get(collection_name)
+            && let Some(value) = tree.get(primary_key).await?
+        {
+            match MonoValue::from_bytes(&value) {
+                Ok((mv, _)) => return Ok(Some(mv)),
+                Err(e) => {
+                    tracing::warn!("Failed to deserialize non-versioned row: {}", e);
+                }
+            }
+        }
+
         // Create scan range for this primary key (all versions)
         // Versioned keys are: {pk_bytes}{separator}{timestamp}
         // We scan from pk_bytes to pk_bytes + high byte to get all versions
         let mut end_key = primary_key.to_vec();
         end_key.push(0xFF);
 
-        let pairs = if self.config.use_lsm {
-            if let Some(lsm) = self.lsm_trees.get(collection_name) {
-                lsm.scan_range_with_limit(primary_key, &end_key, 64).await?
-            } else {
-                return Ok(None);
-            }
-        } else if let Some(btree) = self.btrees.get(collection_name) {
-            btree.scan(primary_key, &end_key).await?
+        let pairs = if let Some(tree) = self.storage_trees.get(collection_name) {
+            tree.scan_range_with_limit(primary_key, &end_key, 64)
+                .await?
         } else {
             return Ok(None);
         };
@@ -2840,24 +3105,15 @@ impl StorageEngine {
         // Over-fetch slightly to account for MVCC filtering (multiple versions per key)
         let scan_limit = limit.map(|l| l.saturating_mul(3).max(100));
 
-        let pairs = if self.config.use_lsm {
-            if let Some(lsm) = self.lsm_trees.get(collection_name) {
-                if ascending {
-                    // Forward scan: smallest keys first
-                    lsm.scan_with_limit(&[], &[0xFF], scan_limit).await?
-                } else {
-                    // Reverse scan: largest keys first (proper DESC support)
-                    lsm.scan_reverse_with_limit(&[], &[0xFF], scan_limit)
-                        .await?
-                }
+        let pairs = if let Some(tree) = self.storage_trees.get(collection_name) {
+            if ascending {
+                // Forward scan: smallest keys first
+                tree.scan_with_limit(&[], &[0xFF], scan_limit).await?
             } else {
-                return Err(MonoError::NotFound(format!(
-                    "collection '{collection_name}' not found"
-                )));
+                // Reverse scan: largest keys first (proper DESC support)
+                tree.scan_reverse_with_limit(&[], &[0xFF], scan_limit)
+                    .await?
             }
-        } else if let Some(btree) = self.btrees.get(collection_name) {
-            // BTree doesn't have reverse scan yet, fall back to forward scan
-            btree.scan(&[], &[0xFF; 64]).await?
         } else {
             return Err(MonoError::NotFound(format!(
                 "collection '{collection_name}' not found"
@@ -2999,13 +3255,7 @@ impl StorageEngine {
 
     pub async fn flush(&self) -> Result<()> {
         info!("Flushing storage engine...");
-        if let Some(bp) = &self.buffer_pool {
-            bp.flush_all()?;
-        }
-        for e in self.btrees.iter() {
-            e.value().flush().await?;
-        }
-        for e in self.lsm_trees.iter() {
+        for e in self.storage_trees.iter() {
             e.value().flush().await?;
         }
         self.persist_schemas().await?;
@@ -3013,20 +3263,23 @@ impl StorageEngine {
     }
 
     pub async fn checkpoint_all(&self) -> Result<Vec<(String, Option<u64>)>> {
+        // Flush all storage trees and return empty sequence numbers
+        // (new B+Tree doesn't have WAL-based checkpoints)
         let mut out = Vec::new();
-        for e in self.lsm_trees.iter() {
-            let seq = e.value().checkpoint().await?;
-            out.push((e.key().clone(), seq));
+        for e in self.storage_trees.iter() {
+            e.value().flush().await?;
+            out.push((e.key().clone(), None));
         }
         Ok(out)
     }
 
     pub async fn checkpoint_collection(&self, collection_name: &str) -> Result<Option<u64>> {
-        if let Some(lsm) = self.lsm_trees.get(collection_name) {
-            lsm.checkpoint().await
+        if let Some(tree) = self.storage_trees.get(collection_name) {
+            tree.flush().await?;
+            Ok(None) // B+Tree doesn't have WAL-based checkpoints
         } else {
             Err(MonoError::NotFound(format!(
-                "collection '{collection_name}' not found or not LSM-backed"
+                "collection '{collection_name}' not found"
             )))
         }
     }
@@ -3035,55 +3288,54 @@ impl StorageEngine {
         &self,
         collection_name: &str,
     ) -> Result<Option<crate::storage::wal::WalStats>> {
-        if let Some(lsm) = self.lsm_trees.get(collection_name) {
-            Ok(lsm.wal_stats())
+        // StorageTree uses system WAL, not per-collection WAL
+        if self.storage_trees.contains_key(collection_name) {
+            Ok(None)
         } else {
             Err(MonoError::NotFound(format!(
-                "collection '{collection_name}' not found or not LSM-backed"
+                "collection '{collection_name}' not found"
             )))
         }
     }
 
     pub async fn sync_wal(&self, collection_name: &str) -> Result<()> {
-        if let Some(lsm) = self.lsm_trees.get(collection_name) {
-            lsm.sync_wal().await
+        if let Some(tree) = self.storage_trees.get(collection_name) {
+            tree.flush().await
         } else {
             Err(MonoError::NotFound(format!(
-                "collection '{collection_name}' not found or not LSM-backed"
+                "collection '{collection_name}' not found"
             )))
         }
     }
 
     /// Commit barrier: wait until current WAL writes for a collection are durable.
-    /// Only effective when WAL async mode is enabled; returns Ok(false) on timeout.
+    /// With B+Tree storage, this just flushes the tree.
     pub async fn wal_commit_current(
         &self,
         collection_name: &str,
-        timeout_ms: Option<u64>,
+        _timeout_ms: Option<u64>,
     ) -> Result<bool> {
-        if let Some(lsm) = self.lsm_trees.get(collection_name) {
-            let to = timeout_ms.map(std::time::Duration::from_millis);
-            lsm.wal_commit_current(to).await
+        if let Some(tree) = self.storage_trees.get(collection_name) {
+            tree.flush().await?;
+            Ok(true)
         } else {
             Err(MonoError::NotFound(format!(
-                "collection '{collection_name}' not found or not LSM-backed"
+                "collection '{collection_name}' not found"
             )))
         }
     }
 
     pub async fn maintenance(&self) -> Result<()> {
         info!("Running storage maintenance");
-        for e in self.lsm_trees.iter() {
-            e.value().auto_checkpoint_if_needed().await?;
-            if let Some(stats) = e.value().wal_stats() {
-                debug!(
-                    "collection '{}' WAL size {} next_seq {} last_checkpoint {:?}",
-                    e.key(),
-                    stats.current_size,
-                    stats.next_sequence,
-                    stats.last_checkpoint_sequence
-                );
-            }
+        for e in self.storage_trees.iter() {
+            e.value().flush().await?;
+            let stats = e.value().stats();
+            debug!(
+                "collection '{}' B+Tree: {} entries, {} pages in pool",
+                e.key(),
+                e.value().len(),
+                stats.used_frames
+            );
         }
         Ok(())
     }
@@ -3763,9 +4015,14 @@ impl StorageEngine {
         // Key is "table:column"
         let key = format!("{table}:{column}");
 
-        let entry = SEQUENCES
-            .entry(key.clone())
-            .or_insert_with(|| AtomicU64::new(1));
+        let entry = SEQUENCES.entry(key.clone()).or_insert_with(|| {
+            // Initialize from current row count + 1 to avoid collisions
+            if let Some(tree) = self.storage_trees.get(table) {
+                AtomicU64::new(tree.len() as u64 + 1)
+            } else {
+                AtomicU64::new(1)
+            }
+        });
         let next = entry.fetch_add(1, Ordering::SeqCst);
 
         Ok(next)
@@ -3925,6 +4182,14 @@ impl TransactionManager {
         }
     }
 
+    /// Get the write set for a transaction
+    pub fn get_write_set(&self, tx_id: u64) -> HashSet<(String, Vec<u8>)> {
+        self.transactions
+            .get(&tx_id)
+            .map(|tx| tx.write_set.clone())
+            .unwrap_or_default()
+    }
+
     /// Recalculate the oldest active transaction timestamp
     fn update_oldest_active(&self) {
         let mut oldest = u64::MAX;
@@ -3951,11 +4216,6 @@ impl TransactionManager {
             .filter(|entry| entry.status == TxStatus::Aborted)
             .map(|entry| entry.tx_id)
             .collect()
-    }
-
-    /// Get a GC context for compaction
-    pub fn gc_context(&self) -> crate::storage::lsm::compaction::GcContext {
-        crate::storage::lsm::compaction::GcContext::new(self.oldest_active(), self.aborted_tx_ids())
     }
 }
 

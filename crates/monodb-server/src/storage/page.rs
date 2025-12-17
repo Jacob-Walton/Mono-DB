@@ -1,528 +1,346 @@
 use monodb_common::{MonoError, Result};
-use serde::{Deserialize, Serialize};
 
-pub const PAGE_SIZE: usize = 16384; // 16KB pages
-pub const PAGE_HEADER_SIZE: usize = 64;
-pub const PAGE_DATA_SIZE: usize = PAGE_SIZE - PAGE_HEADER_SIZE;
+/// Page size in bytes
+pub const PAGE_SIZE: usize = 16 * 1024; // 16 KB
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct PageId(pub u64);
+/// Page header size
+pub const PAGE_HEADER_SIZE: usize = 64; // 64 bytes
 
+/// Usable date area in a page
+pub const PAGE_DATA_SIZE: usize = PAGE_SIZE - PAGE_HEADER_SIZE; // 16 KB - 64 bytes
+
+/// Invalid page ID sentinel
+pub const INVALID_PAGE_ID: u32 = u32::MAX;
+
+// Page types
+
+/// Page identifier
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(transparent)]
+pub struct PageId(pub u32);
+
+impl PageId {
+    pub const INVALID: PageId = PageId(INVALID_PAGE_ID);
+
+    #[inline(always)]
+    pub fn is_valid(&self) -> bool {
+        self.0 != INVALID_PAGE_ID
+    }
+}
+
+/// Page type discriminator
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageType {
     Invalid = 0,
-    Meta = 1,     // Metadata page
-    Interior = 2, // B-tree interior node
-    Leaf = 3,     // B-tree leaf node
-    Overflow = 4, // Overflow data
-    Free = 5,     // Free page
+    Leaf = 1,
+    Interior = 2,
+    Free = 3,
 }
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct PageHeader {
-    pub magic: u32, // Magic number for validation
+// Disk page serialization
+
+const DISK_PAGE_MAGIC: u32 = 0x42545245; // "BTRE"
+
+/// A disk page with fixed-size raw byte layout
+/// Layout:
+///     - Header (64 bytes):
+///         - magic: u32 (4 bytes)
+///         - page_type: u8 (1 byte)
+///         - _reserved: [u8; 3] (3 bytes)
+///         - page_id: u32 (4 bytes)
+///         - key_count: u16 (2 bytes)
+///         - next_leaf: u32 (4 bytes)
+///         - parent: u32 (4 bytes)
+///         - lsn: u64 (8 bytes)
+///         - _reserved2: [u8; 30] (30 bytes)
+///         - checksum: u32 (4 bytes)
+///     - Data (PAGE_SIZE - 64 bytes):
+///         - Variable length encoded keys, values, children
+#[derive(Clone)]
+pub struct DiskPage {
     pub page_type: PageType,
     pub page_id: PageId,
-    pub lsn: u64, // Log sequence number
-    pub checksum: u32,
-    pub free_space_start: u16,
-    pub free_space_end: u16,
-    pub cell_count: u16,
-    pub first_free_cell: u16,
-    pub parent_page: PageId,
-    pub right_sibling: PageId,
-    _padding: [u8; 18],
+    pub key_count: u16,
+    pub next_leaf: PageId,
+    pub parent: PageId,
+    pub lsn: u64,
+    /// Raw data area
+    pub data: Vec<u8>,
 }
 
-impl PageHeader {
-    const MAGIC: u32 = u32::from_be_bytes(*b"MPAG");
-
-    pub fn new(page_type: PageType, page_id: PageId) -> Self {
+impl DiskPage {
+    pub fn new_leaf(page_id: PageId) -> Self {
         Self {
-            magic: Self::MAGIC,
-            page_type,
+            page_type: PageType::Leaf,
             page_id,
+            key_count: 0,
+            next_leaf: PageId::INVALID,
+            parent: PageId::INVALID,
             lsn: 0,
-            checksum: 0,
-            free_space_start: PAGE_HEADER_SIZE as u16,
-            free_space_end: PAGE_SIZE as u16,
-            cell_count: 0,
-            first_free_cell: 0,
-            parent_page: PageId(0),
-            right_sibling: PageId(0),
-            _padding: [0; 18],
+            data: Vec::with_capacity(PAGE_DATA_SIZE),
         }
     }
 
-    // Serialize header into a fixed 64-byte layout with checksum at bytes 60..64 (LE)
-    fn to_bytes(self) -> [u8; PAGE_HEADER_SIZE] {
-        let mut buf = [0u8; PAGE_HEADER_SIZE];
-        // 0..4 magic
-        buf[0..4].copy_from_slice(&self.magic.to_le_bytes());
-        // 4 page_type (u8)
+    pub fn new_interior(page_id: PageId) -> Self {
+        Self {
+            page_type: PageType::Interior,
+            page_id,
+            key_count: 0,
+            next_leaf: PageId::INVALID,
+            parent: PageId::INVALID,
+            lsn: 0,
+            data: Vec::with_capacity(PAGE_DATA_SIZE),
+        }
+    }
+
+    /// Serialize to raw bytes (PAGE_SIZE bytes)
+    #[inline]
+    pub fn to_bytes(&self) -> [u8; PAGE_SIZE] {
+        let mut buf = [0u8; PAGE_SIZE];
+
+        // Safety check: ensure data fits in page
+        if self.data.len() > PAGE_DATA_SIZE {
+            panic!(
+                "Page {} data overflow: {} bytes exceeds {} byte limit. This indicates a bug in max_keys calculation.",
+                self.page_id.0,
+                self.data.len(),
+                PAGE_DATA_SIZE
+            );
+        }
+
+        // Header
+        buf[0..4].copy_from_slice(&DISK_PAGE_MAGIC.to_le_bytes());
         buf[4] = self.page_type as u8;
         // 5..8 reserved
-        buf[5..8].copy_from_slice(&[0u8; 3]);
-        // 8..16 page_id
-        buf[8..16].copy_from_slice(&self.page_id.0.to_le_bytes());
-        // 16..24 lsn
-        buf[16..24].copy_from_slice(&self.lsn.to_le_bytes());
-        // 24..26 free_space_start
-        buf[24..26].copy_from_slice(&self.free_space_start.to_le_bytes());
-        // 26..28 free_space_end
-        buf[26..28].copy_from_slice(&self.free_space_end.to_le_bytes());
-        // 28..30 cell_count
-        buf[28..30].copy_from_slice(&self.cell_count.to_le_bytes());
-        // 30..32 first_free_cell
-        buf[30..32].copy_from_slice(&self.first_free_cell.to_le_bytes());
-        // 32..40 parent_page
-        buf[32..40].copy_from_slice(&self.parent_page.0.to_le_bytes());
-        // 40..48 right_sibling
-        buf[40..48].copy_from_slice(&self.right_sibling.0.to_le_bytes());
-        // 48..60 reserved
-        // leave zeros
+        buf[8..12].copy_from_slice(&self.page_id.0.to_le_bytes());
+        buf[12..14].copy_from_slice(&self.key_count.to_le_bytes());
+        buf[14..18].copy_from_slice(&self.next_leaf.0.to_le_bytes());
+        buf[18..22].copy_from_slice(&self.parent.0.to_le_bytes());
+        buf[22..30].copy_from_slice(&self.lsn.to_le_bytes());
+        // 30..60 reserved
 
-        // checksum over 0..60
+        // Checksum over header[0..60]
         let checksum = crc32fast::hash(&buf[0..60]);
         buf[60..64].copy_from_slice(&checksum.to_le_bytes());
+
+        // Data - we've already verified it fits
+        let data_len = self.data.len();
+        buf[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + data_len].copy_from_slice(&self.data[..data_len]);
+
         buf
     }
 
-    // Deserialize header from fixed 64-byte layout, verify checksum
-    fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() != PAGE_HEADER_SIZE {
-            return Err(MonoError::Storage("Invalid header size".into()));
-        }
-        let magic = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        if magic != Self::MAGIC {
+    /// Deserialize from raw bytes
+    pub fn from_bytes(buf: &[u8; PAGE_SIZE]) -> Result<Self> {
+        // Verify magic
+        let magic = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        if magic != DISK_PAGE_MAGIC {
             return Err(MonoError::Storage("Invalid page magic number".into()));
         }
-        let page_type = match bytes[4] {
-            0 => PageType::Invalid,
-            1 => PageType::Meta,
-            2 => PageType::Interior,
-            3 => PageType::Leaf,
-            4 => PageType::Overflow,
-            5 => PageType::Free,
-            v => return Err(MonoError::Storage(format!("Invalid page type byte: {}", v))),
-        };
-        let page_id = PageId(u64::from_le_bytes([
-            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
-        ]));
-        let lsn = u64::from_le_bytes([
-            bytes[16], bytes[17], bytes[18], bytes[19], bytes[20], bytes[21], bytes[22], bytes[23],
-        ]);
-        let free_space_start = u16::from_le_bytes([bytes[24], bytes[25]]);
-        let free_space_end = u16::from_le_bytes([bytes[26], bytes[27]]);
-        let cell_count = u16::from_le_bytes([bytes[28], bytes[29]]);
-        let first_free_cell = u16::from_le_bytes([bytes[30], bytes[31]]);
-        let parent_page = PageId(u64::from_le_bytes([
-            bytes[32], bytes[33], bytes[34], bytes[35], bytes[36], bytes[37], bytes[38], bytes[39],
-        ]));
-        let right_sibling = PageId(u64::from_le_bytes([
-            bytes[40], bytes[41], bytes[42], bytes[43], bytes[44], bytes[45], bytes[46], bytes[47],
-        ]));
-        let checksum_expected = u32::from_le_bytes([bytes[60], bytes[61], bytes[62], bytes[63]]);
-        let checksum_actual = crc32fast::hash(&bytes[0..60]);
-        if checksum_expected != checksum_actual && checksum_expected != 0 {
-            return Err(MonoError::Storage("Page checksum mismatch".into()));
+
+        // Verify checksum
+        let stored_checksum = u32::from_le_bytes([buf[60], buf[61], buf[62], buf[63]]);
+        let computed_checksum = crc32fast::hash(&buf[0..60]);
+        if stored_checksum != computed_checksum && stored_checksum != 0 {
+            return Err(MonoError::Storage("Checksum mismatch".into()));
         }
+
+        let page_type = match buf[4] {
+            0 => PageType::Invalid,
+            1 => PageType::Leaf,
+            2 => PageType::Interior,
+            3 => PageType::Free,
+            _ => return Err(MonoError::Storage("Invalid page type".into())),
+        };
+
+        let page_id = PageId(u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]));
+        let key_count = u16::from_le_bytes([buf[12], buf[13]]);
+        let next_leaf = PageId(u32::from_le_bytes([buf[14], buf[15], buf[16], buf[17]]));
+        let parent = PageId(u32::from_le_bytes([buf[18], buf[19], buf[20], buf[21]]));
+        let lsn = u64::from_le_bytes([
+            buf[22], buf[23], buf[24], buf[25], buf[26], buf[27], buf[28], buf[29],
+        ]);
+
+        let data = buf[PAGE_HEADER_SIZE..].to_vec();
+
         Ok(Self {
-            magic,
             page_type,
             page_id,
+            key_count,
+            next_leaf,
+            parent,
             lsn,
-            checksum: checksum_expected,
-            free_space_start,
-            free_space_end,
-            cell_count,
-            first_free_cell,
-            parent_page,
-            right_sibling,
-            _padding: [0; 18],
+            data,
         })
     }
+
+    #[inline]
+    pub fn is_leaf(&self) -> bool {
+        self.page_type == PageType::Leaf
+    }
 }
 
-#[derive(Clone)]
-pub struct Page {
-    pub header: PageHeader,
-    pub data: [u8; PAGE_DATA_SIZE],
+// Key-Value Serialization Traits
+
+/// Trait for types that can be serialized to/from raw bytes
+pub trait Serializable: Sized {
+    /// Serialize to bytes, appending to the buffer
+    fn serialize_to(&self, buf: &mut Vec<u8>);
+
+    /// Deserialize from bytes, returing (value, bytes_consumed)
+    fn deserialize_from(buf: &[u8]) -> Result<(Self, usize)>;
+
+    /// Fixed size if known
+    fn fixed_size() -> Option<usize> {
+        None
+    }
+
+    /// Get the serialized size of this value in bytes
+    fn serialized_size(&self) -> usize;
 }
 
-impl Page {
-    pub fn new(page_type: PageType, page_id: PageId) -> Self {
-        Self {
-            header: PageHeader::new(page_type, page_id),
-            data: [0; PAGE_DATA_SIZE],
-        }
+impl Serializable for i32 {
+    fn serialize_to(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&self.to_le_bytes());
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() != PAGE_SIZE {
-            return Err(MonoError::Storage(format!(
-                "Invalid page size: expected {}, got {}",
-                PAGE_SIZE,
-                bytes.len(),
-            )));
+    fn deserialize_from(buf: &[u8]) -> Result<(Self, usize)> {
+        if buf.len() < 4 {
+            return Err(MonoError::Storage("Not enough bytes for i32".into()));
         }
-
-        // Deserialize header from fixed layout
-        let header = PageHeader::from_bytes(&bytes[0..PAGE_HEADER_SIZE])?;
-
-        let mut page = Self {
-            header,
-            data: [0; PAGE_DATA_SIZE],
-        };
-        page.data.copy_from_slice(&bytes[PAGE_HEADER_SIZE..]);
-        Ok(page)
+        Ok((i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]), 4))
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = vec![0u8; PAGE_SIZE];
-        // Build header bytes with correct checksum
-        let header_bytes = self.header.to_bytes();
-        bytes[0..PAGE_HEADER_SIZE].copy_from_slice(&header_bytes);
-        // Copy data
-        bytes[PAGE_HEADER_SIZE..].copy_from_slice(&self.data);
-        bytes
+    fn fixed_size() -> Option<usize> {
+        Some(4)
     }
 
-    pub fn available_space(&self) -> usize {
-        (self.header.free_space_end - self.header.free_space_start) as usize
+    fn serialized_size(&self) -> usize {
+        4
+    }
+}
+
+impl Serializable for i64 {
+    fn serialize_to(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&self.to_le_bytes());
     }
 
-    /// Add a cell (key-value pair) to the page in sorted order
-    pub fn add_cell(&mut self, key: &[u8], value: &[u8]) -> Result<u16> {
-        let cell_size = 4 + key.len() + 4 + value.len(); // lengths + data
-        let directory_entry_size = 2; // 2 bytes for cell offset
-
-        if self.available_space() < cell_size + directory_entry_size {
-            return Err(MonoError::Storage("Not enough space in page".into()));
+    fn deserialize_from(buf: &[u8]) -> Result<(Self, usize)> {
+        if buf.len() < 8 {
+            return Err(MonoError::Storage("Not enough bytes for i64".into()));
         }
-
-        // First, write the cell data at the current free space start
-        let cell_offset = self.header.free_space_start;
-        let mut offset = (cell_offset - PAGE_HEADER_SIZE as u16) as usize;
-
-        // Write key length and key
-        self.data[offset..offset + 4].copy_from_slice(&(key.len() as u32).to_le_bytes());
-        offset += 4;
-        self.data[offset..offset + key.len()].copy_from_slice(key);
-        offset += key.len();
-
-        // Write value length and value
-        self.data[offset..offset + 4].copy_from_slice(&(value.len() as u32).to_le_bytes());
-        offset += 4;
-        self.data[offset..offset + value.len()].copy_from_slice(value);
-
-        // Find the correct position in the sorted cell directory
-        let mut insert_pos = self.header.cell_count as usize;
-
-        // Search through existing cells to find insertion position
-        for i in 0..self.header.cell_count as usize {
-            // Get the cell offset for this position
-            if let Ok(existing_cell_offset) = self.get_cell_offset(i as u16)
-                && let Ok((existing_key, _)) = self.get_cell(existing_cell_offset)
-                && key < existing_key.as_slice()
-            {
-                insert_pos = i;
-                break;
-            }
-        }
-
-        // Move entries that come after insert_pos one position to the right
-        for i in (insert_pos..self.header.cell_count as usize).rev() {
-            let current_dir_offset = self.data.len() - ((i + 1) * 2);
-            let new_dir_offset = self.data.len() - ((i + 2) * 2);
-
-            if current_dir_offset + 1 < self.data.len() && new_dir_offset + 1 < self.data.len() {
-                // Copy the entry to its new position
-                self.data[new_dir_offset] = self.data[current_dir_offset];
-                self.data[new_dir_offset + 1] = self.data[current_dir_offset + 1];
-            }
-        }
-
-        // Insert the new cell at the correct position
-        let final_directory_offset = self.data.len() - ((insert_pos + 1) * 2);
-
-        if final_directory_offset + 1 < self.data.len() {
-            self.data[final_directory_offset..final_directory_offset + 2]
-                .copy_from_slice(&cell_offset.to_le_bytes());
-        }
-
-        self.header.free_space_start += cell_size as u16;
-        self.header.cell_count += 1;
-
-        Ok(cell_offset)
+        Ok((
+            i64::from_le_bytes([
+                buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+            ]),
+            8,
+        ))
     }
 
-    pub fn get_cell(&self, offset: u16) -> Result<(Vec<u8>, Vec<u8>)> {
-        if offset < PAGE_HEADER_SIZE as u16 {
-            return Err(MonoError::Storage(format!(
-                "Cell offset {offset} is less than PAGE_HEADER_SIZE {PAGE_HEADER_SIZE}"
-            )));
+    fn fixed_size() -> Option<usize> {
+        Some(8)
+    }
+
+    fn serialized_size(&self) -> usize {
+        8
+    }
+}
+
+impl Serializable for u32 {
+    fn serialize_to(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&self.to_le_bytes());
+    }
+
+    fn deserialize_from(buf: &[u8]) -> Result<(Self, usize)> {
+        if buf.len() < 4 {
+            return Err(MonoError::Storage("Not enough bytes for u32".into()));
         }
+        Ok((u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]), 4))
+    }
 
-        let mut idx = (offset - PAGE_HEADER_SIZE as u16) as usize;
+    fn fixed_size() -> Option<usize> {
+        Some(4)
+    }
 
-        // Bounds check
-        if idx + 4 > self.data.len() {
-            return Err(MonoError::Storage("Cell offset out of bounds".into()));
+    fn serialized_size(&self) -> usize {
+        4
+    }
+}
+
+impl Serializable for u64 {
+    fn serialize_to(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&self.to_le_bytes());
+    }
+
+    fn deserialize_from(buf: &[u8]) -> Result<(Self, usize)> {
+        if buf.len() < 8 {
+            return Err(MonoError::Storage("Not enough bytes for u64".into()));
         }
+        Ok((
+            u64::from_le_bytes([
+                buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+            ]),
+            8,
+        ))
+    }
 
-        // Read key
-        let key_len = u32::from_le_bytes([
-            self.data[idx],
-            self.data[idx + 1],
-            self.data[idx + 2],
-            self.data[idx + 3],
-        ]) as usize;
-        idx += 4;
+    fn fixed_size() -> Option<usize> {
+        Some(8)
+    }
 
-        // Bounds check for key
-        if idx + key_len > self.data.len() {
-            return Err(MonoError::Storage(format!(
-                "Key length {key_len} would exceed data bounds at idx {idx}"
-            )));
-        }
+    fn serialized_size(&self) -> usize {
+        8
+    }
+}
 
-        let key = self.data[idx..idx + key_len].to_vec();
-        idx += key_len;
+impl Serializable for String {
+    fn serialize_to(&self, buf: &mut Vec<u8>) {
+        let bytes = self.as_bytes();
+        buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        buf.extend_from_slice(bytes);
+    }
 
-        // Bounds check for value length
-        if idx + 4 > self.data.len() {
+    fn deserialize_from(buf: &[u8]) -> Result<(Self, usize)> {
+        if buf.len() < 4 {
             return Err(MonoError::Storage(
-                "Value length offset out of bounds".into(),
+                "Not enough bytes for String length".into(),
             ));
         }
-
-        // Read value
-        let value_len = u32::from_le_bytes([
-            self.data[idx],
-            self.data[idx + 1],
-            self.data[idx + 2],
-            self.data[idx + 3],
-        ]) as usize;
-        idx += 4;
-
-        // Bounds check for value
-        if idx + value_len > self.data.len() {
-            return Err(MonoError::Storage(format!(
-                "Value length {value_len} would exceed data bounds at idx {idx}"
-            )));
-        }
-
-        let value = self.data[idx..idx + value_len].to_vec();
-
-        Ok((key, value))
-    }
-
-    /// Get the number of cells in this page
-    pub fn cell_count(&self) -> u16 {
-        self.header.cell_count
-    }
-
-    /// Get the offset of a cell by its index in the cell directory
-    pub fn get_cell_offset(&self, index: u16) -> Result<u16> {
-        if index >= self.header.cell_count {
-            return Err(MonoError::Storage(format!(
-                "Cell index {} out of bounds (count: {})",
-                index, self.header.cell_count
-            )));
-        }
-
-        // Cell directory starts at the end of the page and grows backward
-        // Index 0 should be the first entry (highest offset)
-        let directory_offset = self.data.len() - ((index as usize + 1) * 2);
-
-        if directory_offset + 1 < self.data.len() {
-            let cell_offset =
-                u16::from_le_bytes([self.data[directory_offset], self.data[directory_offset + 1]]);
-            Ok(cell_offset)
-        } else {
-            Err(MonoError::Storage(
-                "Cell directory offset out of bounds".into(),
-            ))
-        }
-    }
-
-    /// Update a cell in place, only works if new value fits in same space
-    pub fn update_cell(&mut self, offset: u16, key: &[u8], value: &[u8]) -> Result<()> {
-        if offset < PAGE_HEADER_SIZE as u16 {
-            return Err(MonoError::Storage("Invalid cell offset".into()));
-        }
-
-        let mut idx = (offset - PAGE_HEADER_SIZE as u16) as usize;
-
-        // Read existing lengths to verify space
-        if idx + 4 > self.data.len() {
-            return Err(MonoError::Storage("Cell offset out of bounds".into()));
-        }
-
-        let existing_key_len = u32::from_le_bytes([
-            self.data[idx],
-            self.data[idx + 1],
-            self.data[idx + 2],
-            self.data[idx + 3],
-        ]) as usize;
-        idx += 4 + existing_key_len;
-
-        if idx + 4 > self.data.len() {
-            return Err(MonoError::Storage("Cell key length invalid".into()));
-        }
-
-        let existing_value_len = u32::from_le_bytes([
-            self.data[idx],
-            self.data[idx + 1],
-            self.data[idx + 2],
-            self.data[idx + 3],
-        ]) as usize;
-
-        // Check if new data fits in existing space
-        if key.len() != existing_key_len || value.len() > existing_value_len {
+        let len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+        if buf.len() < 4 + len {
             return Err(MonoError::Storage(
-                "New data doesn't fit in existing cell space".into(),
+                "Not enough bytes for String data".into(),
             ));
         }
-
-        // Update the cell data in place
-        let mut offset_idx = (offset - PAGE_HEADER_SIZE as u16) as usize;
-
-        // Write key length and key
-        self.data[offset_idx..offset_idx + 4].copy_from_slice(&(key.len() as u32).to_le_bytes());
-        offset_idx += 4;
-        self.data[offset_idx..offset_idx + key.len()].copy_from_slice(key);
-        offset_idx += key.len();
-
-        // Write value length and value
-        self.data[offset_idx..offset_idx + 4].copy_from_slice(&(value.len() as u32).to_le_bytes());
-        offset_idx += 4;
-        self.data[offset_idx..offset_idx + value.len()].copy_from_slice(value);
-
-        // If new value is shorter, pad with zeros
-        if value.len() < existing_value_len {
-            let padding_start = offset_idx + value.len();
-            let padding_end = offset_idx + existing_value_len;
-            self.data[padding_start..padding_end].fill(0);
-        }
-
-        Ok(())
+        let s = String::from_utf8(buf[4..4 + len].to_vec())
+            .map_err(|e| MonoError::Storage(e.to_string()))?;
+        Ok((s, 4 + len))
     }
 
-    /// Remove a cell by its index in the cell directory
-    pub fn remove_cell(&mut self, index: u16) -> Result<()> {
-        if index >= self.header.cell_count {
-            return Err(MonoError::Storage(format!(
-                "Cell index {} out of bounds (count: {})",
-                index, self.header.cell_count
-            )));
-        }
+    fn serialized_size(&self) -> usize {
+        4 + self.len()
+    }
+}
 
-        // Get the cell offset to determine space freed
-        let cell_offset = self.get_cell_offset(index)?;
-        let (key, value) = self.get_cell(cell_offset)?;
-        let freed_space = 4 + key.len() + 4 + value.len();
-
-        // Mark the cell space as free by zeroing it out
-        // (In a more sophisticated implementation, we'd compact the page)
-        let start_idx = (cell_offset - PAGE_HEADER_SIZE as u16) as usize;
-        let end_idx = start_idx + freed_space;
-        if end_idx <= self.data.len() {
-            self.data[start_idx..end_idx].fill(0);
-        }
-
-        // Remove the cell directory entry by shifting all subsequent entries
-        let _dir_start = self.data.len() - (self.header.cell_count as usize * 2);
-        let _remove_dir_offset = self.data.len() - ((index as usize + 1) * 2);
-
-        // Shift directory entries to fill the gap
-        for i in (index + 1)..self.header.cell_count {
-            let src_offset = self.data.len() - ((i as usize + 1) * 2);
-            let dst_offset = self.data.len() - (i as usize * 2);
-
-            if src_offset + 1 < self.data.len() && dst_offset + 1 < self.data.len() {
-                self.data[dst_offset] = self.data[src_offset];
-                self.data[dst_offset + 1] = self.data[src_offset + 1];
-            }
-        }
-
-        // Clear the last directory entry
-        let last_dir_offset = self.data.len() - (self.header.cell_count as usize * 2);
-        if last_dir_offset + 1 < self.data.len() {
-            self.data[last_dir_offset] = 0;
-            self.data[last_dir_offset + 1] = 0;
-        }
-
-        self.header.cell_count -= 1;
-        // Note: We don't update free_space_start here - in a more sophisticated system,
-        // we'd need to compact the page or use a proper free space management scheme
-
-        Ok(())
+impl Serializable for Vec<u8> {
+    fn serialize_to(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&(self.len() as u32).to_le_bytes());
+        buf.extend_from_slice(self);
     }
 
-    /// Compact the page to reclaim fragmented space from deleted cells
-    #[allow(dead_code)]
-    pub fn compact(&mut self) -> Result<()> {
-        if self.header.cell_count == 0 {
-            // No cells to compact
-            self.header.free_space_start = PAGE_HEADER_SIZE as u16;
-            return Ok(());
+    fn deserialize_from(buf: &[u8]) -> Result<(Self, usize)> {
+        if buf.len() < 4 {
+            return Err(MonoError::Storage("Not enough bytes for Vec length".into()));
         }
-
-        // Collect all valid cells
-        let mut valid_cells = Vec::new();
-        for i in 0..self.header.cell_count {
-            if let Ok(offset) = self.get_cell_offset(i)
-                && let Ok((key, value)) = self.get_cell(offset)
-            {
-                valid_cells.push((key, value));
-            }
+        let len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+        if buf.len() < 4 + len {
+            return Err(MonoError::Storage("Not enough bytes for Vec data".into()));
         }
-
-        // Clear the page data
-        self.data.fill(0);
-        self.header.cell_count = 0;
-        self.header.free_space_start = PAGE_HEADER_SIZE as u16;
-
-        // Re-add all valid cells
-        for (key, value) in valid_cells {
-            self.add_cell(&key, &value)?;
-        }
-
-        Ok(())
+        Ok((buf[4..4 + len].to_vec(), 4 + len))
     }
 
-    /// Get the fragmentation ratio (0.0 = no fragmentation, 1.0 = completely fragmented)
-    #[allow(dead_code)]
-    pub fn fragmentation_ratio(&self) -> f64 {
-        if self.header.cell_count == 0 {
-            return 0.0;
-        }
-
-        let _total_page_space = PAGE_DATA_SIZE as u16;
-        let used_space = self.header.free_space_start - PAGE_HEADER_SIZE as u16;
-        let directory_space = self.header.cell_count * 2;
-        let actual_used_space = used_space + directory_space;
-
-        // Calculate what the used space would be if compacted
-        let mut compacted_size = 0u16;
-        for i in 0..self.header.cell_count {
-            if let Ok(offset) = self.get_cell_offset(i)
-                && let Ok((key, value)) = self.get_cell(offset)
-            {
-                compacted_size += 4 + key.len() as u16 + 4 + value.len() as u16; // lengths + data
-            }
-        }
-        compacted_size += self.header.cell_count * 2; // directory entries
-
-        if actual_used_space == 0 {
-            return 0.0;
-        }
-
-        let fragmentation = (actual_used_space - compacted_size) as f64 / actual_used_space as f64;
-        fragmentation.clamp(0.0, 1.0)
+    fn serialized_size(&self) -> usize {
+        4 + self.len()
     }
 }
