@@ -45,6 +45,54 @@ impl Client {
         Ok(result)
     }
 
+    /// Execute a query with parameters and return all rows
+    ///
+    /// Supports both numbered ($1, $2) and named (:name) parameters.
+    ///
+    /// # Example with numbered parameters
+    /// ```no_run
+    /// # use monodb_client::Client;
+    /// # use monodb_common::Value;
+    /// # #[tokio::main]
+    /// # async fn main() -> monodb_common::Result<()> {
+    /// let client = Client::connect("localhost:5532").await?;
+    /// let result = client.query_with_params(
+    ///     "get from users where id = $1",
+    ///     vec![Value::Int32(42)]
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Example with named parameters
+    /// ```no_run
+    /// # use monodb_client::Client;
+    /// # use monodb_common::Value;
+    /// # use std::collections::BTreeMap;
+    /// # #[tokio::main]
+    /// # async fn main() -> monodb_common::Result<()> {
+    /// let client = Client::connect("localhost:5532").await?;
+    /// let mut params = BTreeMap::new();
+    /// params.insert("name".to_string(), Value::String("Alice".to_string()));
+    /// params.insert("age".to_string(), Value::Int32(30));
+    /// let result = client.query_with_params(
+    ///     "get from users where first_name = :name and age = :age",
+    ///     vec![Value::Object(params)]
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn query_with_params(
+        &self,
+        query: impl Into<String>,
+        params: Vec<monodb_common::Value>,
+    ) -> Result<QueryResult> {
+        let mut conn = self.pool.get().await?;
+        let result = conn.execute_with_params(query.into(), params).await?;
+        self.pool.return_connection(conn);
+        Ok(result)
+    }
+
     /// Execute a query that returns a single row
     ///
     /// Returns an error if no rows or multiple rows are returned.
@@ -109,6 +157,30 @@ impl Client {
     /// ```
     pub async fn execute(&self, query: impl Into<String>) -> Result<QueryResult> {
         self.query(query).await
+    }
+
+    /// Execute a statement with parameters
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use monodb_client::Client;
+    /// # use monodb_common::Value;
+    /// # #[tokio::main]
+    /// # async fn main() -> monodb_common::Result<()> {
+    /// let client = Client::connect("localhost:5532").await?;
+    /// let result = client.execute_with_params(
+    ///     "put to users (name, age) values ($1, $2)",
+    ///     vec![Value::String("Alice".to_string()), Value::Int32(30)]
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn execute_with_params(
+        &self,
+        query: impl Into<String>,
+        params: Vec<monodb_common::Value>,
+    ) -> Result<QueryResult> {
+        self.query_with_params(query, params).await
     }
 
     /// List all tables

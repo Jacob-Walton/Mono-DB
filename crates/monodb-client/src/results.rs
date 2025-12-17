@@ -55,6 +55,17 @@ impl QueryResult {
             .collect()
     }
 
+    /// Count total number of rows from all results
+    pub fn count_rows(&self) -> usize {
+        self.results
+            .iter()
+            .filter_map(|r| match r {
+                ExecutionResult::Ok { data, .. } => Some(data.len()),
+                _ => None,
+            })
+            .sum()
+    }
+
     /// Get rows from the first result only
     pub fn rows_from_first(&self) -> Vec<Row> {
         self.first()

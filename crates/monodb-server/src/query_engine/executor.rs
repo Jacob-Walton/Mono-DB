@@ -1,4 +1,10 @@
-use std::{collections::HashMap, fmt, pin::Pin, sync::Arc, time::UNIX_EPOCH};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt,
+    pin::Pin,
+    sync::Arc,
+    time::UNIX_EPOCH,
+};
 
 use chrono::{DateTime, FixedOffset, Utc};
 use monodb_common::{
@@ -65,6 +71,10 @@ pub struct QueryExecutor {
     variables: HashMap<String, Value>,
     /// Current active transaction for this executor (MVCC)
     current_tx: Option<Transaction>,
+    /// Query parameters (for $1, $2, etc. and :name)
+    params: Vec<Value>,
+    /// Named parameters extracted from params[0] if it's an Object
+    named_params: BTreeMap<String, Value>,
 }
 
 impl QueryExecutor {
@@ -74,7 +84,30 @@ impl QueryExecutor {
             storage,
             variables: HashMap::new(),
             current_tx: None,
+            params: Vec::new(),
+            named_params: BTreeMap::new(),
         }
+    }
+
+    /// Set query parameters for the next execution
+    ///
+    /// For numbered parameters ($1, $2), pass values in order: vec![value1, value2]
+    /// For named parameters (:name, :age), pass a single Object: vec![Value::Object(map)]
+    pub fn set_params(&mut self, params: Vec<Value>) {
+        self.named_params.clear();
+
+        // If first param is an Object, extract it as named parameters
+        if let Some(Value::Object(obj)) = params.first() {
+            self.named_params = obj.clone();
+        }
+
+        self.params = params;
+    }
+
+    /// Clear query parameters
+    pub fn clear_params(&mut self) {
+        self.params.clear();
+        self.named_params.clear();
     }
 
     /// Get access to the storage engine
@@ -275,7 +308,13 @@ impl QueryExecutor {
                             } else {
                                 // Fallback to full scan
                                 let data = self
-                                    .execute_get(source.clone(), filter, fields, extensions, None)
+                                    .execute_get(
+                                        source.clone(),
+                                        filter,
+                                        fields.clone(),
+                                        extensions,
+                                        None,
+                                    )
                                     .await?;
                                 let rows = match data {
                                     Value::Array(arr) => arr,
@@ -342,7 +381,7 @@ impl QueryExecutor {
                         None
                     };
                     let data = self
-                        .execute_get(source, filter, fields, extensions, storage_limit)
+                        .execute_get(source, filter, fields.clone(), extensions, storage_limit)
                         .await?;
                     let rows = match data {
                         Value::Array(arr) => arr,
@@ -372,6 +411,25 @@ impl QueryExecutor {
                 if let Some(take_count) = take {
                     rows.truncate(take_count as usize);
                 }
+
+                // Apply field projection if specified
+                let rows = if let Some(ref field_list) = fields {
+                    rows.into_iter()
+                        .map(|row| {
+                            if let Value::Object(obj) = row {
+                                let projected: std::collections::BTreeMap<String, Value> = obj
+                                    .into_iter()
+                                    .filter(|(key, _)| field_list.contains(key))
+                                    .collect();
+                                Value::Object(projected)
+                            } else {
+                                row
+                            }
+                        })
+                        .collect()
+                } else {
+                    rows
+                };
 
                 let row_count = rows.len() as u64;
                 ExecutionResult::Ok {
@@ -1401,8 +1459,32 @@ impl QueryExecutor {
                     }
                 }
                 Expr::Variable(name) => {
-                    // TODO: Handle variables
-                    Ok(Value::String(format!("${name}")))
+                    // Legacy variable support - check variables HashMap
+                    if let Some(value) = self.variables.get(&name) {
+                        Ok(value.clone())
+                    } else {
+                        // Return as-is for backward compatibility
+                        Ok(Value::String(format!("${name}")))
+                    }
+                }
+                Expr::NumberedParam(index) => {
+                    // $1 = params[0], $2 = params[1], etc.
+                    let param_index = index - 1; // Convert from 1-indexed to 0-indexed
+                    self.params.get(param_index).cloned().ok_or_else(|| {
+                        ExecutorError::InvalidOperation(format!(
+                            "Parameter ${index} not provided (expected {} parameters, got {})",
+                            index,
+                            self.params.len()
+                        ))
+                    })
+                }
+                Expr::NamedParam(name) => {
+                    // :name or $name - look up in named_params
+                    self.named_params.get(&name).cloned().ok_or_else(|| {
+                        ExecutorError::InvalidOperation(format!(
+                            "Named parameter '{name}' not provided"
+                        ))
+                    })
                 }
                 Expr::FunctionCall { name, .. } => match name.as_str() {
                     "now" => {

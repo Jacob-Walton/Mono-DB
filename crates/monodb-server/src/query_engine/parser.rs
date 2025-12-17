@@ -396,11 +396,30 @@ impl<'a> Parser<'a> {
 
     fn parse_get(&mut self) -> ParseResult<Statement> {
         self.expect_keyword("get")?;
+
+        // Parse optional field list before 'from'
+        // Syntax: get [field1, field2, ...] from <table>
+        let fields = if !self.check_keyword("from") {
+            let mut field_list = Vec::new();
+
+            // Parse first field
+            field_list.push(self.expect_identifier()?);
+
+            // Parse additional fields separated by commas
+            while self.check(TokenKind::Comma) {
+                self.advance(); // consume comma
+                field_list.push(self.expect_identifier()?);
+            }
+
+            Some(field_list)
+        } else {
+            None
+        };
+
         self.expect_keyword("from")?;
         let source = self.expect_identifier()?;
 
         let mut filter = None;
-        let fields = None;
         let mut order_by = None;
         let mut take = None;
         let mut skip = None;
@@ -1203,6 +1222,42 @@ impl<'a> Parser<'a> {
             Some(TokenKind::Identifier) => {
                 let id = self.expect_identifier()?;
                 Ok(Expr::Identifier(id))
+            }
+
+            Some(TokenKind::Variable) => {
+                // Parse numbered ($1) or named ($name) parameter
+                let text = {
+                    let token = self.current().unwrap();
+                    self.token_string(token)
+                };
+                self.advance();
+
+                // Remove the '$' prefix
+                let param_text = &text[1..];
+
+                // Check if it's a numbered parameter
+                if let Ok(num) = param_text.parse::<usize>() {
+                    if num == 0 {
+                        return Err(self.error("numbered parameters must start at $1"));
+                    }
+                    Ok(Expr::NumberedParam(num))
+                } else {
+                    // It's a named parameter with $ syntax
+                    Ok(Expr::NamedParam(param_text.to_string()))
+                }
+            }
+
+            Some(TokenKind::NamedParam) => {
+                // Parse named parameter with colon syntax (:name)
+                let text = {
+                    let token = self.current().unwrap();
+                    self.token_string(token)
+                };
+                self.advance();
+
+                // Remove the ':' prefix
+                let param_name = &text[1..];
+                Ok(Expr::NamedParam(param_name.to_string()))
             }
 
             Some(TokenKind::Keyword) => {

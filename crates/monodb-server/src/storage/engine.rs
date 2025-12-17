@@ -3127,6 +3127,7 @@ impl StorageEngine {
         // and collect unique visible rows until we have enough
         for (key, value) in pairs.iter() {
             if let Some((pk, version_ts)) = decode_versioned_key(key) {
+                // Versioned key - check MVCC visibility
                 if seen_pks.contains(&pk) {
                     continue;
                 }
@@ -3153,6 +3154,28 @@ impl StorageEngine {
                         Err(e) => {
                             tracing::warn!("Failed to deserialize row: {}", e);
                         }
+                    }
+                }
+            } else {
+                // Non-versioned key (legacy data) - always visible
+                if seen_pks.contains(key) {
+                    continue;
+                }
+
+                match MonoValue::from_bytes(value) {
+                    Ok((mv, _)) => {
+                        results.push(mv);
+                        seen_pks.insert(key.clone());
+
+                        // Early termination
+                        if let Some(lim) = limit
+                            && results.len() >= lim
+                        {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to deserialize row: {}", e);
                     }
                 }
             }

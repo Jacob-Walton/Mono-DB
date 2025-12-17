@@ -143,8 +143,11 @@ async fn handle_request(
 
             Ok(response)
         }
-        Request::Execute { query, .. } => {
+        Request::Execute { query, params, .. } => {
             let _start = std::time::Instant::now();
+
+            // Set query parameters for this execution
+            executor.set_params(params.clone());
 
             let parse_result = parse(query.to_string());
 
@@ -205,10 +208,16 @@ async fn handle_request(
                         }
                     }
 
+                    // Clear parameters after execution
+                    executor.clear_params();
+
                     Ok(Response::Success { result: results })
                 }
 
                 Err(errors) => {
+                    // Clear parameters on error too
+                    executor.clear_params();
+
                     let messages: Vec<String> = errors.iter().map(ToString::to_string).collect();
                     Ok(Response::Error {
                         code: ErrorCode::ParseError,

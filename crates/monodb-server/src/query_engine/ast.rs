@@ -162,7 +162,9 @@ pub enum QueryExpr {
 pub enum Expr {
     Literal(Value),
     Identifier(String),
-    Variable(String),
+    Variable(String),     // Legacy: For general variables
+    NumberedParam(usize), // $1, $2, etc. (1-indexed)
+    NamedParam(String),   // :name or $name
     FieldAccess {
         base: Box<Expr>,
         field: String,

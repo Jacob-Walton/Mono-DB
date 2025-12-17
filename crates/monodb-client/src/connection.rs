@@ -114,9 +114,17 @@ impl Connection {
     }
 
     pub async fn execute(&mut self, query: String) -> Result<QueryResult> {
+        self.execute_with_params(query, Vec::new()).await
+    }
+
+    pub async fn execute_with_params(
+        &mut self,
+        query: String,
+        params: Vec<monodb_common::Value>,
+    ) -> Result<QueryResult> {
         let request = Request::Execute {
             query,
-            params: Vec::new(),
+            params,
             snapshot_timestamp: None,
             user_id: None,
         };

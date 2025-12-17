@@ -300,8 +300,10 @@ impl<K: Ord + Clone + Serializable, V: Clone + Serializable> BTree<K, V> {
     // Range scan [start, end)
     pub fn range(&mut self, start: &K, end: &K) -> Result<Vec<(K, V)>> {
         let mut results = Vec::new();
-        let leaf_id = self.find_leaf(start)?;
-        let mut current = leaf_id;
+
+        // For full scans (empty start), use leftmost leaf directly
+        // This avoids potential issues with find_leaf on minimal keys
+        let mut current = self.find_leftmost_leaf()?;
 
         loop {
             let (keys, values, next) = {
@@ -309,6 +311,7 @@ impl<K: Ord + Clone + Serializable, V: Clone + Serializable> BTree<K, V> {
                 (page.keys.clone(), page.values.clone(), page.next_leaf)
             };
 
+            // Find starting position in this leaf
             let start_pos = lower_bound(&keys, start);
 
             for i in start_pos..keys.len() {
@@ -327,6 +330,23 @@ impl<K: Ord + Clone + Serializable, V: Clone + Serializable> BTree<K, V> {
         Ok(results)
     }
 
+    // Helper: find the leftmost leaf node
+    fn find_leftmost_leaf(&mut self) -> Result<PageId> {
+        let mut current = self.root;
+
+        loop {
+            let page = self.store.get(current)?;
+
+            if page.is_leaf {
+                return Ok(current);
+            }
+
+            current = page.children[0];
+        }
+    }
+
+    /// Unused: waiting for implement of field selection
+    #[allow(unused)]
     fn find_leaf(&mut self, key: &K) -> Result<PageId> {
         let mut current = self.root;
 

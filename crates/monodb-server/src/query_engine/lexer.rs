@@ -15,48 +15,49 @@ pub enum TokenKind {
     // Literals and identifiers
     Keyword = 0,
     Identifier = 1,
-    Variable = 2, // $variable_name
-    StringLiteral = 3,
-    Number = 4,
+    Variable = 2,   // $variable_name or $1, $2 (numbered/named parameters)
+    NamedParam = 3, // :name (named parameter with colon syntax)
+    StringLiteral = 4,
+    Number = 5,
 
     // Delimiters
-    LeftParen = 5,
-    RightParen = 6,
-    LeftBracket = 7,
-    RightBracket = 8,
-    LeftBrace = 9,
-    RightBrace = 10,
+    LeftParen = 6,
+    RightParen = 7,
+    LeftBracket = 8,
+    RightBracket = 9,
+    LeftBrace = 10,
+    RightBrace = 11,
 
     // Operators
-    Comma = 11,
-    Equals = 12,
-    Dot = 13,
-    Colon = 14,
-    PlusEquals = 15,
-    MinusEquals = 16,
-    LessThan = 17,
-    GreaterThan = 18,
-    LessEqual = 19,
-    GreaterEqual = 20,
-    NotEqual = 21,
-    Plus = 22,
-    Minus = 23,
-    Star = 24,
-    Slash = 25,
+    Comma = 12,
+    Equals = 13,
+    Dot = 14,
+    Colon = 15,
+    PlusEquals = 16,
+    MinusEquals = 17,
+    LessThan = 18,
+    GreaterThan = 19,
+    LessEqual = 20,
+    GreaterEqual = 21,
+    NotEqual = 22,
+    Plus = 23,
+    Minus = 24,
+    Star = 25,
+    Slash = 26,
 
     // Pipeline and Control Flow
-    Pipe = 26,             // |
-    Semicolon = 27,        // ;
-    Question = 28,         // ?
-    QuestionQuestion = 29, // ??
-    PipePipe = 30,         // ||
-    Dollar = 31,           // $
+    Pipe = 27,             // |
+    Semicolon = 28,        // ;
+    Question = 29,         // ?
+    QuestionQuestion = 30, // ??
+    PipePipe = 31,         // ||
+    Dollar = 32,           // $
 
     // Special
-    Newline = 32,
-    Indent = 33,
-    Dedent = 34,
-    Eof = 35,
+    Newline = 33,
+    Indent = 34,
+    Dedent = 35,
+    Eof = 36,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -380,7 +381,43 @@ impl Lexer {
         self.pos += 1;
         self.column += 1;
 
-        // Scan the variable name (must start with letter or underscore)
+        // Scan the variable name or number
+        // Supports both $1, $2 (numbered) and $name (named)
+        if self.pos < self.source.len() {
+            if self.source[self.pos].is_ascii_digit() {
+                // Numbered parameter: $1, $2, etc.
+                let len = self.source[self.pos..]
+                    .iter()
+                    .take_while(|&&c| c.is_ascii_digit())
+                    .count();
+                self.pos += len;
+                self.column += len as u16;
+            } else if self.source[self.pos].is_ascii_alphabetic() || self.source[self.pos] == b'_' {
+                // Named parameter: $name
+                let len = self.source[self.pos..]
+                    .iter()
+                    .take_while(|&&c| c.is_ascii_alphanumeric() || c == b'_')
+                    .count();
+                self.pos += len;
+                self.column += len as u16;
+            }
+        }
+
+        self.tokens.push(Token {
+            kind: TokenKind::Variable,
+            span: Span::new(start as u32, self.pos as u32, self.line, start_column),
+        });
+    }
+
+    fn scan_named_param(&mut self) {
+        let start = self.pos;
+        let start_column = self.column;
+
+        // Skip the ':' symbol
+        self.pos += 1;
+        self.column += 1;
+
+        // Scan the parameter name (must start with letter or underscore)
         if self.pos < self.source.len()
             && (self.source[self.pos].is_ascii_alphabetic() || self.source[self.pos] == b'_')
         {
@@ -393,7 +430,7 @@ impl Lexer {
         }
 
         self.tokens.push(Token {
-            kind: TokenKind::Variable,
+            kind: TokenKind::NamedParam,
             span: Span::new(start as u32, self.pos as u32, self.line, start_column),
         });
     }
@@ -475,7 +512,18 @@ impl Lexer {
             b'}' => (TokenKind::RightBrace, 1, -1isize),
             b',' => (TokenKind::Comma, 1, 0isize),
             b'.' => (TokenKind::Dot, 1, 0isize),
-            b':' => (TokenKind::Colon, 1, 0isize),
+            b':' => {
+                // Check if this is a named parameter (:name) or just a colon
+                if self.pos + 1 < self.source.len()
+                    && (self.source[self.pos + 1].is_ascii_alphabetic()
+                        || self.source[self.pos + 1] == b'_')
+                {
+                    self.scan_named_param();
+                    return;
+                } else {
+                    (TokenKind::Colon, 1, 0isize)
+                }
+            }
             b'+' => {
                 if self.pos + 1 < self.source.len() && self.source[self.pos + 1] == b'=' {
                     (TokenKind::PlusEquals, 2, 0isize)
