@@ -14,9 +14,9 @@
 // pub mod tests;
 
 pub mod error;
-// pub mod protocol;
+pub mod protocol;
 // pub mod schema;
-// pub mod value;
+pub mod value;
 
 // Re-export commonly used types at the base
 pub use error::*;

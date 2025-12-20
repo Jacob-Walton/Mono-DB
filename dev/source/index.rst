@@ -9,5 +9,6 @@ into my coursework document later.
    :maxdepth: 2
    :caption: Contents:
 
+   protocol
    tls
    authentication

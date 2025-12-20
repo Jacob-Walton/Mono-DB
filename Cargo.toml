@@ -56,6 +56,8 @@ dashmap = "6.1.0"
 indexmap = { version = "2.12.1", features = ["serde"] }
 # A library for pretty-printing compiler-style error messages
 annotate-snippets = "0.12.8"
+# A library for encoding and decoding data in base64
+base64 = "0.22.1"
 
 [profile.release]
 opt-level = 3
