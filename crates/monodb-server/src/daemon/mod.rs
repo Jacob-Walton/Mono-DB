@@ -66,10 +66,14 @@ impl Server {
                     let sessions = Arc::clone(&self.sessions);
                     let connection_shutdown = self.shutdown_tx.subscribe();
 
+                    // Check if TLS is enabled
                     if let Some(tls) = self.tls_acceptor.clone() {
+                        // Spawn a new task to handle the TLS connection
                         tokio::spawn(async move {
+                            // Wrap the stream with TLS
                             match tls.accept(stream).await {
                                 Ok(tls_stream) => {
+                                    // Handle the TLS connection
                                     if let Err(e) = crate::network::handle_connection(
                                         tls_stream, sessions, connection_shutdown
                                     ).await {
@@ -80,7 +84,9 @@ impl Server {
                             }
                         });
                     } else {
+                        // Spawn a new task to handle the plain connection
                         tokio::spawn(async move {
+                            // Handle the plain TCP connection
                             if let Err(e) = crate::network::handle_connection(
                                 stream, sessions, connection_shutdown
                             ).await {
