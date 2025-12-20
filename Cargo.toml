@@ -1,0 +1,84 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/monodb-common", # Shared library
+    "crates/monodb-server", # Server daemon
+    "crates/monodb-client", # Rust client library
+    "crates/monodb-repl",   # TUI REPL similar to psql
+    "crates/monodb-utils",  # Utility binaries
+    "crates/testing",       # Test playground
+]
+
+default-members = [
+    "crates/monodb-common",
+    "crates/monodb-server",
+    "crates/monodb-client",
+    "crates/monodb-repl",
+    "crates/monodb-utils",
+]
+
+[workspace.package]
+version = "0.3.0"
+edition = "2024"
+authors = ["Jacob Walton"]
+license = ""
+repository = "https://github.com/Jacob-Walton/Mono-DB"
+
+[workspace.dependencies]
+# Essential library for working with asynchronous Rust code
+tokio = { version = "1.47", features = ["full"] }
+# Essential library for serialising and deserialising in Rust
+serde = { version = "1.0", features = ["derive"] }
+# Serde extension library allowing us to work with JSON data
+serde_json = { version = "1.0", features = ["preserve_order"] }
+# Error handling library reduces the amount of effort required
+# to work with results and errors
+anyhow = "1.0"
+# Tracing library for structured logs
+tracing = "0.1"
+# Extension of tracing library
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+# Extension of tracing library for thread-safe writing of logs
+tracing-appender = "0.2"
+# Library allowing us to generated unique random identifiers
+uuid = { version = "1.18.0", features = ["v4", "serde"] }
+# Essential library for working with time in rust
+chrono = { version = "0.4", features = ["serde"] }
+# Library for working with hexadecimal strings
+hex = "0.4.3"
+# Library for generating random values
+rand = "0.9.2"
+# Library for working with byte buffers
+bytes = { version = "1.10.1", features = ["serde"] }
+# A library for working with concurrent hash maps
+dashmap = "6.1.0"
+# A library for ordered maps
+indexmap = { version = "2.12.1", features = ["serde"] }
+# A library for pretty-printing compiler-style error messages
+annotate-snippets = "0.12.8"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+overflow-checks = false
+debug = false
+incremental = false
+rpath = false
+
+[profile.dev]
+opt-level = 2
+debug = true
+incremental = true
+codegen-units = 16
+panic = "unwind"
+overflow-checks = true
+
+[profile.test]
+opt-level = 1
+debug = true
+incremental = true
+codegen-units = 64
+overflow-checks = true
