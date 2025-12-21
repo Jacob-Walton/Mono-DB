@@ -12,3 +12,5 @@ anyhow.workspace = true
 tokio-rustls = "0.26.4"
 rustls = "0.23.35"
 webpki-roots = "1.0.4"
+monodb-common = { path = "../monodb-common" }
+bytes.workspace = true

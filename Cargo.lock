@@ -403,6 +403,7 @@ name = "monodb-common"
 version = "0.3.0"
 dependencies = [
  "base64",
+ "bytes",
  "chrono",
  "hex",
  "indexmap",
@@ -788,6 +789,8 @@ name = "testing"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "bytes",
+ "monodb-common",
  "rustls",
  "tokio",
  "tokio-rustls",

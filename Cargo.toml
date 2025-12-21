@@ -84,3 +84,6 @@ debug = true
 incremental = true
 codegen-units = 64
 overflow-checks = true
+
+[profile.bench]
+inherits = "release"

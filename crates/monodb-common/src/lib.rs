@@ -20,7 +20,7 @@ pub mod value;
 
 // Re-export commonly used types at the base
 pub use error::*;
-// pub use value::{ObjectId, Value, ValueType};
+pub use value::{ObjectId, Value, ValueType};
 
 /// Version information
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
