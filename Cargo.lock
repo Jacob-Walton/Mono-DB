@@ -407,6 +407,7 @@ dependencies = [
  "hex",
  "indexmap",
  "rand",
+ "rustls",
  "serde",
  "serde_json",
  "sha1",

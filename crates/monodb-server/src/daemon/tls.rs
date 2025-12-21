@@ -1,3 +1,4 @@
+use monodb_common::MonoError;
 use monodb_common::Result;
 
 use std::sync::Arc;
@@ -8,27 +9,34 @@ use rustls::{
 };
 use tokio_rustls::TlsAcceptor;
 
-use monodb_common::MonoError;
-
 use crate::config::TlsConfig;
 
 pub fn load_tls_acceptor(cfg: &TlsConfig) -> Result<TlsAcceptor> {
-    // Load certificates from path
+    // Load certificates
     let cert_iter =
-        CertificateDer::pem_file_iter(&cfg.cert_path).map_err(|e| MonoError::Io(e.to_string()))?;
+        CertificateDer::pem_file_iter(&cfg.cert_path).map_err(|e| MonoError::TlsCertLoad {
+            path: cfg.cert_path.clone(),
+            source: e,
+        })?;
 
     let certs = cert_iter
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|e| MonoError::Io(e.to_string()))?;
+        .map_err(|e| MonoError::TlsCertLoad {
+            path: cfg.cert_path.clone(),
+            source: e,
+        })?;
 
-    // Load private key (RSA/PKCS8/EC, etc.) from path
-    let key: PrivateKeyDer<'static> =
-        PrivateKeyDer::from_pem_file(&cfg.key_path).map_err(|e| MonoError::Io(e.to_string()))?;
+    // Load private key
+    let key = PrivateKeyDer::from_pem_file(&cfg.key_path).map_err(|e| MonoError::TlsKeyLoad {
+        path: cfg.key_path.clone(),
+        source: e,
+    })?;
 
+    // Build TLS config
     let config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)
-        .map_err(|e| MonoError::Io(e.to_string()))?;
+        .map_err(|e| MonoError::TlsConfig(e))?;
 
     Ok(TlsAcceptor::from(Arc::new(config)))
 }

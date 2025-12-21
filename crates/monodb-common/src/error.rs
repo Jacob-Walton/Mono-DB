@@ -1,5 +1,7 @@
 //! Error definitions for MonoDB
 
+use std::path::PathBuf;
+
 use thiserror::Error;
 
 /// Represents errors that can occur during MonoDB operations.
@@ -17,7 +19,7 @@ use thiserror::Error;
 ///     Err(e) => println!("Error occrred: {e}"),
 /// }
 /// ```
-#[derive(Error, Debug, Clone)]
+#[derive(Error, Debug)]
 pub enum MonoError {
     #[error("IO error: {0}")]
     Io(String),
@@ -54,6 +56,22 @@ pub enum MonoError {
 
     #[error("Write conflict: {0}")]
     WriteConflict(String),
+
+    // TLS
+    #[error("Failed to load TLS certificate from {path}: {source}")]
+    TlsCertLoad {
+        path: PathBuf,
+        source: rustls::pki_types::pem::Error,
+    },
+
+    #[error("Failed to load TLS private key from {path}: {source}")]
+    TlsKeyLoad {
+        path: PathBuf,
+        source: rustls::pki_types::pem::Error,
+    },
+
+    #[error("Invalid TLS configuration: {0}")]
+    TlsConfig(rustls::Error),
 }
 
 pub type Result<T> = std::result::Result<T, MonoError>;
@@ -61,23 +79,26 @@ pub type Result<T> = std::result::Result<T, MonoError>;
 impl MonoError {
     /// Get the inner message without the type prefix.
     /// Useful when re-wrapping errors to avoid "Invalid operation: Invalid operation: ..."
-    pub fn message(&self) -> &str {
+    pub fn message(&self) -> String {
         match self {
-            MonoError::Io(msg) => msg,
-            MonoError::Storage(msg) => msg,
-            MonoError::Parse(msg) => msg,
-            MonoError::Execution(msg) => msg,
-            MonoError::Network(msg) => msg,
+            MonoError::Io(msg) => msg.clone(),
+            MonoError::Storage(msg) => msg.clone(),
+            MonoError::Parse(msg) => msg.clone(),
+            MonoError::Execution(msg) => msg.clone(),
+            MonoError::Network(msg) => msg.clone(),
             MonoError::TypeError {
                 expected,
                 actual: _,
-            } => expected, // Partial, but acceptable
-            MonoError::NotFound(msg) => msg,
-            MonoError::AlreadyExists(msg) => msg,
-            MonoError::InvalidOperation(msg) => msg,
-            MonoError::Transaction(msg) => msg,
-            MonoError::Config(msg) => msg,
-            MonoError::WriteConflict(msg) => msg,
+            } => expected.clone(), // Partial, but acceptable
+            MonoError::NotFound(msg) => msg.clone(),
+            MonoError::AlreadyExists(msg) => msg.clone(),
+            MonoError::InvalidOperation(msg) => msg.clone(),
+            MonoError::Transaction(msg) => msg.clone(),
+            MonoError::Config(msg) => msg.clone(),
+            MonoError::WriteConflict(msg) => msg.clone(),
+            MonoError::TlsCertLoad { source, .. } => source.to_string(),
+            MonoError::TlsKeyLoad { source, .. } => source.to_string(),
+            MonoError::TlsConfig(err) => err.to_string(),
         }
     }
 
@@ -96,6 +117,9 @@ impl MonoError {
             MonoError::Transaction(_) => "transaction_error",
             MonoError::Config(_) => "config_error",
             MonoError::WriteConflict(_) => "write_conflict",
+            MonoError::TlsCertLoad { .. } => "tls_cert_load_error",
+            MonoError::TlsKeyLoad { .. } => "tls_key_load_error",
+            MonoError::TlsConfig(_) => "tls_config_error",
         }
     }
 }
