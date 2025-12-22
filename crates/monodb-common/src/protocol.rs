@@ -1,7 +1,7 @@
 //! Protocol definitions and codec for MonoDB
 //!
 //! This module defines the request and response messages used in the MonoDB protocol,
-//! as well as stateful encoder and decoder structs for efficient binary serialization.
+//! as well as stateful encoder and decoder structs for binary serialization.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -322,7 +322,11 @@ impl ProtocolEncoder {
     }
 
     /// Encode a request with a specific correlation ID
-    pub fn encode_request_with_correlation(&self, req: &Request, correlation_id: u32) -> Result<Bytes> {
+    pub fn encode_request_with_correlation(
+        &self,
+        req: &Request,
+        correlation_id: u32,
+    ) -> Result<Bytes> {
         let mut header = BytesMut::with_capacity(8);
         let mut body = BytesMut::new();
 
@@ -331,7 +335,10 @@ impl ProtocolEncoder {
         header.put_u8(cmd::KIND_REQUEST);
 
         match req {
-            Request::Hello { client_name, capabilities } => {
+            Request::Hello {
+                client_name,
+                capabilities,
+            } => {
                 header.put_u8(cmd::REQ_HELLO);
                 put_string(&mut body, client_name);
                 put_string_array(&mut body, capabilities);
@@ -372,7 +379,10 @@ impl ProtocolEncoder {
                     put_value_array(&mut body, &stmt.params);
                 }
             }
-            Request::TxBegin { isolation, read_only } => {
+            Request::TxBegin {
+                isolation,
+                read_only,
+            } => {
                 header.put_u8(cmd::REQ_TX_BEGIN);
                 body.put_u8(*isolation as u8);
                 body.put_u8(if *read_only { 1 } else { 0 });
@@ -422,20 +432,32 @@ impl ProtocolEncoder {
         header.put_u8(cmd::KIND_RESPONSE);
 
         match resp {
-            Response::Welcome { server_version, server_capabilities, server_timestamp } => {
+            Response::Welcome {
+                server_version,
+                server_capabilities,
+                server_timestamp,
+            } => {
                 header.put_u8(cmd::RSP_WELCOME);
                 put_string(&mut body, server_version);
                 put_string_array(&mut body, server_capabilities);
                 body.put_u64_le(*server_timestamp);
             }
-            Response::AuthSuccess { session_id, user_id, permissions, expires_at } => {
+            Response::AuthSuccess {
+                session_id,
+                user_id,
+                permissions,
+                expires_at,
+            } => {
                 header.put_u8(cmd::RSP_AUTH_SUCCESS);
                 body.put_u64_le(*session_id);
                 put_string(&mut body, user_id);
                 put_string_array(&mut body, permissions);
                 put_opt_u64(&mut body, expires_at);
             }
-            Response::AuthFailed { reason, retry_after } => {
+            Response::AuthFailed {
+                reason,
+                retry_after,
+            } => {
                 header.put_u8(cmd::RSP_AUTH_FAILED);
                 put_string(&mut body, reason);
                 put_opt_u64(&mut body, retry_after);
@@ -449,7 +471,10 @@ impl ProtocolEncoder {
                 encode_query_outcome(&mut body, result);
                 body.put_u64_le(*elapsed_ms);
             }
-            Response::BatchResults { results, elapsed_ms } => {
+            Response::BatchResults {
+                results,
+                elapsed_ms,
+            } => {
                 header.put_u8(cmd::RSP_BATCH_RESULTS);
                 body.put_u32_le(results.len() as u32);
                 for result in results {
@@ -457,12 +482,18 @@ impl ProtocolEncoder {
                 }
                 body.put_u64_le(*elapsed_ms);
             }
-            Response::TxStarted { tx_id, read_timestamp } => {
+            Response::TxStarted {
+                tx_id,
+                read_timestamp,
+            } => {
                 header.put_u8(cmd::RSP_TX_STARTED);
                 body.put_u64_le(*tx_id);
                 body.put_u64_le(*read_timestamp);
             }
-            Response::TxCommitted { tx_id, commit_timestamp } => {
+            Response::TxCommitted {
+                tx_id,
+                commit_timestamp,
+            } => {
                 header.put_u8(cmd::RSP_TX_COMMITTED);
                 body.put_u64_le(*tx_id);
                 body.put_u64_le(*commit_timestamp);
@@ -517,7 +548,11 @@ impl ProtocolEncoder {
             Response::Ok => {
                 header.put_u8(cmd::RSP_OK);
             }
-            Response::Error { code, message, details } => {
+            Response::Error {
+                code,
+                message,
+                details,
+            } => {
                 header.put_u8(cmd::RSP_ERROR);
                 body.put_u16_le(*code);
                 put_string(&mut body, message);
@@ -596,7 +631,10 @@ impl ProtocolDecoder {
             cmd::REQ_HELLO => {
                 let client_name = get_string(&mut cursor)?;
                 let capabilities = get_string_array(&mut cursor)?;
-                Request::Hello { client_name, capabilities }
+                Request::Hello {
+                    client_name,
+                    capabilities,
+                }
             }
             cmd::REQ_AUTHENTICATE => {
                 let method_tag = get_u8(&mut cursor)?;
@@ -611,7 +649,11 @@ impl ProtocolDecoder {
                         AuthMethod::Token { token }
                     }
                     cmd::AUTH_CERTIFICATE => AuthMethod::Certificate,
-                    _ => return Err(MonoError::Network(format!("Unknown auth method: {method_tag}"))),
+                    _ => {
+                        return Err(MonoError::Network(format!(
+                            "Unknown auth method: {method_tag}"
+                        )));
+                    }
                 };
                 Request::Authenticate { method }
             }
@@ -639,10 +681,17 @@ impl ProtocolDecoder {
                     0x02 => IsolationLevel::ReadCommitted,
                     0x03 => IsolationLevel::RepeatableRead,
                     0x04 => IsolationLevel::Serializable,
-                    _ => return Err(MonoError::Network(format!("Unknown isolation level: {isolation_byte}"))),
+                    _ => {
+                        return Err(MonoError::Network(format!(
+                            "Unknown isolation level: {isolation_byte}"
+                        )));
+                    }
                 };
                 let read_only = get_u8(&mut cursor)? != 0;
-                Request::TxBegin { isolation, read_only }
+                Request::TxBegin {
+                    isolation,
+                    read_only,
+                }
             }
             cmd::REQ_TX_COMMIT => {
                 let tx_id = get_u64_le(&mut cursor)?;
@@ -661,7 +710,11 @@ impl ProtocolDecoder {
                 let detailed = get_u8(&mut cursor)? != 0;
                 Request::Stats { detailed }
             }
-            _ => return Err(MonoError::Network(format!("Unknown request command: {command}"))),
+            _ => {
+                return Err(MonoError::Network(format!(
+                    "Unknown request command: {command}"
+                )));
+            }
         };
 
         Ok(Some((request, correlation_id)))
@@ -706,19 +759,31 @@ impl ProtocolDecoder {
                 let server_version = get_string(&mut cursor)?;
                 let server_capabilities = get_string_array(&mut cursor)?;
                 let server_timestamp = get_u64_le(&mut cursor)?;
-                Response::Welcome { server_version, server_capabilities, server_timestamp }
+                Response::Welcome {
+                    server_version,
+                    server_capabilities,
+                    server_timestamp,
+                }
             }
             cmd::RSP_AUTH_SUCCESS => {
                 let session_id = get_u64_le(&mut cursor)?;
                 let user_id = get_string(&mut cursor)?;
                 let permissions = get_string_array(&mut cursor)?;
                 let expires_at = get_opt_u64(&mut cursor)?;
-                Response::AuthSuccess { session_id, user_id, permissions, expires_at }
+                Response::AuthSuccess {
+                    session_id,
+                    user_id,
+                    permissions,
+                    expires_at,
+                }
             }
             cmd::RSP_AUTH_FAILED => {
                 let reason = get_string(&mut cursor)?;
                 let retry_after = get_opt_u64(&mut cursor)?;
-                Response::AuthFailed { reason, retry_after }
+                Response::AuthFailed {
+                    reason,
+                    retry_after,
+                }
             }
             cmd::RSP_PONG => {
                 let timestamp = get_u64_le(&mut cursor)?;
@@ -736,17 +801,26 @@ impl ProtocolDecoder {
                     results.push(decode_query_outcome(&mut cursor)?);
                 }
                 let elapsed_ms = get_u64_le(&mut cursor)?;
-                Response::BatchResults { results, elapsed_ms }
+                Response::BatchResults {
+                    results,
+                    elapsed_ms,
+                }
             }
             cmd::RSP_TX_STARTED => {
                 let tx_id = get_u64_le(&mut cursor)?;
                 let read_timestamp = get_u64_le(&mut cursor)?;
-                Response::TxStarted { tx_id, read_timestamp }
+                Response::TxStarted {
+                    tx_id,
+                    read_timestamp,
+                }
             }
             cmd::RSP_TX_COMMITTED => {
                 let tx_id = get_u64_le(&mut cursor)?;
                 let commit_timestamp = get_u64_le(&mut cursor)?;
-                Response::TxCommitted { tx_id, commit_timestamp }
+                Response::TxCommitted {
+                    tx_id,
+                    commit_timestamp,
+                }
             }
             cmd::RSP_TX_ROLLED_BACK => {
                 let tx_id = get_u64_le(&mut cursor)?;
@@ -760,7 +834,12 @@ impl ProtocolDecoder {
                     let schema = get_opt_string(&mut cursor)?;
                     let row_count = get_opt_u64(&mut cursor)?;
                     let size_bytes = get_opt_u64(&mut cursor)?;
-                    tables.push(TableInfo { name, schema, row_count, size_bytes });
+                    tables.push(TableInfo {
+                        name,
+                        schema,
+                        row_count,
+                        size_bytes,
+                    });
                 }
                 Response::TableList { tables }
             }
@@ -773,7 +852,12 @@ impl ProtocolDecoder {
                     let data_type = get_string(&mut cursor)?;
                     let nullable = get_u8(&mut cursor)? != 0;
                     let default_value = get_opt_value(&mut cursor)?;
-                    columns.push(ColumnInfo { name: col_name, data_type, nullable, default_value });
+                    columns.push(ColumnInfo {
+                        name: col_name,
+                        data_type,
+                        nullable,
+                        default_value,
+                    });
                 }
                 let idx_count = get_u32_le(&mut cursor)? as usize;
                 let mut indexes = Vec::with_capacity(idx_count);
@@ -781,9 +865,19 @@ impl ProtocolDecoder {
                     let idx_name = get_string(&mut cursor)?;
                     let idx_columns = get_string_array(&mut cursor)?;
                     let unique = get_u8(&mut cursor)? != 0;
-                    indexes.push(IndexInfo { name: idx_name, columns: idx_columns, unique });
+                    indexes.push(IndexInfo {
+                        name: idx_name,
+                        columns: idx_columns,
+                        unique,
+                    });
                 }
-                Response::TableDescription { schema: TableSchema { name, columns, indexes } }
+                Response::TableDescription {
+                    schema: TableSchema {
+                        name,
+                        columns,
+                        indexes,
+                    },
+                }
             }
             cmd::RSP_STATS_RESULT => {
                 let uptime_seconds = get_u64_le(&mut cursor)?;
@@ -815,9 +909,17 @@ impl ProtocolDecoder {
                 let code = get_u16_le(&mut cursor)?;
                 let message = get_string(&mut cursor)?;
                 let details = get_opt_value(&mut cursor)?;
-                Response::Error { code, message, details }
+                Response::Error {
+                    code,
+                    message,
+                    details,
+                }
             }
-            _ => return Err(MonoError::Network(format!("Unknown response command: {command}"))),
+            _ => {
+                return Err(MonoError::Network(format!(
+                    "Unknown response command: {command}"
+                )));
+            }
         };
 
         Ok(Some((response, correlation_id)))
@@ -828,7 +930,12 @@ impl ProtocolDecoder {
 
 fn encode_query_outcome(buf: &mut BytesMut, outcome: &QueryOutcome) {
     match outcome {
-        QueryOutcome::Rows { data, row_count, columns, has_more } => {
+        QueryOutcome::Rows {
+            data,
+            row_count,
+            columns,
+            has_more,
+        } => {
             buf.put_u8(cmd::OUTCOME_ROWS);
             buf.put_u64_le(*row_count);
             put_value_array(buf, data);
@@ -840,7 +947,10 @@ fn encode_query_outcome(buf: &mut BytesMut, outcome: &QueryOutcome) {
             }
             buf.put_u8(if *has_more { 1 } else { 0 });
         }
-        QueryOutcome::Inserted { rows_inserted, generated_ids } => {
+        QueryOutcome::Inserted {
+            rows_inserted,
+            generated_ids,
+        } => {
             buf.put_u8(cmd::OUTCOME_INSERTED);
             buf.put_u64_le(*rows_inserted);
             if let Some(ids) = generated_ids {
@@ -858,7 +968,10 @@ fn encode_query_outcome(buf: &mut BytesMut, outcome: &QueryOutcome) {
             buf.put_u8(cmd::OUTCOME_DELETED);
             buf.put_u64_le(*rows_deleted);
         }
-        QueryOutcome::Dropped { object_type, object_name } => {
+        QueryOutcome::Dropped {
+            object_type,
+            object_name,
+        } => {
             buf.put_u8(cmd::OUTCOME_DROPPED);
             put_string(buf, object_type);
             put_string(buf, object_name);
@@ -881,7 +994,12 @@ fn decode_query_outcome(cursor: &mut &[u8]) -> Result<QueryOutcome> {
                 None
             };
             let has_more = get_u8(cursor)? != 0;
-            Ok(QueryOutcome::Rows { data, row_count, columns, has_more })
+            Ok(QueryOutcome::Rows {
+                data,
+                row_count,
+                columns,
+                has_more,
+            })
         }
         cmd::OUTCOME_INSERTED => {
             let rows_inserted = get_u64_le(cursor)?;
@@ -890,7 +1008,10 @@ fn decode_query_outcome(cursor: &mut &[u8]) -> Result<QueryOutcome> {
             } else {
                 None
             };
-            Ok(QueryOutcome::Inserted { rows_inserted, generated_ids })
+            Ok(QueryOutcome::Inserted {
+                rows_inserted,
+                generated_ids,
+            })
         }
         cmd::OUTCOME_UPDATED => {
             let rows_updated = get_u64_le(cursor)?;
@@ -903,10 +1024,15 @@ fn decode_query_outcome(cursor: &mut &[u8]) -> Result<QueryOutcome> {
         cmd::OUTCOME_DROPPED => {
             let object_type = get_string(cursor)?;
             let object_name = get_string(cursor)?;
-            Ok(QueryOutcome::Dropped { object_type, object_name })
+            Ok(QueryOutcome::Dropped {
+                object_type,
+                object_name,
+            })
         }
         cmd::OUTCOME_EXECUTED => Ok(QueryOutcome::Executed),
-        _ => Err(MonoError::Network(format!("Unknown query outcome tag: {tag}"))),
+        _ => Err(MonoError::Network(format!(
+            "Unknown query outcome tag: {tag}"
+        ))),
     }
 }
 
@@ -1009,8 +1135,7 @@ fn get_u64_le(cursor: &mut &[u8]) -> Result<u64> {
         return Err(MonoError::Network("Unexpected EOF".into()));
     }
     let v = u64::from_le_bytes([
-        cursor[0], cursor[1], cursor[2], cursor[3],
-        cursor[4], cursor[5], cursor[6], cursor[7],
+        cursor[0], cursor[1], cursor[2], cursor[3], cursor[4], cursor[5], cursor[6], cursor[7],
     ]);
     *cursor = &cursor[8..];
     Ok(v)

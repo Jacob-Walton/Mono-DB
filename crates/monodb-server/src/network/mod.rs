@@ -1,7 +1,10 @@
 use bytes::BytesMut;
-use monodb_common::Result;
+use monodb_common::{
+    Result,
+    protocol::{ProtocolDecoder, ProtocolEncoder, Request, Response},
+};
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use dashmap::DashMap;
 use tokio::{
@@ -13,12 +16,12 @@ use crate::network::session::Session;
 
 pub mod session;
 
-const SERVER_PROTOCOL_VERSION: u8 = 3;
-
 pub async fn handle_connection<S>(
     mut stream: S,
     _sessions: Arc<DashMap<u64, Session>>,
     mut shutdown_rx: broadcast::Receiver<()>,
+    encoder: Arc<ProtocolEncoder>,
+    decoder: Arc<ProtocolDecoder>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -34,15 +37,25 @@ where
                         break;
                     }
                     Ok(n) => {
+                        #[cfg(debug_assertions)]
                         tracing::debug!("Received {n} bytes");
 
-                        // Clear buffer after acknowledging
-                        buffer.clear();
+                        while let Some((request, correlation_id)) = decoder.decode_request(&mut buffer)? {
+                            #[cfg(debug_assertions)]
+                            tracing::debug!("Decoded request: {:?}", request);
 
-                        // Simple ACK response
-                        if let Err(e) = stream.write_all(b"OK\n").await {
-                            tracing::error!("Write error: {e}");
-                            break;
+                            let response = handle_request(request).await?;
+
+                            let encoded_response = encoder.encode_response(&response, correlation_id)?;
+
+                            #[cfg(debug_assertions)]
+                            tracing::debug!("Sending response: {:?}", response);
+
+                            #[cfg(debug_assertions)]
+                            tracing::debug!("Encoded response size: {}", encoded_response.len());
+
+                            stream.write_all(&encoded_response).await?;
+                            stream.flush().await?;
                         }
                     }
                     Err(e) => {
@@ -62,4 +75,68 @@ where
     }
 
     Ok(())
+}
+
+async fn handle_request(request: Request) -> Result<Response> {
+    let start = Instant::now();
+
+    let current_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    match request {
+        Request::Hello {
+            client_name,
+            capabilities,
+        } => {
+            #[cfg(debug_assertions)]
+            tracing::debug!(
+                "Handling Hello request from {client_name:?} with capabilities: {capabilities:?}"
+            );
+
+            let response = Response::Welcome {
+                server_version: env!("CARGO_PKG_VERSION").to_string(),
+                server_capabilities: vec!["transactions".into()],
+                server_timestamp: current_time,
+            };
+
+            #[cfg(debug_assertions)]
+            tracing::debug!("Hello request handled in {:?}", start.elapsed());
+
+            Ok(response)
+        }
+        Request::Authenticate { method } => {
+            #[cfg(debug_assertions)]
+            tracing::debug!("Handling Authenticate request with method: {method:?}");
+
+            let session_id = 42; // Placeholder session ID
+            let response = Response::AuthSuccess {
+                session_id,
+                user_id: "user123".to_string(),
+                expires_at: None,
+                permissions: vec!["read".into(), "write".into()],
+            };
+
+            #[cfg(debug_assertions)]
+            tracing::debug!("Authenticate request handled in {:?}", start.elapsed());
+
+            Ok(response)
+        }
+        _ => {
+            #[cfg(debug_assertions)]
+            tracing::debug!("Received unhandled request: {:?}", request);
+
+            let response = Response::Error {
+                code: 400,
+                details: None,
+                message: "Unhandled request type".to_string(),
+            };
+
+            #[cfg(debug_assertions)]
+            tracing::debug!("Unhandled request processed in {:?}", start.elapsed());
+
+            Ok(response)
+        }
+    }
 }

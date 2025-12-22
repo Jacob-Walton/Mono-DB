@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use monodb_common::Result;
+use monodb_common::{
+    Result,
+    protocol::{ProtocolDecoder, ProtocolEncoder},
+};
 
 use dashmap::DashMap;
 use tokio::{net::TcpListener, sync::broadcast};
@@ -62,6 +65,8 @@ impl Server {
                     #[cfg(debug_assertions)]
                     tracing::debug!("New connection from {addr}");
 
+                    let encoder = Arc::new(ProtocolEncoder::new());
+                    let decoder = Arc::new(ProtocolDecoder::new());
                     // let storage = Arc::clone(&self.storage);
                     let sessions = Arc::clone(&self.sessions);
                     let connection_shutdown = self.shutdown_tx.subscribe();
@@ -75,7 +80,7 @@ impl Server {
                                 Ok(tls_stream) => {
                                     // Handle the TLS connection
                                     if let Err(e) = crate::network::handle_connection(
-                                        tls_stream, sessions, connection_shutdown
+                                        tls_stream, sessions, connection_shutdown, encoder, decoder
                                     ).await {
                                         tracing::error!("TLS connection error: {e}");
                                     }
@@ -88,7 +93,7 @@ impl Server {
                         tokio::spawn(async move {
                             // Handle the plain TCP connection
                             if let Err(e) = crate::network::handle_connection(
-                                stream, sessions, connection_shutdown
+                                stream, sessions, connection_shutdown, encoder, decoder
                             ).await {
                                 tracing::error!("Connection error: {e}");
                             }
