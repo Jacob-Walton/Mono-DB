@@ -428,6 +428,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "monodb-common",
+ "rand",
  "rustls",
  "serde",
  "tokio",
@@ -436,6 +437,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

@@ -271,7 +271,12 @@ AuthSuccess (0x02)
    +------------+----------+-------------+------------+
    | session_id | user_id  | permissions | expires_at |
    +------------+----------+-------------+------------+
-   u64 LE       string     string[]      opt_u64
+   u64 LE       string     PermissionSet opt_u64
+
+The permissions field contains a binary-encoded ``PermissionSet`` (see :ref:`permissions`).
+Format: ``[count: u32 LE] [permission_1] [permission_2] ... [permission_n]``
+
+Each permission is encoded as: ``[resource] [action_byte]``
 
 AuthFailed (0x03)
 ^^^^^^^^^^^^^^^^^

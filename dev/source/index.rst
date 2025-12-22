@@ -10,5 +10,6 @@ into my coursework document later.
    :caption: Contents:
 
    protocol
+   permissions
    tls
    authentication

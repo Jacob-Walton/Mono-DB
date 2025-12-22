@@ -1,10 +1,14 @@
 use bytes::BytesMut;
 use monodb_common::{
     Result,
+    permissions::BuiltinRole,
     protocol::{ProtocolDecoder, ProtocolEncoder, Request, Response},
 };
 
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::{Arc, atomic::AtomicU64},
+    time::Instant,
+};
 
 use dashmap::DashMap;
 use tokio::{
@@ -13,6 +17,9 @@ use tokio::{
 };
 
 use crate::network::session::Session;
+
+// Atomic counter
+static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub mod session;
 
@@ -110,12 +117,13 @@ async fn handle_request(request: Request) -> Result<Response> {
             #[cfg(debug_assertions)]
             tracing::debug!("Handling Authenticate request with method: {method:?}");
 
-            let session_id = 42; // Placeholder session ID
+            let session_id = SESSION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dummy_permissions = BuiltinRole::Root.permissions(Some("default"));
             let response = Response::AuthSuccess {
                 session_id,
-                user_id: "user123".to_string(),
+                user_id: uuid::Uuid::new_v4().to_string(),
                 expires_at: None,
-                permissions: vec!["read".into(), "write".into()],
+                permissions: dummy_permissions,
             };
 
             #[cfg(debug_assertions)]

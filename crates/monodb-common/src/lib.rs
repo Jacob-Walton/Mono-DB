@@ -6,14 +6,15 @@
 //! Modules:
 //! * `error`: Defines error types and handling.
 //! * `protocol`: Defines the communication protocol between client and server.
+//! * `permissions`: Defines permission and access control types.
 //! * `schema`: Defines database schema representations.
-//! * `document`: BSON implementation.
 //! * `value`: Defines data value types used in database operations.
 
 // #[cfg(test)]
 // pub mod tests;
 
 pub mod error;
+pub mod permissions;
 pub mod protocol;
 // pub mod schema;
 pub mod value;

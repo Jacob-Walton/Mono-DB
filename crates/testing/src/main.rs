@@ -87,7 +87,10 @@ where
                 } => {
                     println!(
                         "Authenticated successfully: session_id={}, user_id={}, permissions={:?}, expires_at={:?}",
-                        session_id, user_id, permissions, expires_at
+                        session_id,
+                        user_id,
+                        permissions.to_string_array(),
+                        expires_at
                     );
                 }
                 _ => {

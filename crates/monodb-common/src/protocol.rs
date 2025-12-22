@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-use crate::{MonoError, Result, value::Value};
+use crate::{MonoError, Result, permissions::PermissionSet, value::Value};
 
 /// Current protocol version
 pub const VERSION: u8 = 3;
@@ -104,7 +104,7 @@ pub enum Response {
     AuthSuccess {
         session_id: u64,
         user_id: String,
-        permissions: Vec<String>,
+        permissions: PermissionSet,
         expires_at: Option<u64>,
     },
 
@@ -451,7 +451,7 @@ impl ProtocolEncoder {
                 header.put_u8(cmd::RSP_AUTH_SUCCESS);
                 body.put_u64_le(*session_id);
                 put_string(&mut body, user_id);
-                put_string_array(&mut body, permissions);
+                permissions.encode(&mut body);
                 put_opt_u64(&mut body, expires_at);
             }
             Response::AuthFailed {
@@ -768,7 +768,7 @@ impl ProtocolDecoder {
             cmd::RSP_AUTH_SUCCESS => {
                 let session_id = get_u64_le(&mut cursor)?;
                 let user_id = get_string(&mut cursor)?;
-                let permissions = get_string_array(&mut cursor)?;
+                let permissions = PermissionSet::decode(&mut cursor)?;
                 let expires_at = get_opt_u64(&mut cursor)?;
                 Response::AuthSuccess {
                     session_id,
@@ -1039,13 +1039,13 @@ fn decode_query_outcome(cursor: &mut &[u8]) -> Result<QueryOutcome> {
 // Primitive Encoding Helpers
 
 #[inline]
-fn put_string(buf: &mut BytesMut, s: &str) {
+pub(crate) fn put_string(buf: &mut BytesMut, s: &str) {
     buf.put_u32_le(s.len() as u32);
     buf.put_slice(s.as_bytes());
 }
 
 #[inline]
-fn put_string_array(buf: &mut BytesMut, arr: &[String]) {
+pub(crate) fn put_string_array(buf: &mut BytesMut, arr: &[String]) {
     buf.put_u32_le(arr.len() as u32);
     for s in arr {
         put_string(buf, s);
@@ -1053,7 +1053,7 @@ fn put_string_array(buf: &mut BytesMut, arr: &[String]) {
 }
 
 #[inline]
-fn put_opt_u64(buf: &mut BytesMut, val: &Option<u64>) {
+pub(crate) fn put_opt_u64(buf: &mut BytesMut, val: &Option<u64>) {
     match val {
         Some(v) => {
             buf.put_u8(1);
@@ -1064,7 +1064,7 @@ fn put_opt_u64(buf: &mut BytesMut, val: &Option<u64>) {
 }
 
 #[inline]
-fn put_opt_string(buf: &mut BytesMut, val: &Option<String>) {
+pub(crate) fn put_opt_string(buf: &mut BytesMut, val: &Option<String>) {
     match val {
         Some(s) => {
             buf.put_u8(1);
@@ -1075,7 +1075,7 @@ fn put_opt_string(buf: &mut BytesMut, val: &Option<String>) {
 }
 
 #[inline]
-fn put_opt_value(buf: &mut BytesMut, val: &Option<Value>) {
+pub(crate) fn put_opt_value(buf: &mut BytesMut, val: &Option<Value>) {
     match val {
         Some(v) => {
             buf.put_u8(1);
@@ -1088,7 +1088,7 @@ fn put_opt_value(buf: &mut BytesMut, val: &Option<Value>) {
 }
 
 #[inline]
-fn put_value_array(buf: &mut BytesMut, arr: &[Value]) {
+pub(crate) fn put_value_array(buf: &mut BytesMut, arr: &[Value]) {
     buf.put_u32_le(arr.len() as u32);
     for v in arr {
         let bytes = v.to_bytes();
@@ -1100,7 +1100,7 @@ fn put_value_array(buf: &mut BytesMut, arr: &[Value]) {
 // Primitive Decoding Helpers
 
 #[inline]
-fn get_u8(cursor: &mut &[u8]) -> Result<u8> {
+pub(crate) fn get_u8(cursor: &mut &[u8]) -> Result<u8> {
     if cursor.is_empty() {
         return Err(MonoError::Network("Unexpected EOF".into()));
     }
@@ -1110,7 +1110,7 @@ fn get_u8(cursor: &mut &[u8]) -> Result<u8> {
 }
 
 #[inline]
-fn get_u16_le(cursor: &mut &[u8]) -> Result<u16> {
+pub(crate) fn get_u16_le(cursor: &mut &[u8]) -> Result<u16> {
     if cursor.len() < 2 {
         return Err(MonoError::Network("Unexpected EOF".into()));
     }
@@ -1120,7 +1120,7 @@ fn get_u16_le(cursor: &mut &[u8]) -> Result<u16> {
 }
 
 #[inline]
-fn get_u32_le(cursor: &mut &[u8]) -> Result<u32> {
+pub(crate) fn get_u32_le(cursor: &mut &[u8]) -> Result<u32> {
     if cursor.len() < 4 {
         return Err(MonoError::Network("Unexpected EOF".into()));
     }
@@ -1130,7 +1130,7 @@ fn get_u32_le(cursor: &mut &[u8]) -> Result<u32> {
 }
 
 #[inline]
-fn get_u64_le(cursor: &mut &[u8]) -> Result<u64> {
+pub(crate) fn get_u64_le(cursor: &mut &[u8]) -> Result<u64> {
     if cursor.len() < 8 {
         return Err(MonoError::Network("Unexpected EOF".into()));
     }
@@ -1142,7 +1142,7 @@ fn get_u64_le(cursor: &mut &[u8]) -> Result<u64> {
 }
 
 #[inline]
-fn get_string(cursor: &mut &[u8]) -> Result<String> {
+pub(crate) fn get_string(cursor: &mut &[u8]) -> Result<String> {
     let len = get_u32_le(cursor)? as usize;
     if cursor.len() < len {
         return Err(MonoError::Network("Truncated string".into()));
@@ -1155,7 +1155,7 @@ fn get_string(cursor: &mut &[u8]) -> Result<String> {
 }
 
 #[inline]
-fn get_string_array(cursor: &mut &[u8]) -> Result<Vec<String>> {
+pub(crate) fn get_string_array(cursor: &mut &[u8]) -> Result<Vec<String>> {
     let count = get_u32_le(cursor)? as usize;
     let mut arr = Vec::with_capacity(count);
     for _ in 0..count {
@@ -1165,7 +1165,7 @@ fn get_string_array(cursor: &mut &[u8]) -> Result<Vec<String>> {
 }
 
 #[inline]
-fn get_opt_u64(cursor: &mut &[u8]) -> Result<Option<u64>> {
+pub(crate) fn get_opt_u64(cursor: &mut &[u8]) -> Result<Option<u64>> {
     if get_u8(cursor)? != 0 {
         Ok(Some(get_u64_le(cursor)?))
     } else {
@@ -1174,7 +1174,7 @@ fn get_opt_u64(cursor: &mut &[u8]) -> Result<Option<u64>> {
 }
 
 #[inline]
-fn get_opt_string(cursor: &mut &[u8]) -> Result<Option<String>> {
+pub(crate) fn get_opt_string(cursor: &mut &[u8]) -> Result<Option<String>> {
     if get_u8(cursor)? != 0 {
         Ok(Some(get_string(cursor)?))
     } else {
@@ -1183,7 +1183,7 @@ fn get_opt_string(cursor: &mut &[u8]) -> Result<Option<String>> {
 }
 
 #[inline]
-fn get_opt_value(cursor: &mut &[u8]) -> Result<Option<Value>> {
+pub(crate) fn get_opt_value(cursor: &mut &[u8]) -> Result<Option<Value>> {
     if get_u8(cursor)? != 0 {
         let len = get_u32_le(cursor)? as usize;
         if cursor.len() < len {
@@ -1198,7 +1198,7 @@ fn get_opt_value(cursor: &mut &[u8]) -> Result<Option<Value>> {
 }
 
 #[inline]
-fn get_value_array(cursor: &mut &[u8]) -> Result<Vec<Value>> {
+pub(crate) fn get_value_array(cursor: &mut &[u8]) -> Result<Vec<Value>> {
     let count = get_u32_le(cursor)? as usize;
     let mut arr = Vec::with_capacity(count);
     for _ in 0..count {
