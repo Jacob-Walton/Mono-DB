@@ -97,9 +97,13 @@ impl Action {
     pub fn to_byte(self) -> u8 {
         self as u8
     }
+}
+
+impl std::str::FromStr for Action {
+    type Err = MonoError;
 
     /// Parse action from string
-    pub fn from_str(s: &str) -> Result<Self> {
+    fn from_str(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "select" | "read" | "find" => Ok(Action::Select),
             "insert" | "write" => Ok(Action::Insert),
@@ -252,28 +256,6 @@ impl Resource {
         }
     }
 
-    /// Parse resource from permission string notation.
-    pub fn from_str(s: &str) -> Result<Self> {
-        let parts: Vec<&str> = s.split(':').collect();
-
-        match parts.as_slice() {
-            ["cluster"] => Ok(Resource::Cluster),
-            ["ns", "*"] => Ok(Resource::AllNamespaces),
-            ["ns", name] => Ok(Resource::Namespace {
-                name: (*name).to_string(),
-            }),
-            ["ns", "*", "col", "*"] => Ok(Resource::AllCollectionsGlobal),
-            ["ns", ns, "col", "*"] => Ok(Resource::AllCollections {
-                namespace: (*ns).to_string(),
-            }),
-            ["ns", ns, "col", name] => Ok(Resource::Collection {
-                namespace: (*ns).to_string(),
-                name: (*name).to_string(),
-            }),
-            _ => Err(MonoError::Parse(format!("Invalid resource format: {s}"))),
-        }
-    }
-
     /// Check if this resource matches another (for permission checking)
     ///
     /// A resource matches if:
@@ -320,6 +302,32 @@ impl Resource {
     }
 }
 
+impl std::str::FromStr for Resource {
+    type Err = MonoError;
+
+    /// Parse resource from permission string notation.
+    fn from_str(s: &str) -> Result<Self> {
+        let parts: Vec<&str> = s.split(':').collect();
+
+        match parts.as_slice() {
+            ["cluster"] => Ok(Resource::Cluster),
+            ["ns", "*"] => Ok(Resource::AllNamespaces),
+            ["ns", name] => Ok(Resource::Namespace {
+                name: (*name).to_string(),
+            }),
+            ["ns", "*", "col", "*"] => Ok(Resource::AllCollectionsGlobal),
+            ["ns", ns, "col", "*"] => Ok(Resource::AllCollections {
+                namespace: (*ns).to_string(),
+            }),
+            ["ns", ns, "col", name] => Ok(Resource::Collection {
+                namespace: (*ns).to_string(),
+                name: (*name).to_string(),
+            }),
+            _ => Err(MonoError::Parse(format!("Invalid resource format: {s}"))),
+        }
+    }
+}
+
 impl fmt::Display for Resource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -362,29 +370,6 @@ impl Permission {
         Ok(Self { resource, action })
     }
 
-    /// Parse permission from string notation.
-    ///
-    /// Format: `<resource>:<action>`
-    ///
-    /// Examples:
-    /// - `cluster:*`
-    /// - `ns:mydb:select`
-    /// - `ns:mydb:col:users:insert`
-    pub fn from_str(s: &str) -> Result<Self> {
-        // Find the last colon to split resource from action
-        let last_colon = s.rfind(':').ok_or_else(|| {
-            MonoError::Parse(format!("Invalid permission format (missing action): {s}"))
-        })?;
-
-        let resource_str = &s[..last_colon];
-        let action_str = &s[last_colon + 1..];
-
-        let resource = Resource::from_str(resource_str)?;
-        let action = Action::from_str(action_str)?;
-
-        Ok(Self { resource, action })
-    }
-
     /// Check if this permission allows the given action on the given resource
     pub fn allows(&self, resource: &Resource, action: Action) -> bool {
         // Check if action matches
@@ -394,6 +379,33 @@ impl Permission {
         let resource_matches = self.resource.matches(resource);
 
         action_matches && resource_matches
+    }
+}
+
+impl std::str::FromStr for Permission {
+    type Err = MonoError;
+
+    /// Parse permission from string notation.
+    ///
+    /// Format: `<resource>:<action>`
+    ///
+    /// Examples:
+    /// - `cluster:*`
+    /// - `ns:mydb:select`
+    /// - `ns:mydb:col:users:insert`
+    fn from_str(s: &str) -> Result<Self> {
+        // Find the last colon to split resource from action
+        let last_colon = s.rfind(':').ok_or_else(|| {
+            MonoError::Parse(format!("Invalid permission format (missing action): {s}"))
+        })?;
+
+        let resource_str = &s[..last_colon];
+        let action_str = &s[last_colon + 1..];
+
+        let resource: Resource = resource_str.parse()?;
+        let action: Action = action_str.parse()?;
+
+        Ok(Self { resource, action })
     }
 }
 
@@ -474,7 +486,7 @@ impl PermissionSet {
     pub fn from_string_array(arr: &[String]) -> Result<Self> {
         let mut permissions = Vec::with_capacity(arr.len());
         for s in arr {
-            permissions.push(Permission::from_str(s)?);
+            permissions.push(s.parse()?);
         }
         Ok(Self { permissions })
     }
@@ -592,9 +604,13 @@ impl BuiltinRole {
 
         set
     }
+}
+
+impl std::str::FromStr for BuiltinRole {
+    type Err = MonoError;
 
     /// Parse builtin role from string
-    pub fn from_str(s: &str) -> Result<Self> {
+    fn from_str(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "read" => Ok(BuiltinRole::Read),
             "readwrite" | "read_write" => Ok(BuiltinRole::ReadWrite),
@@ -770,7 +786,7 @@ mod tests {
         ];
 
         for (s, expected_resource, expected_action) in test_cases {
-            let perm = Permission::from_str(s).unwrap();
+            let perm = s.parse::<Permission>().unwrap();
             assert_eq!(
                 perm.resource, expected_resource,
                 "Resource mismatch for {s}"

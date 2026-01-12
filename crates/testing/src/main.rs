@@ -1,169 +1,77 @@
-use bytes::BytesMut;
-use monodb_common::protocol::{AuthMethod, ProtocolDecoder, ProtocolEncoder, Request, Response};
-use std::{path::PathBuf, sync::Arc};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
-};
-use tokio_rustls::{
-    TlsConnector,
-    rustls::{ClientConfig as RustlsConfig, RootCertStore},
-};
+use anyhow::Result;
+use wasmtime::*;
 
-#[derive(Debug)]
-struct ClientConfig {
-    host: String,
-    port: u16,
-    tls: bool,
-    ca_cert: Option<PathBuf>,
+struct Limits {
+    max_mem: usize,
+    current_mem: usize,
 }
 
-async fn run_protocol<S>(
-    decoder: &ProtocolDecoder,
-    encoder: &ProtocolEncoder,
-    mut stream: S,
-    client_name: &str,
-) -> anyhow::Result<()>
-where
-    S: AsyncReadExt + AsyncWriteExt + Unpin,
-{
-    // Send Hello
-    let hello_request = encoder.encode_request(&Request::Hello {
-        client_name: client_name.into(),
-        capabilities: vec!["transactions".into()],
-    })?;
-    println!("Sending request of size {}", hello_request.len());
-    stream.write_all(&hello_request).await?;
-
-    let mut buffer = BytesMut::new();
-    loop {
-        let read_result = stream.read_buf(&mut buffer).await?;
-        println!("Received {} bytes", read_result);
-        if let Some((response, _)) = decoder.decode_response(&mut buffer)? {
-            match response {
-                Response::Welcome {
-                    server_version,
-                    server_capabilities,
-                    server_timestamp,
-                } => {
-                    println!(
-                        "Welcome from server version {}: capabilities={:?}, timestamp={}",
-                        server_version, server_capabilities, server_timestamp
-                    );
-                    break;
-                }
-                _ => {
-                    println!("Received unexpected response: {:?}", response);
-                    return Ok(());
-                }
-            }
-        } else if read_result == 0 {
-            println!("Failed to decode hello response: incomplete or invalid response");
-            return Ok(());
+impl wasmtime::ResourceLimiter for Limits {
+    fn memory_growing(
+        &mut self,
+        _current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> Result<bool> {
+        // desired is bytes
+        if desired < self.max_mem {
+            return Ok(false);
         }
+        self.current_mem = desired;
+        Ok(true)
     }
-
-    // Send Authenticate
-    let auth_request = encoder.encode_request(&Request::Authenticate {
-        method: AuthMethod::Password {
-            username: "test_user".into(),
-            password: "test_password".into(),
-        },
-    })?;
-    buffer.clear();
-    println!("Sending auth request of size {}", auth_request.len());
-    stream.write_all(&auth_request).await?;
-
-    loop {
-        let read_result = stream.read_buf(&mut buffer).await?;
-        println!("Received {} bytes", read_result);
-        if let Some((auth_response, _)) = decoder.decode_response(&mut buffer)? {
-            match auth_response {
-                Response::AuthSuccess {
-                    session_id,
-                    user_id,
-                    permissions,
-                    expires_at,
-                } => {
-                    println!(
-                        "Authenticated successfully: session_id={}, user_id={}, permissions={:?}, expires_at={:?}",
-                        session_id,
-                        user_id,
-                        permissions.to_string_array(),
-                        expires_at
-                    );
-                }
-                _ => {
-                    println!("Received unexpected auth response: {:?}", auth_response);
-                }
-            }
-            break;
-        } else if read_result == 0 {
-            println!("Failed to decode auth response: incomplete or invalid response");
-            break;
-        }
+    fn table_growing(
+        &mut self,
+        _current: usize,
+        _desired: usize,
+        _maximum: Option<usize>,
+    ) -> Result<bool> {
+        Ok(true)
     }
-
-    stream.shutdown().await?;
-    Ok(())
-}
-
-async fn run_tls(
-    decoder: &ProtocolDecoder,
-    encoder: &ProtocolEncoder,
-    tcp: TcpStream,
-    cfg: &ClientConfig,
-) -> anyhow::Result<()> {
-    use rustls::pki_types::{CertificateDer, pem::PemObject};
-
-    let mut roots = RootCertStore::empty();
-
-    if let Some(ca) = &cfg.ca_cert {
-        let cert_bytes = std::fs::read(ca)?;
-        let certs: Vec<CertificateDer<'static>> =
-            CertificateDer::pem_slice_iter(&cert_bytes).collect::<Result<_, _>>()?;
-
-        roots.add_parsable_certificates(certs);
-    } else {
-        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    }
-
-    let tls_cfg = RustlsConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-
-    let connector = TlsConnector::from(Arc::new(tls_cfg));
-    let server_name = cfg.host.clone().try_into()?;
-
-    let mut stream = connector.connect(server_name, tcp).await?;
-    println!("TLS handshake completed");
-    run_protocol(decoder, encoder, &mut stream, "MonoDB TLS Test Client").await
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-    let use_tls = args.iter().any(|arg| arg == "--tls");
+async fn main() -> Result<()> {
+    let mut cfg = Config::new();
+    cfg.consume_fuel(true); // CPU-ish limit via fuel
+    let engine = Engine::new(&cfg)?;
 
-    let cfg = ClientConfig {
-        host: "127.0.0.1".into(),
-        port: 6432,
-        tls: use_tls,
-        ca_cert: Some("certs/cert.pem".into()),
-    };
+    // Compile once, reuse for many calls (we'll cache this in the DB)
+    let wasm_bytes = std::fs::read("plugin.wasm")?;
+    let module = Module::new(&engine, wasm_bytes)?;
 
-    println!("Connecting to {}:{} (tls={})", cfg.host, cfg.port, cfg.tls);
+    // Per-invocation/per-query store with limits
+    let mut store = Store::new(
+        &engine,
+        Limits {
+            max_mem: 16 * 1024 * 1024,
+            current_mem: 0,
+        }, // 16 MiB cap
+    );
+    store.limiter(|s| s); // Enable ResourceLimiter
 
-    let tcp = TcpStream::connect((cfg.host.as_str(), cfg.port)).await?;
+    // Fuel budget: trap if plugin runs too long
+    store.set_fuel(5_000_000)?;
 
-    let encoder = ProtocolEncoder::new();
-    let decoder = ProtocolDecoder::new();
+    let instance = Instance::new(&mut store, &module, &[])?;
 
-    if cfg.tls {
-        run_tls(&decoder, &encoder, tcp, &cfg).await?;
-    } else {
-        run_protocol(&decoder, &encoder, tcp, "MonoDB Test Client").await?;
-    }
+    // Example func `run(ptr: i32, len: u32) -> i32` returning ptr to output
+    let run = instance.get_typed_func::<(i32, i32), i32>(&mut store, "run")?;
+
+    let memory = instance
+        .get_memory(&mut store, "memory")
+        .expect("plugin must export memory");
+
+    // Write input into guest memory (guest allocator needed)
+    let input = b"hello";
+    let ptr = 1024i32;
+    memory.write(&mut store, ptr as usize, input)?;
+
+    let out_ptr = run.call(&mut store, (ptr, input.len() as i32))?;
+    // Read output from guest memory (length protocol needed)
+    let mut out = [0u8; 64];
+    memory.read(&mut store, out_ptr as usize, &mut out)?;
+    println!("Out = {out:?}");
 
     Ok(())
 }

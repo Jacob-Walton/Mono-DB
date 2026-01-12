@@ -58,6 +58,12 @@ indexmap = { version = "2.12.1", features = ["serde"] }
 annotate-snippets = "0.12.8"
 # A library for encoding and decoding data in base64
 base64 = "0.22.1"
+# A fast hashing algorithm library
+ahash = "0.8.12"
+# TLS Libraries
+rustls = "0.23.35"
+tokio-rustls = "0.26.4"
+# Embedded scripting language for Rust
 
 [profile.release]
 opt-level = 3

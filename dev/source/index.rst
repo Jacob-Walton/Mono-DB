@@ -13,3 +13,6 @@ into my coursework document later.
    permissions
    tls
    authentication
+   storage
+   query-language
+   query-engine

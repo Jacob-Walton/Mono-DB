@@ -72,3 +72,21 @@ pip3 install invoke colorama
 ```bash
 inv help
 ```
+
+## Known Issues (Windows)
+
+On Windows, building `aws-lc-sys` may required using the **GNU Nightly Toolchain**, selecting Ninja as the CMake generator,
+and explicitly specifying the C and C++ compilers
+
+Other CMake generators (such as `MinGW Makefiles`) *may* work if their respective toolchains are installed correctly, but
+they are generally more fragile and may fail depending on the local environment. The default Visual Studio generator is
+**not supported** due to issues with AWS-LC's build scripts.
+
+```powershell
+$env:CC="gcc"
+$env:CXX="g++"
+$env:CMAKE_GENERATOR="Ninja"
+```
+
+When using an IDE, ensure that environment variables are passed to the language server (for example, via `rust-analyzer.cargo.extraEnv`)
+so that build scripts run correctly.

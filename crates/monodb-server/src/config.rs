@@ -28,7 +28,7 @@ impl Default for ServerConfig {
     }
 }
 
-/// WAL Configuration Options
+/// Write-Ahead Log configuration settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalConfig {
     /// Buffer size for writes (default: 64KB)
@@ -61,7 +61,7 @@ impl Default for WalConfig {
     }
 }
 
-/// Configuration for the storage engine
+/// Storage engine configuration.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StorageConfig {
     /// Directory path for storing database files
@@ -92,15 +92,14 @@ pub struct Config {
 }
 
 impl Config {
-    /// Load config from a TOML file. If the file does not exist, returns Default.
-    /// After loading from file, environment variables (MONODB_*, MDB_*) are applied to override values.
-    /// If MDB_CONFIG is set, it overrides the config file path.
+    /// Load config from TOML file, with environment variable overrides.
+    /// Falls back to defaults if file is not found. MDB_CONFIG env var overrides the path.
     pub fn load_from_path<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
         ConfigLoader::new().load(path)
     }
 }
 
-/// Helper that encapsulates argument and environment parsing for configuration loading.
+/// Resolves configuration from file, CLI args, and environment variables.
 struct ConfigLoader {
     args: Vec<String>,
 }
@@ -135,7 +134,7 @@ impl ConfigLoader {
         }
     }
 
-    /// Determine config path from CLI args or fall back to provided default.
+    /// Resolve config path from CLI args, env vars, or default.
     fn resolve_config_path<P: AsRef<Path>>(&self, default_path: P) -> PathBuf {
         if let Some(p) = Self::find_config_arg(&self.args) {
             p
@@ -144,37 +143,33 @@ impl ConfigLoader {
         }
     }
 
-    /// Find `--config=...`, `-c=...`, `--config ...` or `-c ...` in args.
+    /// Find --config or -c flag in arguments.
     fn find_config_arg(args: &[String]) -> Option<PathBuf> {
         let mut iter = args.iter().peekable();
         while let Some(a) = iter.next() {
-            if a.starts_with("--config=") {
-                if let Some(p) = a.splitn(2, '=').nth(1) {
-                    return Some(PathBuf::from(p));
+            if a.starts_with("--config=") || a.starts_with("-c=") {
+                if let Some((_, val)) = a.split_once('=') {
+                    return Some(PathBuf::from(val));
                 }
-            } else if a.starts_with("-c=") {
-                if let Some(p) = a.splitn(2, '=').nth(1) {
-                    return Some(PathBuf::from(p));
-                }
-            } else if a == "--config" || a == "-c" {
-                if let Some(next) = iter.peek() {
-                    return Some(PathBuf::from((*next).clone()));
-                }
+            } else if (a == "--config" || a == "-c")
+                && let Some(next) = iter.peek()
+            {
+                return Some(PathBuf::from((*next).clone()));
             }
         }
         None
     }
 
-    /// Apply environment overrides. Supports both MONODB_* and MDB_* prefixes.
+    /// Apply MONODB_*/MDB_* environment variable overrides.
     fn apply_env_overrides(cfg: &mut Config) {
         if let Ok(v) = env::var("MONODB_HOST").or_else(|_| env::var("MDB_HOST")) {
             cfg.server.host = v;
         }
 
-        if let Ok(v) = env::var("MONODB_PORT").or_else(|_| env::var("MDB_PORT")) {
-            if let Ok(p) = v.parse::<u16>() {
-                cfg.server.port = p;
-            }
+        if let Ok(v) = env::var("MONODB_PORT").or_else(|_| env::var("MDB_PORT"))
+            && let Ok(p) = v.parse::<u16>()
+        {
+            cfg.server.port = p;
         }
 
         if let Ok(v) = env::var("MONODB_DATA_DIR").or_else(|_| env::var("MDB_DATA_DIR")) {

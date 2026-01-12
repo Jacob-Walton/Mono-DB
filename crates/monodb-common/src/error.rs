@@ -1,5 +1,6 @@
 //! Error definitions for MonoDB
 
+#[cfg(feature = "tls")]
 use std::path::PathBuf;
 
 use thiserror::Error;
@@ -57,19 +58,67 @@ pub enum MonoError {
     #[error("Write conflict: {0}")]
     WriteConflict(String),
 
+    // Storage-specific errors
+    #[error("Data corruption in {location}: {details}")]
+    Corruption { location: String, details: String },
+
+    #[error("WAL error: {0}")]
+    Wal(String),
+
+    #[error("Checksum mismatch: expected {expected:#010x}, got {actual:#010x}")]
+    ChecksumMismatch { expected: u32, actual: u32 },
+
+    #[error("Page {0} not found")]
+    PageNotFound(u64),
+
+    #[error("Page full, requires split")]
+    PageFull,
+
+    #[error("Buffer pool exhausted: {0} pages in use")]
+    BufferPoolExhausted(usize),
+
+    #[error("Index corrupted: {0}")]
+    IndexCorrupted(String),
+
+    #[error("Disk full: cannot allocate {needed} bytes")]
+    DiskFull { needed: u64 },
+
+    #[error(
+        "Quota exceeded for namespace '{namespace}': limit {limit}, used {used}, requested {requested}"
+    )]
+    QuotaExceeded {
+        namespace: String,
+        limit: u64,
+        used: u64,
+        requested: u64,
+    },
+
+    #[error("Schema mismatch: expected {expected}, found {actual}")]
+    SchemaMismatch { expected: String, actual: String },
+
+    // Concurrency errors
+    #[error("Lock timeout on resource: {0}")]
+    LockTimeout(String),
+
+    #[error("Deadlock detected between transactions: {0:?}")]
+    Deadlock(Vec<u64>),
+
     // TLS
+    #[cfg(feature = "tls")]
     #[error("Failed to load TLS certificate from {path}: {source}")]
     TlsCertLoad {
         path: PathBuf,
         source: rustls::pki_types::pem::Error,
     },
 
+    #[cfg(feature = "tls")]
     #[error("Failed to load TLS private key from {path}: {source}")]
     TlsKeyLoad {
         path: PathBuf,
         source: rustls::pki_types::pem::Error,
     },
 
+    #[cfg(feature = "tls")]
     #[error("Invalid TLS configuration: {0}")]
     TlsConfig(rustls::Error),
 }
@@ -96,8 +145,25 @@ impl MonoError {
             MonoError::Transaction(msg) => msg.clone(),
             MonoError::Config(msg) => msg.clone(),
             MonoError::WriteConflict(msg) => msg.clone(),
+            MonoError::Corruption { details, .. } => details.clone(),
+            MonoError::Wal(msg) => msg.clone(),
+            MonoError::ChecksumMismatch { expected, actual } => {
+                format!("expected {expected:#010x}, got {actual:#010x}")
+            }
+            MonoError::PageNotFound(id) => format!("page {id}"),
+            MonoError::PageFull => "page full".to_string(),
+            MonoError::BufferPoolExhausted(count) => format!("{count} pages in use"),
+            MonoError::IndexCorrupted(msg) => msg.clone(),
+            MonoError::DiskFull { needed } => format!("{needed} bytes needed"),
+            MonoError::QuotaExceeded { namespace, .. } => namespace.clone(),
+            MonoError::SchemaMismatch { expected, .. } => expected.clone(),
+            MonoError::LockTimeout(msg) => msg.clone(),
+            MonoError::Deadlock(txs) => format!("{txs:?}"),
+            #[cfg(feature = "tls")]
             MonoError::TlsCertLoad { source, .. } => source.to_string(),
+            #[cfg(feature = "tls")]
             MonoError::TlsKeyLoad { source, .. } => source.to_string(),
+            #[cfg(feature = "tls")]
             MonoError::TlsConfig(err) => err.to_string(),
         }
     }
@@ -117,8 +183,23 @@ impl MonoError {
             MonoError::Transaction(_) => "transaction_error",
             MonoError::Config(_) => "config_error",
             MonoError::WriteConflict(_) => "write_conflict",
+            MonoError::Corruption { .. } => "corruption",
+            MonoError::Wal(_) => "wal_error",
+            MonoError::ChecksumMismatch { .. } => "checksum_mismatch",
+            MonoError::PageNotFound(_) => "page_not_found",
+            MonoError::PageFull => "page_full",
+            MonoError::BufferPoolExhausted(_) => "buffer_pool_exhausted",
+            MonoError::IndexCorrupted(_) => "index_corrupted",
+            MonoError::DiskFull { .. } => "disk_full",
+            MonoError::QuotaExceeded { .. } => "quota_exceeded",
+            MonoError::SchemaMismatch { .. } => "schema_mismatch",
+            MonoError::LockTimeout(_) => "lock_timeout",
+            MonoError::Deadlock(_) => "deadlock",
+            #[cfg(feature = "tls")]
             MonoError::TlsCertLoad { .. } => "tls_cert_load_error",
+            #[cfg(feature = "tls")]
             MonoError::TlsKeyLoad { .. } => "tls_key_load_error",
+            #[cfg(feature = "tls")]
             MonoError::TlsConfig(_) => "tls_config_error",
         }
     }

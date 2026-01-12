@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, HashSet},
     ops::Index,
     sync::{OnceLock, atomic::AtomicU32},
@@ -60,6 +61,9 @@ pub enum ValueType {
 
     // Reference
     Reference,
+
+    // Plugin-defined extension
+    Extension,
 }
 
 /// Universal value type for MonoDB
@@ -107,10 +111,19 @@ pub enum Value {
 
     // Reference type
     Reference { collection: String, id: Box<Value> },
+
+    // Plugin-defined extension type
+    Extension {
+        type_name: String,
+        plugin_id: String,
+        data: Vec<u8>,
+    },
 }
 
 impl Value {
     /// Get the type name as a string
+    /// 
+    /// Returns a [`Cow<'_, str>`] representing the type name.
     ///
     /// # Example
     /// ```rust
@@ -125,28 +138,29 @@ impl Value {
     /// let val = Value::Array(vec![Value::Int32(1), Value::Int32(2)]);
     /// assert_eq!(val.type_name(), "array");
     /// ```
-    pub fn type_name(&self) -> &'static str {
+    pub fn type_name(&self) -> Cow<'_, str> {
         match self {
-            Value::Null => "null",
-            Value::Bool(_) => "bool",
-            Value::Int32(_) => "int32",
-            Value::Int64(_) => "int64",
-            Value::Float32(_) => "float32",
-            Value::Float64(_) => "float64",
-            Value::String(_) => "string",
-            Value::Binary(_) => "binary",
-            Value::DateTime(_) => "datetime",
-            Value::Date(_) => "date",
-            Value::Time(_) => "time",
-            Value::Uuid(_) => "uuid",
-            Value::ObjectId(_) => "objectid",
-            Value::Array(_) => "array",
-            Value::Object(_) => "object",
-            Value::Set(_) => "set",
-            Value::Row(_) => "row",
-            Value::SortedSet(_) => "sortedset",
-            Value::GeoPoint { .. } => "geopoint",
-            Value::Reference { .. } => "reference",
+            Value::Null => Cow::Borrowed("null"),
+            Value::Bool(_) => Cow::Borrowed("bool"),
+            Value::Int32(_) => Cow::Borrowed("int32"),
+            Value::Int64(_) => Cow::Borrowed("int64"),
+            Value::Float32(_) => Cow::Borrowed("float32"),
+            Value::Float64(_) => Cow::Borrowed("float64"),
+            Value::String(_) => Cow::Borrowed("string"),
+            Value::Binary(_) => Cow::Borrowed("binary"),
+            Value::DateTime(_) => Cow::Borrowed("datetime"),
+            Value::Date(_) => Cow::Borrowed("date"),
+            Value::Time(_) => Cow::Borrowed("time"),
+            Value::Uuid(_) => Cow::Borrowed("uuid"),
+            Value::ObjectId(_) => Cow::Borrowed("objectid"),
+            Value::Array(_) => Cow::Borrowed("array"),
+            Value::Object(_) => Cow::Borrowed("object"),
+            Value::Set(_) => Cow::Borrowed("set"),
+            Value::Row(_) => Cow::Borrowed("row"),
+            Value::SortedSet(_) => Cow::Borrowed("sortedset"),
+            Value::GeoPoint { .. } => Cow::Borrowed("geopoint"),
+            Value::Reference { .. } => Cow::Borrowed("reference"),
+            Value::Extension { type_name, .. } => Cow::Borrowed(type_name.as_str()),
         }
     }
 
@@ -177,6 +191,7 @@ impl Value {
             Value::SortedSet(_) => ValueType::SortedSet,
             Value::GeoPoint { .. } => ValueType::GeoPoint,
             Value::Reference { .. } => ValueType::Reference,
+            Value::Extension { .. } => ValueType::Extension,
         }
     }
 
@@ -277,6 +292,15 @@ impl Value {
                 );
                 obj.insert("id".to_string(), id.to_json());
                 obj.insert("id".to_string(), id.to_json());
+                serde_json::Value::Object(obj)
+            }
+            Value::Extension { type_name, plugin_id, data } => {
+                let mut obj = serde_json::Map::new();
+                obj.insert("$type".to_string(), serde_json::Value::String(type_name.clone()));
+                obj.insert("$plugin".to_string(), serde_json::Value::String(plugin_id.clone()));
+                obj.insert("$data".to_string(), serde_json::Value::String(
+                    base64::engine::general_purpose::STANDARD.encode(data)
+                ));
                 serde_json::Value::Object(obj)
             }
         }
@@ -691,6 +715,18 @@ impl Value {
                 }
             }
 
+            20 => {
+                let type_name = read_string!();
+                let plugin_id = read_string!();
+                let data = read_bytes!();
+
+                Value::Extension {
+                    type_name,
+                    plugin_id,
+                    data,
+                }
+            }
+
             _ => {
                 return Err(MonoError::Parse(format!("Unknown Value tag: {kind}")));
             }
@@ -845,6 +881,24 @@ impl Value {
                 // id : Value
                 id.write_to(out);
             }
+
+            Value::Extension { type_name, plugin_id, data } => {
+                out.push(20);
+
+                // type_name : String
+                let tb = type_name.as_bytes();
+                out.extend_from_slice(&(tb.len() as u32).to_le_bytes());
+                out.extend_from_slice(tb);
+
+                // plugin_id : String
+                let pb = plugin_id.as_bytes();
+                out.extend_from_slice(&(pb.len() as u32).to_le_bytes());
+                out.extend_from_slice(pb);
+
+                // data : Vec<u8>
+                out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+                out.extend_from_slice(data);
+            }
         }
     }
 
@@ -900,6 +954,10 @@ impl Value {
             Value::GeoPoint { .. } => 1 + 8 + 8,
 
             Value::Reference { collection, id } => 1 + (4 + collection.len()) + id.encoded_len(),
+
+            Value::Extension { type_name, plugin_id, data } => {
+                1 + (4 + type_name.len()) + (4 + plugin_id.len()) + (4 + data.len())
+            }
         }
     }
 }
@@ -1229,16 +1287,9 @@ impl std::str::FromStr for Value {
             return Ok(Value::Int64(i));
         }
 
-        // Float
-        if let Ok(f) = s.parse::<f64>() {
-            if s.contains('.') {
-                let decimal_places = s.split('.').nth(1).map_or(0, |d| d.len());
-                if decimal_places <= 6 && f <= f32::MAX as f64 {
-                    return Ok(Value::Float32(f as f32));
-                } else {
-                    return Ok(Value::Float64(f));
-                }
-            } else {
+        // Float - always use Float64 for precision
+        if s.contains('.') {
+            if let Ok(f) = s.parse::<f64>() {
                 return Ok(Value::Float64(f));
             }
         }
@@ -1455,6 +1506,9 @@ impl std::fmt::Display for Value {
             Value::GeoPoint { lat, lng } => write!(f, "GeoPoint({}, {})", lat, lng),
             Value::Reference { collection, id } => {
                 write!(f, "Reference(\"{}\", {})", collection, id)
+            }
+            Value::Extension { type_name, plugin_id, data } => {
+                write!(f, "Extension({}, {}, {} bytes)", type_name, plugin_id, data.len())
             }
         }
     }

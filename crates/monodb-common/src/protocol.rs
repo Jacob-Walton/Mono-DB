@@ -61,6 +61,22 @@ pub enum Request {
 
     /// Get server statistics
     Stats { detailed: bool },
+
+    // Namespace operations
+    /// Switch to a different namespace
+    UseNamespace { namespace: String },
+
+    /// Create a new namespace
+    CreateNamespace {
+        name: String,
+        description: Option<String>,
+    },
+
+    /// Drop a namespace (must be empty unless force=true)
+    DropNamespace { name: String, force: bool },
+
+    /// List all namespaces
+    ListNamespaces,
 }
 
 /// A statement with parameters for batch execution
@@ -86,6 +102,214 @@ pub enum IsolationLevel {
     ReadCommitted = 0x02,
     RepeatableRead = 0x03,
     Serializable = 0x04,
+}
+
+/// Error codes for protocol error responses.
+///
+/// Error codes are grouped by category:
+/// - 1xxx: Client/parse errors
+/// - 2xxx: Execution errors
+/// - 3xxx: Data errors (not found, already exists, etc.)
+/// - 4xxx: Transaction errors
+/// - 5xxx: Authentication/authorization errors
+/// - 6xxx: Configuration errors
+/// - 9xxx: Internal/unknown errors
+#[repr(u16)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ErrorCode {
+    // Client/Parse errors (1xxx)
+    /// Failed to parse query or request
+    ParseError = 1001,
+    /// Invalid operation requested
+    InvalidOperation = 1002,
+    /// Type mismatch error
+    TypeError = 1003,
+    /// Schema validation failed
+    SchemaMismatch = 1004,
+
+    // Execution errors (2xxx)
+    /// Query execution failed
+    ExecutionError = 2001,
+    /// I/O error during operation
+    IoError = 2002,
+    /// Storage engine error
+    StorageError = 2003,
+    /// Network communication error
+    NetworkError = 2004,
+    /// Data corruption detected
+    CorruptionError = 2005,
+    /// WAL error
+    WalError = 2006,
+    /// Checksum verification failed
+    ChecksumError = 2007,
+    /// Page not found in storage
+    PageNotFound = 2008,
+    /// Page is full
+    PageFull = 2009,
+    /// Buffer pool exhausted
+    BufferPoolExhausted = 2010,
+    /// Index structure corrupted
+    IndexCorrupted = 2011,
+    /// Disk is full
+    DiskFull = 2012,
+    /// Namespace quota exceeded
+    QuotaExceeded = 2013,
+
+    // Data errors (3xxx)
+    /// Requested resource not found
+    NotFound = 3001,
+    /// Resource already exists
+    AlreadyExists = 3002,
+
+    // Transaction errors (4xxx)
+    /// Transaction failed
+    TransactionError = 4001,
+    /// Write conflict detected
+    WriteConflict = 4002,
+    /// Lock acquisition timeout
+    LockTimeout = 4003,
+    /// Deadlock detected
+    Deadlock = 4004,
+
+    // Auth/Config errors (5xxx)
+    /// Authentication failed (invalid credentials)
+    AuthenticationFailed = 5001,
+    /// User is not authorized for this operation
+    Unauthorized = 5002,
+    /// Session has expired
+    SessionExpired = 5003,
+    /// Permission denied for the requested resource/action
+    PermissionDenied = 5004,
+    /// Configuration error
+    ConfigError = 5005,
+    /// TLS/certificate error
+    TlsError = 5006,
+
+    // Internal errors (9xxx)
+    /// Unknown or internal server error
+    InternalError = 9999,
+}
+
+impl ErrorCode {
+    /// Convert error code to its numeric value
+    #[inline]
+    pub fn to_u16(self) -> u16 {
+        self as u16
+    }
+
+    /// Get a short string identifier for the error code
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ErrorCode::ParseError => "parse_error",
+            ErrorCode::InvalidOperation => "invalid_operation",
+            ErrorCode::TypeError => "type_error",
+            ErrorCode::ExecutionError => "execution_error",
+            ErrorCode::IoError => "io_error",
+            ErrorCode::StorageError => "storage_error",
+            ErrorCode::NetworkError => "network_error",
+            ErrorCode::CorruptionError => "corruption_error",
+            ErrorCode::WalError => "wal_error",
+            ErrorCode::ChecksumError => "checksum_error",
+            ErrorCode::PageNotFound => "page_not_found",
+            ErrorCode::PageFull => "page_full",
+            ErrorCode::BufferPoolExhausted => "buffer_pool_exhausted",
+            ErrorCode::IndexCorrupted => "index_corrupted",
+            ErrorCode::DiskFull => "disk_full",
+            ErrorCode::QuotaExceeded => "quota_exceeded",
+            ErrorCode::SchemaMismatch => "schema_mismatch",
+            ErrorCode::NotFound => "not_found",
+            ErrorCode::AlreadyExists => "already_exists",
+            ErrorCode::TransactionError => "transaction_error",
+            ErrorCode::WriteConflict => "write_conflict",
+            ErrorCode::LockTimeout => "lock_timeout",
+            ErrorCode::Deadlock => "deadlock",
+            ErrorCode::AuthenticationFailed => "authentication_failed",
+            ErrorCode::Unauthorized => "unauthorized",
+            ErrorCode::SessionExpired => "session_expired",
+            ErrorCode::PermissionDenied => "permission_denied",
+            ErrorCode::ConfigError => "config_error",
+            ErrorCode::TlsError => "tls_error",
+            ErrorCode::InternalError => "internal_error",
+        }
+    }
+}
+
+impl From<u16> for ErrorCode {
+    fn from(code: u16) -> Self {
+        match code {
+            1001 => ErrorCode::ParseError,
+            1002 => ErrorCode::InvalidOperation,
+            1003 => ErrorCode::TypeError,
+            1004 => ErrorCode::SchemaMismatch,
+            2001 => ErrorCode::ExecutionError,
+            2002 => ErrorCode::IoError,
+            2003 => ErrorCode::StorageError,
+            2004 => ErrorCode::NetworkError,
+            2005 => ErrorCode::CorruptionError,
+            2006 => ErrorCode::WalError,
+            2007 => ErrorCode::ChecksumError,
+            2008 => ErrorCode::PageNotFound,
+            2009 => ErrorCode::PageFull,
+            2010 => ErrorCode::BufferPoolExhausted,
+            2011 => ErrorCode::IndexCorrupted,
+            2012 => ErrorCode::DiskFull,
+            2013 => ErrorCode::QuotaExceeded,
+            3001 => ErrorCode::NotFound,
+            3002 => ErrorCode::AlreadyExists,
+            4001 => ErrorCode::TransactionError,
+            4002 => ErrorCode::WriteConflict,
+            4003 => ErrorCode::LockTimeout,
+            4004 => ErrorCode::Deadlock,
+            5001 => ErrorCode::AuthenticationFailed,
+            5002 => ErrorCode::Unauthorized,
+            5003 => ErrorCode::SessionExpired,
+            5004 => ErrorCode::PermissionDenied,
+            5005 => ErrorCode::ConfigError,
+            5006 => ErrorCode::TlsError,
+            _ => ErrorCode::InternalError,
+        }
+    }
+}
+
+impl From<&crate::MonoError> for ErrorCode {
+    fn from(err: &crate::MonoError) -> Self {
+        match err {
+            crate::MonoError::Parse(_) => ErrorCode::ParseError,
+            crate::MonoError::InvalidOperation(_) => ErrorCode::InvalidOperation,
+            crate::MonoError::TypeError { .. } => ErrorCode::TypeError,
+            crate::MonoError::Execution(_) => ErrorCode::ExecutionError,
+            crate::MonoError::Io(_) => ErrorCode::IoError,
+            crate::MonoError::Storage(_) => ErrorCode::StorageError,
+            crate::MonoError::Network(_) => ErrorCode::NetworkError,
+            crate::MonoError::Corruption { .. } => ErrorCode::CorruptionError,
+            crate::MonoError::Wal(_) => ErrorCode::WalError,
+            crate::MonoError::ChecksumMismatch { .. } => ErrorCode::ChecksumError,
+            crate::MonoError::PageNotFound(_) => ErrorCode::PageNotFound,
+            crate::MonoError::PageFull => ErrorCode::PageFull,
+            crate::MonoError::BufferPoolExhausted(_) => ErrorCode::BufferPoolExhausted,
+            crate::MonoError::IndexCorrupted(_) => ErrorCode::IndexCorrupted,
+            crate::MonoError::DiskFull { .. } => ErrorCode::DiskFull,
+            crate::MonoError::QuotaExceeded { .. } => ErrorCode::QuotaExceeded,
+            crate::MonoError::SchemaMismatch { .. } => ErrorCode::SchemaMismatch,
+            crate::MonoError::LockTimeout(_) => ErrorCode::LockTimeout,
+            crate::MonoError::Deadlock(_) => ErrorCode::Deadlock,
+            crate::MonoError::NotFound(_) => ErrorCode::NotFound,
+            crate::MonoError::AlreadyExists(_) => ErrorCode::AlreadyExists,
+            crate::MonoError::Transaction(_) => ErrorCode::TransactionError,
+            crate::MonoError::WriteConflict(_) => ErrorCode::WriteConflict,
+            crate::MonoError::Config(_) => ErrorCode::ConfigError,
+            #[cfg(feature = "tls")]
+            crate::MonoError::TlsCertLoad { .. }
+            | crate::MonoError::TlsKeyLoad { .. }
+            | crate::MonoError::TlsConfig(_) => ErrorCode::TlsError,
+        }
+    }
+}
+
+impl std::fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.as_str(), *self as u16)
+    }
 }
 
 // Response Types
@@ -146,6 +370,18 @@ pub enum Response {
 
     /// Server statistics
     StatsResult { stats: ServerStats },
+
+    /// List of namespaces
+    NamespaceList { namespaces: Vec<NamespaceInfo> },
+
+    /// Namespace switched successfully
+    NamespaceSwitched { namespace: String },
+
+    /// Namespace created successfully
+    NamespaceCreated { namespace: String },
+
+    /// Namespace dropped successfully
+    NamespaceDropped { namespace: String },
 
     /// Generic success acknowledgment
     Ok,
@@ -240,6 +476,19 @@ pub struct StorageStats {
     pub keyspace_entries: u64,
 }
 
+/// Information about a namespace
+#[derive(Debug, Clone, PartialEq)]
+pub struct NamespaceInfo {
+    /// Namespace name
+    pub name: String,
+    /// Optional description
+    pub description: Option<String>,
+    /// Number of tables in this namespace
+    pub table_count: u64,
+    /// Storage usage in bytes
+    pub size_bytes: Option<u64>,
+}
+
 // Command Codes
 
 mod cmd {
@@ -256,6 +505,10 @@ mod cmd {
     pub const REQ_DESCRIBE: u8 = 0x0A;
     pub const REQ_LIST: u8 = 0x0B;
     pub const REQ_STATS: u8 = 0x0C;
+    pub const REQ_USE_NAMESPACE: u8 = 0x0D;
+    pub const REQ_CREATE_NAMESPACE: u8 = 0x0E;
+    pub const REQ_DROP_NAMESPACE: u8 = 0x0F;
+    pub const REQ_LIST_NAMESPACES: u8 = 0x10;
 
     // Response commands
     pub const RSP_WELCOME: u8 = 0x01;
@@ -272,6 +525,10 @@ mod cmd {
     pub const RSP_STATS_RESULT: u8 = 0x0C;
     pub const RSP_OK: u8 = 0x0D;
     pub const RSP_ERROR: u8 = 0x0E;
+    pub const RSP_NAMESPACE_LIST: u8 = 0x0F;
+    pub const RSP_NAMESPACE_SWITCHED: u8 = 0x10;
+    pub const RSP_NAMESPACE_CREATED: u8 = 0x11;
+    pub const RSP_NAMESPACE_DROPPED: u8 = 0x12;
 
     // Auth method tags
     pub const AUTH_PASSWORD: u8 = 0x01;
@@ -405,6 +662,23 @@ impl ProtocolEncoder {
             Request::Stats { detailed } => {
                 header.put_u8(cmd::REQ_STATS);
                 body.put_u8(if *detailed { 1 } else { 0 });
+            }
+            Request::UseNamespace { namespace } => {
+                header.put_u8(cmd::REQ_USE_NAMESPACE);
+                put_string(&mut body, namespace);
+            }
+            Request::CreateNamespace { name, description } => {
+                header.put_u8(cmd::REQ_CREATE_NAMESPACE);
+                put_string(&mut body, name);
+                put_opt_string(&mut body, description);
+            }
+            Request::DropNamespace { name, force } => {
+                header.put_u8(cmd::REQ_DROP_NAMESPACE);
+                put_string(&mut body, name);
+                body.put_u8(if *force { 1 } else { 0 });
+            }
+            Request::ListNamespaces => {
+                header.put_u8(cmd::REQ_LIST_NAMESPACES);
             }
         }
 
@@ -544,6 +818,28 @@ impl ProtocolEncoder {
                 } else {
                     body.put_u8(0);
                 }
+            }
+            Response::NamespaceList { namespaces } => {
+                header.put_u8(cmd::RSP_NAMESPACE_LIST);
+                body.put_u32_le(namespaces.len() as u32);
+                for ns in namespaces {
+                    put_string(&mut body, &ns.name);
+                    put_opt_string(&mut body, &ns.description);
+                    body.put_u64_le(ns.table_count);
+                    put_opt_u64(&mut body, &ns.size_bytes);
+                }
+            }
+            Response::NamespaceSwitched { namespace } => {
+                header.put_u8(cmd::RSP_NAMESPACE_SWITCHED);
+                put_string(&mut body, namespace);
+            }
+            Response::NamespaceCreated { namespace } => {
+                header.put_u8(cmd::RSP_NAMESPACE_CREATED);
+                put_string(&mut body, namespace);
+            }
+            Response::NamespaceDropped { namespace } => {
+                header.put_u8(cmd::RSP_NAMESPACE_DROPPED);
+                put_string(&mut body, namespace);
             }
             Response::Ok => {
                 header.put_u8(cmd::RSP_OK);
@@ -710,6 +1006,21 @@ impl ProtocolDecoder {
                 let detailed = get_u8(&mut cursor)? != 0;
                 Request::Stats { detailed }
             }
+            cmd::REQ_USE_NAMESPACE => {
+                let namespace = get_string(&mut cursor)?;
+                Request::UseNamespace { namespace }
+            }
+            cmd::REQ_CREATE_NAMESPACE => {
+                let name = get_string(&mut cursor)?;
+                let description = get_opt_string(&mut cursor)?;
+                Request::CreateNamespace { name, description }
+            }
+            cmd::REQ_DROP_NAMESPACE => {
+                let name = get_string(&mut cursor)?;
+                let force = get_u8(&mut cursor)? != 0;
+                Request::DropNamespace { name, force }
+            }
+            cmd::REQ_LIST_NAMESPACES => Request::ListNamespaces,
             _ => {
                 return Err(MonoError::Network(format!(
                     "Unknown request command: {command}"
@@ -905,6 +1216,35 @@ impl ProtocolDecoder {
                 }
             }
             cmd::RSP_OK => Response::Ok,
+            cmd::RSP_NAMESPACE_LIST => {
+                let count = get_u32_le(&mut cursor)? as usize;
+                let mut namespaces = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let name = get_string(&mut cursor)?;
+                    let description = get_opt_string(&mut cursor)?;
+                    let table_count = get_u64_le(&mut cursor)?;
+                    let size_bytes = get_opt_u64(&mut cursor)?;
+                    namespaces.push(NamespaceInfo {
+                        name,
+                        description,
+                        table_count,
+                        size_bytes,
+                    });
+                }
+                Response::NamespaceList { namespaces }
+            }
+            cmd::RSP_NAMESPACE_SWITCHED => {
+                let namespace = get_string(&mut cursor)?;
+                Response::NamespaceSwitched { namespace }
+            }
+            cmd::RSP_NAMESPACE_CREATED => {
+                let namespace = get_string(&mut cursor)?;
+                Response::NamespaceCreated { namespace }
+            }
+            cmd::RSP_NAMESPACE_DROPPED => {
+                let namespace = get_string(&mut cursor)?;
+                Response::NamespaceDropped { namespace }
+            }
             cmd::RSP_ERROR => {
                 let code = get_u16_le(&mut cursor)?;
                 let message = get_string(&mut cursor)?;

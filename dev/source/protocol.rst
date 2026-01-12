@@ -83,6 +83,18 @@ Request Commands
    * - 0x0C
      - Stats
      - Get server statistics
+   * - 0x0D
+     - UseNamespace
+     - Switch to a different namespace
+   * - 0x0E
+     - CreateNamespace
+     - Create a new namespace
+   * - 0x0F
+     - DropNamespace
+     - Drop a namespace
+   * - 0x10
+     - ListNamespaces
+     - List all namespaces
 
 Hello (0x01)
 ^^^^^^^^^^^^
@@ -200,6 +212,41 @@ Stats (0x0C)
    +-----------+
    1 byte
 
+UseNamespace (0x0D)
+^^^^^^^^^^^^^^^^^^^
+
+.. code-block:: text
+
+   +-------------+
+   | namespace   |
+   +-------------+
+   string
+
+CreateNamespace (0x0E)
+^^^^^^^^^^^^^^^^^^^^^^
+
+.. code-block:: text
+
+   +--------+-------------+
+   | name   | description |
+   +--------+-------------+
+   string   opt_string
+
+DropNamespace (0x0F)
+^^^^^^^^^^^^^^^^^^^^
+
+.. code-block:: text
+
+   +--------+--------+
+   | name   | force  |
+   +--------+--------+
+   string   1 byte
+
+ListNamespaces (0x10)
+^^^^^^^^^^^^^^^^^^^^^
+
+No body.
+
 Response Commands
 -----------------
 
@@ -252,6 +299,18 @@ Response Commands
    * - 0x0E
      - Error
      - Error response
+   * - 0x0F
+     - NamespaceList
+     - List of namespaces
+   * - 0x10
+     - NamespaceSwitched
+     - Namespace switched successfully
+   * - 0x11
+     - NamespaceCreated
+     - Namespace created successfully
+   * - 0x12
+     - NamespaceDropped
+     - Namespace dropped successfully
 
 Welcome (0x01)
 ^^^^^^^^^^^^^^
@@ -400,6 +459,122 @@ Error (0x0E)
    | code   | message  | details |
    +--------+----------+---------+
    u16 LE   string     opt_value
+
+NamespaceList (0x0F)
+^^^^^^^^^^^^^^^^^^^^
+
+.. code-block:: text
+
+   +------------------+----------------+
+   | namespaces_count | namespaces...  |
+   +------------------+----------------+
+   u32 LE             NamespaceInfo[]
+
+NamespaceInfo: ``[name: string] [description: opt_string] [table_count: u64] [size_bytes: opt_u64]``
+
+NamespaceSwitched (0x10)
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. code-block:: text
+
+   +-------------+
+   | namespace   |
+   +-------------+
+   string
+
+NamespaceCreated (0x11)
+^^^^^^^^^^^^^^^^^^^^^^^
+
+.. code-block:: text
+
+   +-------------+
+   | namespace   |
+   +-------------+
+   string
+
+NamespaceDropped (0x12)
+^^^^^^^^^^^^^^^^^^^^^^^
+
+.. code-block:: text
+
+   +-------------+
+   | namespace   |
+   +-------------+
+   string
+
+Error Codes
+"""""""""""
+
+Error codes are grouped by category:
+
+- **1xxx**: Client/parse errors
+- **2xxx**: Execution errors
+- **3xxx**: Data errors (not found, already exists, etc.)
+- **4xxx**: Transaction errors
+- **5xxx**: Authentication/authorization errors
+- **9xxx**: Internal/unknown errors
+
+.. list-table:: Error Code Reference
+   :widths: 10 25 65
+   :header-rows: 1
+
+   * - Code
+     - Name
+     - Description
+   * - 1001
+     - ParseError
+     - Failed to parse query or request
+   * - 1002
+     - InvalidOperation
+     - Invalid operation requested
+   * - 1003
+     - TypeError
+     - Type mismatch error
+   * - 2001
+     - ExecutionError
+     - Query execution failed
+   * - 2002
+     - IoError
+     - I/O error during operation
+   * - 2003
+     - StorageError
+     - Storage engine error
+   * - 2004
+     - NetworkError
+     - Network communication error
+   * - 3001
+     - NotFound
+     - Requested resource not found
+   * - 3002
+     - AlreadyExists
+     - Resource already exists
+   * - 4001
+     - TransactionError
+     - Transaction failed
+   * - 4002
+     - WriteConflict
+     - Write conflict detected
+   * - 5001
+     - AuthenticationFailed
+     - Authentication failed (invalid credentials)
+   * - 5002
+     - Unauthorized
+     - User is not authorized for this operation
+   * - 5003
+     - SessionExpired
+     - Session has expired
+   * - 5004
+     - PermissionDenied
+     - Permission denied for the requested resource/action
+   * - 5005
+     - ConfigError
+     - Configuration error
+   * - 5006
+     - TlsError
+     - TLS/certificate error
+   * - 9999
+     - InternalError
+     - Unknown or internal server error
 
 QueryOutcome
 ------------

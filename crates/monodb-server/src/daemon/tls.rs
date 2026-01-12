@@ -36,7 +36,7 @@ pub fn load_tls_acceptor(cfg: &TlsConfig) -> Result<TlsAcceptor> {
     let config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)
-        .map_err(|e| MonoError::TlsConfig(e))?;
+        .map_err(MonoError::TlsConfig)?;
 
     Ok(TlsAcceptor::from(Arc::new(config)))
 }

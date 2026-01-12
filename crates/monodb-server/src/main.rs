@@ -4,7 +4,10 @@ use crate::{config::Config, daemon::Server};
 
 mod config;
 mod daemon;
+mod namespace;
 mod network;
+mod query_engine;
+mod storage;
 
 fn get_env_filter() -> EnvFilter {
     if std::env::var_os("RUST_LOG").is_some() {
@@ -25,13 +28,13 @@ async fn main() -> anyhow::Result<()> {
         .read(false)
         .open("server.log")?;
 
-    // Set up non-blocking appenders for file and console to avoid blocking the runtime.
+    // Non-blocking log appenders for async runtime compatibility
     let (file_non_blocking, file_guard) = tracing_appender::non_blocking(log_file);
     let (console_non_blocking, console_guard) = tracing_appender::non_blocking(std::io::stderr());
-    // Keep guards alive to maintain background log threads.
+    // Maintain guard references to keep log threads alive
     let _guards = (file_guard, console_guard);
 
-    // Tracing layers: file + non-blocking console.
+    // Configure tracing layers for file and console output
     let env_filter = get_env_filter();
 
     let file_layer = tracing_subscriber::fmt::layer()
@@ -70,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("MonoDB Server starting on {}", server.address());
 
-    // Setup signal handlers for graceful shutdown
+    // Spawn signal handler for graceful shutdown
     let shutdown_signal = server.shutdown_signal();
     tokio::spawn(async move {
         #[cfg(unix)]
@@ -96,14 +99,14 @@ async fn main() -> anyhow::Result<()> {
         {
             use tokio::signal;
 
-            // Try to register all Windows console signals with fallback handling
+            // Attempt to register Windows console signals with fallback strategy
             let ctrl_c_result = signal::windows::ctrl_c();
             let ctrl_break_result = signal::windows::ctrl_break();
             let ctrl_close_result = signal::windows::ctrl_close();
             let ctrl_shutdown_result = signal::windows::ctrl_shutdown();
             let ctrl_logoff_result = signal::windows::ctrl_logoff();
 
-            // Handle cases where signal registration might fail
+            // Handle signal registration results
             match (
                 ctrl_c_result,
                 ctrl_break_result,
@@ -163,7 +166,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Run server until shutdown signal
+    // Run server until shutdown
     server.run().await?;
 
     tracing::info!("MonoDB Server stopped");

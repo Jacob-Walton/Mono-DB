@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::sync::Arc;
 
 use monodb_common::{
@@ -13,13 +15,15 @@ use crate::{
     config::{ServerConfig, StorageConfig},
     daemon::tls::load_tls_acceptor,
     network::session,
+    query_engine::storage::StorageAdapter,
+    storage::engine::{StorageConfig as EngineStorageConfig, StorageEngine},
 };
 
 mod tls;
 
 pub struct Server {
     address: String,
-    // storage: Arc<StorageEngine>,
+    storage: Arc<StorageAdapter>,
     sessions: Arc<DashMap<u64, session::Session>>,
     shutdown_tx: broadcast::Sender<()>,
     tls_acceptor: Option<TlsAcceptor>,
@@ -27,8 +31,18 @@ pub struct Server {
 
 impl Server {
     pub async fn new(server_config: ServerConfig, storage_config: StorageConfig) -> Result<Self> {
-        let _ = storage_config;
         let (shutdown_tx, _) = broadcast::channel(1);
+
+        // Set up storage engine
+        let engine_config = EngineStorageConfig {
+            data_dir: storage_config.data_dir.into(),
+            buffer_pool_size: storage_config.buffer_pool_size,
+            wal_enabled: true,
+            wal_sync_on_commit: storage_config.wal.sync_on_write,
+            ..Default::default()
+        };
+        let engine = Arc::new(StorageEngine::new(engine_config)?);
+        let storage = Arc::new(StorageAdapter::new(engine));
 
         let address = format!("{}:{}", server_config.host, server_config.port);
         let tls_acceptor = if let Some(ref tls_cfg) = server_config.tls {
@@ -39,6 +53,7 @@ impl Server {
 
         Ok(Self {
             address,
+            storage,
             sessions: Arc::new(DashMap::new()),
             shutdown_tx,
             tls_acceptor,
@@ -67,20 +82,17 @@ impl Server {
 
                     let encoder = Arc::new(ProtocolEncoder::new());
                     let decoder = Arc::new(ProtocolDecoder::new());
-                    // let storage = Arc::clone(&self.storage);
+                    let storage = Arc::clone(&self.storage);
                     let sessions = Arc::clone(&self.sessions);
                     let connection_shutdown = self.shutdown_tx.subscribe();
 
-                    // Check if TLS is enabled
                     if let Some(tls) = self.tls_acceptor.clone() {
-                        // Spawn a new task to handle the TLS connection
+                        // Handle TLS connection
                         tokio::spawn(async move {
-                            // Wrap the stream with TLS
                             match tls.accept(stream).await {
                                 Ok(tls_stream) => {
-                                    // Handle the TLS connection
                                     if let Err(e) = crate::network::handle_connection(
-                                        tls_stream, sessions, connection_shutdown, encoder, decoder
+                                        tls_stream, sessions, storage, connection_shutdown, encoder, decoder
                                     ).await {
                                         tracing::error!("TLS connection error: {e}");
                                     }
@@ -89,11 +101,10 @@ impl Server {
                             }
                         });
                     } else {
-                        // Spawn a new task to handle the plain connection
+                        // Handle plain TCP connection
                         tokio::spawn(async move {
-                            // Handle the plain TCP connection
                             if let Err(e) = crate::network::handle_connection(
-                                stream, sessions, connection_shutdown, encoder, decoder
+                                stream, sessions, storage, connection_shutdown, encoder, decoder
                             ).await {
                                 tracing::error!("Connection error: {e}");
                             }
@@ -101,7 +112,7 @@ impl Server {
                     }
                 }
 
-                // Handle shutdown signal
+                // Shutdown signal received
                 _ = shutdown_rx.recv() => {
                     tracing::info!("Shutdown signal received, stopping server...");
                     break;
@@ -115,12 +126,12 @@ impl Server {
     pub async fn shutdown(&self) -> Result<()> {
         tracing::info!("Starting shutdown...");
 
-        // Signal all connections to close
+        // Notify active connections
         if self.shutdown_tx.send(()).is_err() {
-            tracing::warn!("No active connections to signal for shutdown");
+            tracing::warn!("No active connections");
         }
 
-        // Give connections time to finish current requests
+        // Allow graceful close of active requests
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
         tracing::info!("Shutdown completed");
