@@ -110,20 +110,23 @@ impl ExecutionContext {
     #[cfg(feature = "plugins")]
     pub fn call_plugin_function(&self, name: &str, args: Vec<Value>) -> Option<Result<Value>> {
         let host = self.plugin_host.as_ref()?;
-        
+
         // Check if function exists
         if !host.has_function(name) {
             return None;
         }
 
         // Get user permissions (default to read-only if not set)
-        let perms = self.user_permissions.clone()
+        let perms = self
+            .user_permissions
+            .clone()
             .unwrap_or_else(PluginPermissions::read_only);
 
         // Call the plugin function
-        Some(host.call_function(name, args, perms).map_err(|e| {
-            MonoError::InvalidOperation(format!("Plugin function error: {}", e))
-        }))
+        Some(
+            host.call_function(name, args, perms)
+                .map_err(|e| MonoError::InvalidOperation(format!("Plugin function error: {}", e))),
+        )
     }
 }
 
@@ -266,20 +269,24 @@ impl<S: QueryStorage> Executor<S> {
                 if let Some(ref lookup_expr) = op.lookup_key {
                     // Evaluate the lookup key value
                     let lookup_value = self.eval_expr(lookup_expr, &Row::new(), ctx)?;
-                    
+
                     // Find primary keys via index lookup
-                    let pks = self.storage.find_by_index(&table, index_name, &[lookup_value])?;
-                    
+                    let pks = self
+                        .storage
+                        .find_by_index(&table, index_name, &[lookup_value])?;
+
                     // Fetch actual rows by primary key
                     let config = ScanConfig::new();
                     let all_rows = self.storage.scan(tx_id, &table, &config)?;
-                    
+
                     // Filter to just the matching rows
                     // FIXME: Direct PK lookup would be more efficient
-                    all_rows.into_iter()
+                    all_rows
+                        .into_iter()
                         .filter(|row| {
                             // Get the primary key value from the row and check if it's in pks
-                            if let Some(pk_val) = row.get("_pk").or_else(|| row.get("id")).cloned() {
+                            if let Some(pk_val) = row.get("_pk").or_else(|| row.get("id")).cloned()
+                            {
                                 let pk_bytes = pk_val.to_bytes();
                                 pks.contains(&pk_bytes)
                             } else {
@@ -847,7 +854,7 @@ impl<S: QueryStorage> Executor<S> {
                     .iter()
                     .map(|a| self.eval_expr(a, row, ctx))
                     .collect::<Result<_>>()?;
-                
+
                 // Try built-in functions first
                 match eval_function(name.as_str(), &arg_vals) {
                     Ok(val) => Ok(val),
@@ -857,7 +864,7 @@ impl<S: QueryStorage> Executor<S> {
                         if let Some(result) = ctx.call_plugin_function(name.as_str(), arg_vals) {
                             return result;
                         }
-                        
+
                         // No matching function found
                         Err(MonoError::InvalidOperation(format!(
                             "unknown function: {}",

@@ -185,12 +185,17 @@ where
     }
 
     /// Open an existing document store from disk.
-    pub fn open(pool: Arc<LruBufferPool>, meta_page_id: PageId, keep_history: bool) -> Result<Self> {
+    pub fn open(
+        pool: Arc<LruBufferPool>,
+        meta_page_id: PageId,
+        keep_history: bool,
+    ) -> Result<Self> {
         let documents: BTree<K, Document<V>> = BTree::open(pool.clone(), meta_page_id)?;
-        
+
         // Find the max revision to continue numbering
-        let max_rev = documents.iter()?
-            .filter_map(|(_, doc)| Some(doc.revision))
+        let max_rev = documents
+            .iter()?
+            .map(|(_, doc)| doc.revision)
             .max()
             .unwrap_or(0);
 

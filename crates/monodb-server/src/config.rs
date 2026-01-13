@@ -121,7 +121,7 @@ impl Default for PluginConfig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,
@@ -129,16 +129,6 @@ pub struct Config {
     pub storage: StorageConfig,
     #[serde(default)]
     pub plugins: PluginConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            server: ServerConfig::default(),
-            storage: StorageConfig::default(),
-            plugins: PluginConfig::default(),
-        }
-    }
 }
 
 impl Config {

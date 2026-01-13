@@ -158,7 +158,8 @@ impl NamespaceManager {
 
     /// Get a table file path within a namespace
     pub fn table_path(&self, namespace: &str, table: &str, extension: &str) -> PathBuf {
-        self.namespace_dir(namespace).join(format!("{}.{}", table, extension))
+        self.namespace_dir(namespace)
+            .join(format!("{}.{}", table, extension))
     }
 
     /// Get the default namespace name
@@ -216,7 +217,10 @@ impl NamespaceManager {
         let mut namespaces = self.namespaces.write();
 
         if !namespaces.contains_key(name) {
-            return Err(MonoError::NotFound(format!("namespace '{}' not found", name)));
+            return Err(MonoError::NotFound(format!(
+                "namespace '{}' not found",
+                name
+            )));
         }
 
         // Check if namespace directory has files (unless force is true)
@@ -239,11 +243,13 @@ impl NamespaceManager {
         // Remove namespace directory
         if ns_dir.exists() {
             if force {
-                std::fs::remove_dir_all(&ns_dir)
-                    .map_err(|e| MonoError::Io(format!("Failed to remove namespace directory: {}", e)))?;
+                std::fs::remove_dir_all(&ns_dir).map_err(|e| {
+                    MonoError::Io(format!("Failed to remove namespace directory: {}", e))
+                })?;
             } else {
-                std::fs::remove_dir(&ns_dir)
-                    .map_err(|e| MonoError::Io(format!("Failed to remove namespace directory: {}", e)))?;
+                std::fs::remove_dir(&ns_dir).map_err(|e| {
+                    MonoError::Io(format!("Failed to remove namespace directory: {}", e))
+                })?;
             }
         }
 
@@ -437,7 +443,8 @@ impl NamespaceManager {
 
         for _ in 0..count {
             // Name
-            let name_len = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
+            let name_len =
+                u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
             offset += 2;
             let name = String::from_utf8_lossy(&data[offset..offset + name_len]).to_string();
             offset += name_len;
@@ -446,7 +453,8 @@ impl NamespaceManager {
             let has_desc = data[offset] != 0;
             offset += 1;
             let description = if has_desc {
-                let desc_len = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
+                let desc_len =
+                    u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
                 offset += 2;
                 let desc = String::from_utf8_lossy(&data[offset..offset + desc_len]).to_string();
                 offset += desc_len;
@@ -595,7 +603,9 @@ mod tests {
         // Create and add namespace
         {
             let manager = NamespaceManager::new(dir.path()).unwrap();
-            manager.create("persistent", Some("Test persistence")).unwrap();
+            manager
+                .create("persistent", Some("Test persistence"))
+                .unwrap();
         }
 
         // Reload and verify

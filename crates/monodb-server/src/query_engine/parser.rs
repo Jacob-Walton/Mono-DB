@@ -251,10 +251,7 @@ impl<'a> Parser<'a> {
             ))
         } else {
             // Just a simple identifier
-            Ok(Spanned::new(
-                QualifiedIdent::simple(first.node),
-                first.span,
-            ))
+            Ok(Spanned::new(QualifiedIdent::simple(first.node), first.span))
         }
     }
 
@@ -277,21 +274,21 @@ impl<'a> Parser<'a> {
     /// Parse comma-separated function arguments
     fn parse_function_args(&mut self) -> ParseResult<Vec<Spanned<Expr>>> {
         let mut args = Vec::new();
-        
+
         // Handle empty argument list
         if self.check(TokenKind::RightParen) {
             return Ok(args);
         }
-        
+
         // Parse first argument
         args.push(self.parse_expr()?);
-        
+
         // Parse remaining arguments
         while self.check(TokenKind::Comma) {
             self.advance(); // consume ','
             args.push(self.parse_expr()?);
         }
-        
+
         Ok(args)
     }
 
@@ -352,7 +349,7 @@ impl<'a> Parser<'a> {
                 } else if self.check_keyword("put") {
                     Ok(Statement::Mutation(self.parse_put()?))
                 } else if self.check_keyword("change") {
-                    return self.parse_change_dispatch();
+                    self.parse_change_dispatch()
                 } else if self.check_keyword("remove") {
                     Ok(Statement::Mutation(self.parse_remove()?))
                 } else if self.check_keyword("make") {
@@ -712,7 +709,10 @@ impl<'a> Parser<'a> {
                 .with_note("use 'add', 'drop', or 'rename' to modify the table schema"));
         }
 
-        Ok(DdlStatement::AlterTable(AlterTableDdl { table, operations }))
+        Ok(DdlStatement::AlterTable(AlterTableDdl {
+            table,
+            operations,
+        }))
     }
 
     /// Parse column type for ALTER TABLE add.
@@ -844,11 +844,13 @@ impl<'a> Parser<'a> {
             }
         }
 
-        Ok(Statement::Mutation(MutationStatement::Change(ChangeMutation {
-            target,
-            filter,
-            assignments,
-        })))
+        Ok(Statement::Mutation(MutationStatement::Change(
+            ChangeMutation {
+                target,
+                filter,
+                assignments,
+            },
+        )))
     }
 
     fn parse_change(&mut self) -> ParseResult<MutationStatement> {
@@ -1384,16 +1386,16 @@ impl<'a> Parser<'a> {
 
             Some(TokenKind::Identifier) => {
                 let id = self.expect_identifier()?;
-                
+
                 // Check if this is a function call (identifier followed by '(')
                 if self.check(TokenKind::LeftParen) {
                     self.advance(); // consume '('
                     let args = self.parse_function_args()?;
                     self.expect(TokenKind::RightParen)?;
-                    
+
                     let end_span = self.previous_span();
                     let full_span = Span::new(id.span.start, end_span.end);
-                    
+
                     Ok(Spanned::new(
                         Expr::FunctionCall {
                             name: Spanned::new(id.node, id.span),

@@ -10,7 +10,6 @@ use dashmap::DashMap;
 use monodb_common::{MonoError, Result, Value};
 use parking_lot::RwLock;
 
-use crate::namespace::NamespaceManager;
 use super::buffer::LruBufferPool;
 use super::disk::DiskManager;
 use super::document::{DocumentStore, HistoryEntry};
@@ -19,6 +18,7 @@ use super::mvcc::{MvccTable, Snapshot, TransactionManager};
 use super::schema::SchemaCatalog;
 use super::traits::{IsolationLevel, VersionedDocument};
 use super::wal::{Wal, WalConfig};
+use crate::namespace::NamespaceManager;
 
 // Storage Configuration
 
@@ -242,11 +242,17 @@ impl StorageEngine {
         }
 
         // Write migration marker
-        std::fs::write(&migration_marker, format!("migrated {} files", migrated_count))
-            .map_err(|e| MonoError::Io(format!("Failed to write migration marker: {}", e)))?;
+        std::fs::write(
+            &migration_marker,
+            format!("migrated {} files", migrated_count),
+        )
+        .map_err(|e| MonoError::Io(format!("Failed to write migration marker: {}", e)))?;
 
         if migrated_count > 0 {
-            tracing::info!("Migration complete: {} files moved to default namespace", migrated_count);
+            tracing::info!(
+                "Migration complete: {} files moved to default namespace",
+                migrated_count
+            );
         }
 
         Ok(())
@@ -277,12 +283,18 @@ impl StorageEngine {
 
             match schema.table_type {
                 StoredTableType::Relation => {
-                    let path = self.namespace_manager.table_path(namespace, table_name, "rel");
+                    let path = self
+                        .namespace_manager
+                        .table_path(namespace, table_name, "rel");
 
                     // Only load if file exists
                     if path.exists() {
                         let pool = self.get_or_create_pool(&path)?;
-                        let table = Arc::new(MvccTable::open(pool, self.tx_manager.clone(), meta_page_id)?);
+                        let table = Arc::new(MvccTable::open(
+                            pool,
+                            self.tx_manager.clone(),
+                            meta_page_id,
+                        )?);
                         self.mvcc_tables.insert(name.clone(), table);
 
                         self.tables.write().insert(
@@ -301,11 +313,17 @@ impl StorageEngine {
 
                         tracing::debug!("Loaded relational table: {}", name);
                     } else {
-                        tracing::warn!("Schema exists for {} but data file missing at {:?}", name, path);
+                        tracing::warn!(
+                            "Schema exists for {} but data file missing at {:?}",
+                            name,
+                            path
+                        );
                     }
                 }
                 StoredTableType::Document => {
-                    let path = self.namespace_manager.table_path(namespace, table_name, "doc");
+                    let path = self
+                        .namespace_manager
+                        .table_path(namespace, table_name, "doc");
 
                     if path.exists() {
                         let pool = self.get_or_create_pool(&path)?;
@@ -328,12 +346,18 @@ impl StorageEngine {
 
                         tracing::debug!("Loaded document store: {}", name);
                     } else {
-                        tracing::warn!("Schema exists for {} but data file missing at {:?}", name, path);
+                        tracing::warn!(
+                            "Schema exists for {} but data file missing at {:?}",
+                            name,
+                            path
+                        );
                     }
                 }
                 StoredTableType::Keyspace => {
                     // Check if it's a disk keyspace (has a file)
-                    let path = self.namespace_manager.table_path(namespace, table_name, "ks");
+                    let path = self
+                        .namespace_manager
+                        .table_path(namespace, table_name, "ks");
                     if path.exists() {
                         let pool = self.get_or_create_pool(&path)?;
                         let keyspace = Arc::new(Keyspace::open_disk(pool, meta_page_id)?);
@@ -398,7 +422,9 @@ impl StorageEngine {
     fn initialize_table_indexes(&self, table: &str, indexes: &[super::schema::StoredIndex]) {
         let table_indexes = self.secondary_indexes.entry(table.to_string()).or_default();
         for idx in indexes {
-            table_indexes.entry(idx.name.clone()).or_insert_with(|| Arc::new(DashMap::new()));
+            table_indexes
+                .entry(idx.name.clone())
+                .or_insert_with(|| Arc::new(DashMap::new()));
         }
         tracing::debug!("Initialized {} indexes for table {}", indexes.len(), table);
     }
@@ -414,13 +440,16 @@ impl StorageEngine {
         use super::schema::{StoredIndex, StoredIndexType};
 
         // Get current schema
-        let schema = self.schema_catalog.get(table)
+        let schema = self
+            .schema_catalog
+            .get(table)
             .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", table)))?;
 
         // Check index doesn't already exist
         if schema.indexes.iter().any(|idx| idx.name == index_name) {
             return Err(MonoError::AlreadyExists(format!(
-                "Index '{}' already exists on table '{}'", index_name, table
+                "Index '{}' already exists on table '{}'",
+                index_name, table
             )));
         }
 
@@ -429,7 +458,8 @@ impl StorageEngine {
             for col in &columns {
                 if !schema.columns.iter().any(|c| &c.name == col) {
                     return Err(MonoError::NotFound(format!(
-                        "Column '{}' not found in table '{}'", col, table
+                        "Column '{}' not found in table '{}'",
+                        col, table
                     )));
                 }
             }
@@ -452,7 +482,12 @@ impl StorageEngine {
         let table_indexes = self.secondary_indexes.entry(table.to_string()).or_default();
         table_indexes.insert(index_name.to_string(), Arc::new(DashMap::new()));
 
-        tracing::info!("Created index '{}' on table '{}' columns {:?}", index_name, table, columns);
+        tracing::info!(
+            "Created index '{}' on table '{}' columns {:?}",
+            index_name,
+            table,
+            columns
+        );
 
         Ok(())
     }
@@ -460,14 +495,22 @@ impl StorageEngine {
     /// Drop a secondary index from a table.
     pub fn drop_index(&self, table: &str, index_name: &str) -> Result<()> {
         // Get current schema
-        let schema = self.schema_catalog.get(table)
+        let schema = self
+            .schema_catalog
+            .get(table)
             .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", table)))?;
 
         // Find and remove the index
-        let idx_pos = schema.indexes.iter().position(|idx| idx.name == index_name)
-            .ok_or_else(|| MonoError::NotFound(format!(
-                "Index '{}' not found on table '{}'", index_name, table
-            )))?;
+        let idx_pos = schema
+            .indexes
+            .iter()
+            .position(|idx| idx.name == index_name)
+            .ok_or_else(|| {
+                MonoError::NotFound(format!(
+                    "Index '{}' not found on table '{}'",
+                    index_name, table
+                ))
+            })?;
 
         // Update schema without this index
         let mut new_schema = (*schema).clone();
@@ -518,7 +561,8 @@ impl StorageEngine {
 
         for index in &schema.indexes {
             // Extract values for the indexed columns
-            let index_values: Vec<Value> = index.columns
+            let index_values: Vec<Value> = index
+                .columns
                 .iter()
                 .map(|col| row_data.get(col).cloned().unwrap_or(Value::Null))
                 .collect();
@@ -564,7 +608,8 @@ impl StorageEngine {
         for index in &schema.indexes {
             if let Some(secondary_index) = table_indexes.get(&index.name) {
                 // Extract index key from the row data
-                let index_values: Vec<Value> = index.columns
+                let index_values: Vec<Value> = index
+                    .columns
                     .iter()
                     .map(|col| row_data.get(col).cloned().unwrap_or(Value::Null))
                     .collect();
@@ -604,7 +649,8 @@ impl StorageEngine {
 
         for index in schema.indexes.iter().filter(|idx| idx.unique) {
             if let Some(secondary_index) = table_indexes.get(&index.name) {
-                let index_values: Vec<Value> = index.columns
+                let index_values: Vec<Value> = index
+                    .columns
                     .iter()
                     .map(|col| row_data.get(col).cloned().unwrap_or(Value::Null))
                     .collect();
@@ -619,7 +665,8 @@ impl StorageEngine {
                     };
 
                     if has_conflict {
-                        let col_values: Vec<String> = index.columns
+                        let col_values: Vec<String> = index
+                            .columns
                             .iter()
                             .zip(index_values.iter())
                             .map(|(col, val)| format!("{}={:?}", col, val))
@@ -644,10 +691,13 @@ impl StorageEngine {
         index_name: &str,
         lookup_values: &[Value],
     ) -> Result<Vec<Vec<u8>>> {
-        let table_indexes = self.secondary_indexes.get(table)
+        let table_indexes = self
+            .secondary_indexes
+            .get(table)
             .ok_or_else(|| MonoError::NotFound(format!("No indexes on table '{}'", table)))?;
 
-        let secondary_index = table_indexes.get(index_name)
+        let secondary_index = table_indexes
+            .get(index_name)
             .ok_or_else(|| MonoError::NotFound(format!("Index '{}' not found", index_name)))?;
 
         let index_key = Self::encode_index_key(lookup_values);
@@ -795,11 +845,13 @@ impl StorageEngine {
         }
 
         // Use namespace directory for storage
-        let path = self.namespace_manager.table_path(namespace, table_name, "rel");
+        let path = self
+            .namespace_manager
+            .table_path(namespace, table_name, "rel");
         let pool = self.get_or_create_pool(&path)?;
 
         let table = Arc::new(MvccTable::new(pool, self.tx_manager.clone())?);
-        let meta_page_id = table.meta_page_id().0 as u64;
+        let meta_page_id = table.meta_page_id().0;
         self.mvcc_tables.insert(qualified_name.clone(), table);
 
         self.tables.write().insert(
@@ -838,11 +890,13 @@ impl StorageEngine {
         }
 
         // Use namespace directory for storage
-        let path = self.namespace_manager.table_path(namespace, store_name, "doc");
+        let path = self
+            .namespace_manager
+            .table_path(namespace, store_name, "doc");
         let pool = self.get_or_create_pool(&path)?;
 
         let store = Arc::new(DocumentStore::new(pool, keep_history)?);
-        let meta_page_id = store.meta_page_id().0 as u64;
+        let meta_page_id = store.meta_page_id().0;
         self.document_stores.insert(qualified_name.clone(), store);
 
         self.tables.write().insert(
@@ -923,7 +977,7 @@ impl StorageEngine {
 
         let keyspace = Arc::new(Keyspace::disk(pool)?);
         // Disk keyspaces use BTree internally, get meta_page_id
-        let meta_page_id = keyspace.meta_page_id().map(|p| p.0 as u64).unwrap_or(0);
+        let meta_page_id = keyspace.meta_page_id().map(|p| p.0).unwrap_or(0);
         self.keyspaces.insert(qualified_name.clone(), keyspace);
 
         self.tables.write().insert(
@@ -980,10 +1034,9 @@ impl StorageEngine {
         // Check old table exists
         let info = {
             let tables = self.tables.read();
-            tables
-                .get(&old_qualified)
-                .cloned()
-                .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", old_qualified)))?
+            tables.get(&old_qualified).cloned().ok_or_else(|| {
+                MonoError::NotFound(format!("Table '{}' not found", old_qualified))
+            })?
         };
 
         // Check new name doesn't exist
@@ -1000,7 +1053,9 @@ impl StorageEngine {
 
         // Compute new file path
         let extension = info.path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let new_path = self.namespace_manager.table_path(new_ns, new_table, extension);
+        let new_path = self
+            .namespace_manager
+            .table_path(new_ns, new_table, extension);
 
         // Rename the underlying storage structures
         match info.storage_type {
@@ -1054,14 +1109,15 @@ impl StorageEngine {
         }
 
         // Update schema catalog
-        self.schema_catalog.rename_table(&old_qualified, &new_qualified)?;
+        self.schema_catalog
+            .rename_table(&old_qualified, &new_qualified)?;
 
         Ok(())
     }
 
     /// Get the storage type of a table.
     pub fn get_storage_type(&self, name: &str) -> Option<StorageType> {
-        self.tables.read().get(name).map(|info| info.storage_type.clone())
+        self.tables.read().get(name).map(|info| info.storage_type)
     }
 
     /// List all tables.
@@ -1190,10 +1246,9 @@ impl StorageEngine {
     /// Insert a document. Returns the revision number.
     pub fn doc_insert(&self, store: &str, key: Vec<u8>, value: Vec<u8>) -> Result<u64> {
         let qualified = self.qualify_table_name(store);
-        let doc_store = self
-            .document_stores
-            .get(&qualified)
-            .ok_or_else(|| MonoError::NotFound(format!("Document store '{}' not found", qualified)))?;
+        let doc_store = self.document_stores.get(&qualified).ok_or_else(|| {
+            MonoError::NotFound(format!("Document store '{}' not found", qualified))
+        })?;
 
         doc_store.insert(key, value)
     }

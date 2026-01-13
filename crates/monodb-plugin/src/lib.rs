@@ -20,7 +20,9 @@ mod watcher;
 pub use config::{
     CacheConfig, EpochConfig, FuelConfig, LimitsConfig, PluginHostConfig, SizeLimitsConfig,
 };
-pub use function_registry::{FunctionInfoHost, FunctionRegistry, ParamInfoHost, RegisteredFunction};
+pub use function_registry::{
+    FunctionInfoHost, FunctionRegistry, ParamInfoHost, RegisteredFunction,
+};
 pub use host::PluginHost;
 pub use registry::{PluginInfo, PluginRegistry};
 pub use state::PluginPermissions;
@@ -67,12 +69,7 @@ pub trait PluginStorage: Send + Sync {
         updates: Vec<(String, monodb_common::Value)>,
     ) -> anyhow::Result<bool>;
 
-    fn delete(
-        &self,
-        tx_id: u64,
-        table: &str,
-        key: &monodb_common::Value,
-    ) -> anyhow::Result<bool>;
+    fn delete(&self, tx_id: u64, table: &str, key: &monodb_common::Value) -> anyhow::Result<bool>;
 
     /// List tables as (name, type) tuples
     fn list_tables(&self) -> anyhow::Result<Vec<(String, String)>>;

@@ -4,8 +4,8 @@ use anyhow::Result;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use tracing::{debug, error, info};
 
@@ -112,11 +112,11 @@ fn process_events(rx: Receiver<notify::Result<Event>>, tx: Sender<PluginEvent>) 
                         _ => None,
                     };
 
-                    if let Some(evt) = plugin_event {
-                        if tx.send(evt).is_err() {
-                            // Receiver dropped, exit thread
-                            return;
-                        }
+                    if let Some(evt) = plugin_event
+                        && tx.send(evt).is_err()
+                    {
+                        // Receiver dropped, exit thread
+                        return;
                     }
                 }
             }

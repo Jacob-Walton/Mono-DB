@@ -62,7 +62,7 @@ impl WasiView for State {
 }
 
 /// Plugin permissions, derived from the calling user's permissions.
-/// 
+///
 /// This ensures plugins cannot escalate privileges beyond what the
 /// calling user is allowed to do. When a user invokes a plugin function,
 /// the plugin inherits that user's access rights.
@@ -100,7 +100,7 @@ impl PluginPermissions {
     }
 
     /// Create permissions from a user context
-    /// 
+    ///
     /// This is the primary constructor, it derives plugin permissions
     /// from the calling user's session, ensuring the plugin can only
     /// do what the user is allowed to do.
@@ -124,10 +124,10 @@ impl PluginPermissions {
     }
 
     pub fn check_table_access(&self, table: &str) -> Result<()> {
-        if let Some(allowed) = &self.allowed_tables {
-            if !allowed.contains(table) {
-                anyhow::bail!("Access denied to table: {}", table);
-            }
+        if let Some(allowed) = &self.allowed_tables
+            && !allowed.contains(table)
+        {
+            anyhow::bail!("Access denied to table: {}", table);
         }
         Ok(())
     }

@@ -74,6 +74,9 @@ mod tests {
         assert_eq!(Command::parse("t"), Command::Tables);
         assert_eq!(Command::parse("ta"), Command::TablesAll);
         assert_eq!(Command::parse("ns"), Command::Namespace);
-        assert_eq!(Command::parse("unknown"), Command::Unknown("unknown".into()));
+        assert_eq!(
+            Command::parse("unknown"),
+            Command::Unknown("unknown".into())
+        );
     }
 }

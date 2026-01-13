@@ -90,12 +90,14 @@ impl Formatter {
         }
 
         // Check if all rows look like documents (have nested objects/arrays)
-        let has_nested = rows.iter().any(|r| {
-            match r.value() {
-                Value::Row(m) => m.values().any(|v| matches!(v, Value::Object(_) | Value::Array(_))),
-                Value::Object(m) => m.values().any(|v| matches!(v, Value::Object(_) | Value::Array(_))),
-                _ => false,
-            }
+        let has_nested = rows.iter().any(|r| match r.value() {
+            Value::Row(m) => m
+                .values()
+                .any(|v| matches!(v, Value::Object(_) | Value::Array(_))),
+            Value::Object(m) => m
+                .values()
+                .any(|v| matches!(v, Value::Object(_) | Value::Array(_))),
+            _ => false,
         });
 
         // Check if rows look like key-value pairs (only 2 fields: key and value)
@@ -119,7 +121,11 @@ impl Formatter {
             return;
         }
 
-        let columns = rows[0].fields().into_iter().map(String::from).collect::<Vec<_>>();
+        let columns = rows[0]
+            .fields()
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>();
         if columns.is_empty() {
             return;
         }
@@ -227,7 +233,7 @@ impl Formatter {
                             println!();
                             self.format_mongo_value(val, indent + 2, false);
                             if !comma.is_empty() {
-                                println!("{},", "");
+                                println!(",");
                             }
                         }
                         _ => {
@@ -243,7 +249,10 @@ impl Formatter {
             Value::Array(arr) => {
                 if arr.is_empty() {
                     print!("[]");
-                } else if arr.iter().all(|v| !matches!(v, Value::Object(_) | Value::Row(_) | Value::Array(_))) {
+                } else if arr
+                    .iter()
+                    .all(|v| !matches!(v, Value::Object(_) | Value::Row(_) | Value::Array(_)))
+                {
                     // Simple array, print on one line
                     print!("[");
                     for (i, v) in arr.iter().enumerate() {
@@ -303,25 +312,33 @@ impl Formatter {
             let idx = format!("{})", i + 1);
 
             // Try to get key and value from the row
-            let key = row.get("key")
+            let key = row
+                .get("key")
                 .or_else(|| row.get("_id"))
                 .or_else(|| row.get("id"))
                 .map(|v| self.value_to_redis_key(v))
                 .unwrap_or_else(|| "?".to_string());
 
-            let value = row.get("value")
+            let value = row
+                .get("value")
                 .or_else(|| row.get("data"))
                 .map(|v| self.value_to_redis_value(v))
                 .unwrap_or_else(|| {
                     // If no explicit value field, show all other fields
-                    let fields: Vec<_> = row.fields().into_iter()
+                    let fields: Vec<_> = row
+                        .fields()
+                        .into_iter()
                         .filter(|f| *f != "key" && *f != "_id" && *f != "id")
                         .collect();
                     if fields.is_empty() {
                         "(nil)".dimmed().to_string()
                     } else {
-                        fields.into_iter()
-                            .filter_map(|f| row.get(f).map(|v| format!("{}: {}", f, self.value_to_redis_value(v))))
+                        fields
+                            .into_iter()
+                            .filter_map(|f| {
+                                row.get(f)
+                                    .map(|v| format!("{}: {}", f, self.value_to_redis_value(v)))
+                            })
                             .collect::<Vec<_>>()
                             .join(" ")
                     }

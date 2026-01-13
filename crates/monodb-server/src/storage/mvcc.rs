@@ -119,7 +119,7 @@ impl<V> MvccRecord<V> {
                         false
                     }
                 }
-                TxState::Active => false, // Active delete not visible
+                TxState::Active => false,  // Active delete not visible
                 TxState::Aborted => false, // Aborted delete not visible
             }
         } else {
@@ -426,9 +426,7 @@ impl TransactionManager {
 
     /// Get the commit timestamp of a transaction.
     pub fn commit_timestamp(&self, tx_id: TxId) -> Option<Timestamp> {
-        self.transactions
-            .get(&tx_id)
-            .and_then(|tx| tx.commit_ts)
+        self.transactions.get(&tx_id).and_then(|tx| tx.commit_ts)
     }
 
     /// Record a write for conflict detection.
@@ -538,9 +536,8 @@ impl TransactionManager {
 
     /// Clean up old committed/aborted transactions (call periodically).
     pub fn cleanup(&self, older_than: Timestamp) {
-        self.transactions.retain(|_, tx| {
-            tx.status == TxState::Active || tx.start_ts >= older_than
-        });
+        self.transactions
+            .retain(|_, tx| tx.status == TxState::Active || tx.start_ts >= older_than);
     }
 }
 
@@ -633,7 +630,11 @@ where
     }
 
     /// Open an existing MVCC table from disk.
-    pub fn open(pool: Arc<LruBufferPool>, tx_manager: Arc<TransactionManager>, meta_page_id: super::page::PageId) -> Result<Self> {
+    pub fn open(
+        pool: Arc<LruBufferPool>,
+        tx_manager: Arc<TransactionManager>,
+        meta_page_id: super::page::PageId,
+    ) -> Result<Self> {
         Ok(Self {
             tree: BTree::open(pool, meta_page_id)?,
             tx_manager,

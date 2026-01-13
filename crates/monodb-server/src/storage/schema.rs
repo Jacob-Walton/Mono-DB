@@ -105,7 +105,7 @@ pub enum StoredIndexType {
 
 impl StoredIndexType {
     /// Convert to type tag byte for binary serialization
-    pub fn to_type_tag(&self) -> u8 {
+    pub fn to_type_tag(self) -> u8 {
         match self {
             StoredIndexType::BTree => 0x01,
             StoredIndexType::Hash => 0x02,
@@ -242,7 +242,9 @@ impl StoredDataType {
             0x0C => StoredDataType::ObjectId,
             0x0D => StoredDataType::Json,
             0x0E => StoredDataType::Array(Box::new(StoredDataType::Any)), // TODO: nested types
-            0x0F => StoredDataType::Map(Box::new(StoredDataType::Any), Box::new(StoredDataType::Any)),
+            0x0F => {
+                StoredDataType::Map(Box::new(StoredDataType::Any), Box::new(StoredDataType::Any))
+            }
             0x10 => StoredDataType::Reference(String::new()), // TODO: read ref name
             _ => StoredDataType::Any,
         }
@@ -323,8 +325,10 @@ impl SchemaCatalog {
 
         // Footer verification
         let footer_start = data.len() - 8;
-        let stored_crc = u32::from_le_bytes(data[footer_start..footer_start + 4].try_into().unwrap());
-        let footer_magic = u32::from_le_bytes(data[footer_start + 4..footer_start + 8].try_into().unwrap());
+        let stored_crc =
+            u32::from_le_bytes(data[footer_start..footer_start + 4].try_into().unwrap());
+        let footer_magic =
+            u32::from_le_bytes(data[footer_start + 4..footer_start + 8].try_into().unwrap());
 
         if footer_magic != SCHEMA_FOOTER_MAGIC {
             return Err(MonoError::Parse(format!(
@@ -569,7 +573,8 @@ impl SchemaCatalog {
         let (table_type, columns, primary_key, indexes) = match schema_type {
             0 => {
                 // Table
-                let column_count = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+                let column_count =
+                    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
                 offset += 4;
 
                 let mut columns = Vec::with_capacity(column_count);
@@ -579,7 +584,8 @@ impl SchemaCatalog {
                     columns.push(col);
                 }
 
-                let pk_count = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+                let pk_count =
+                    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
                 offset += 4;
 
                 let mut primary_key = Vec::with_capacity(pk_count);
@@ -590,7 +596,8 @@ impl SchemaCatalog {
                 }
 
                 // Read indexes
-                let index_count = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+                let index_count =
+                    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
                 offset += 4;
 
                 let mut indexes = Vec::with_capacity(index_count);
@@ -609,7 +616,8 @@ impl SchemaCatalog {
                 // Skip validation rule if present
 
                 // Read indexes
-                let index_count = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+                let index_count =
+                    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
                 offset += 4;
 
                 let mut indexes = Vec::with_capacity(index_count);
@@ -634,7 +642,10 @@ impl SchemaCatalog {
                 (StoredTableType::Keyspace, vec![], vec![], vec![])
             }
             _ => {
-                return Err(MonoError::Parse(format!("Unknown schema type: {}", schema_type)));
+                return Err(MonoError::Parse(format!(
+                    "Unknown schema type: {}",
+                    schema_type
+                )));
             }
         };
 
@@ -670,7 +681,8 @@ impl SchemaCatalog {
         offset += 1;
 
         let default = if has_default == 1 {
-            let default_len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+            let default_len =
+                u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
             offset += 4;
             let (value, _) = Value::from_bytes(&data[offset..offset + default_len])?;
             offset += default_len;
@@ -695,13 +707,17 @@ impl SchemaCatalog {
     }
 
     /// Get a specific version of a schema (for MVCC reads)
-    pub fn get_version(&self, table: &str, version: SchemaVersion) -> Option<Arc<StoredTableSchema>> {
+    pub fn get_version(
+        &self,
+        table: &str,
+        version: SchemaVersion,
+    ) -> Option<Arc<StoredTableSchema>> {
         // First check current
         let current = self.schemas.read().get(table).cloned();
-        if let Some(schema) = &current {
-            if schema.version == version {
-                return current;
-            }
+        if let Some(schema) = &current
+            && schema.version == version
+        {
+            return current;
         }
 
         // Check history
@@ -712,7 +728,11 @@ impl SchemaCatalog {
     }
 
     /// Get the schema version that was current at a given transaction start
-    pub fn get_for_tx(&self, table: &str, tx_start_version: SchemaVersion) -> Option<Arc<StoredTableSchema>> {
+    pub fn get_for_tx(
+        &self,
+        table: &str,
+        tx_start_version: SchemaVersion,
+    ) -> Option<Arc<StoredTableSchema>> {
         let schemas = self.schemas.read();
         let current = schemas.get(table)?;
 
@@ -774,7 +794,7 @@ impl SchemaCatalog {
         // Store old version in history for MVCC
         history
             .entry(name.to_string())
-            .or_insert_with(HashMap::new)
+            .or_default()
             .insert(old_schema.version, old_schema);
 
         // Create new version
@@ -916,7 +936,7 @@ impl SchemaCatalog {
         &self,
         table_name: &str,
         column_name: &str,
-        new_default: Option<Option<Value>>,  // Some(None) = remove default, Some(Some(v)) = set default
+        new_default: Option<Option<Value>>, // Some(None) = remove default, Some(Some(v)) = set default
         new_nullable: Option<bool>,
         new_type: Option<StoredDataType>,
     ) -> Result<()> {
@@ -985,7 +1005,7 @@ impl SchemaCatalog {
         if let Some(old_schema) = schemas.remove(old_name) {
             history
                 .entry(old_name.to_string())
-                .or_insert_with(HashMap::new)
+                .or_default()
                 .insert(old_schema.version, old_schema);
         }
 
@@ -1021,7 +1041,7 @@ impl SchemaCatalog {
         // Store in history for any in-flight transactions
         history
             .entry(name.to_string())
-            .or_insert_with(HashMap::new)
+            .or_default()
             .insert(old_schema.version, old_schema);
 
         drop(schemas);

@@ -1,4 +1,3 @@
-
 //! Connection pooling for MonoDB client
 
 use std::path::PathBuf;

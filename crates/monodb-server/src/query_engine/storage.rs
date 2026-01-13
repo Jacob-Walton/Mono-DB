@@ -163,11 +163,20 @@ pub trait QueryStorage: Send + Sync {
     ) -> Result<bool>;
     fn delete(&self, tx_id: u64, table: &str, key: &Value) -> Result<bool>;
 
-    fn create_table(&self, name: &str, table_type: crate::query_engine::ast::TableType) -> Result<()>;
+    fn create_table(
+        &self,
+        name: &str,
+        table_type: crate::query_engine::ast::TableType,
+    ) -> Result<()>;
     fn drop_table(&self, name: &str) -> Result<()>;
 
     /// Find rows by secondary index lookup. Returns primary keys as bytes.
-    fn find_by_index(&self, table: &str, index_name: &str, lookup_values: &[Value]) -> Result<Vec<Vec<u8>>>;
+    fn find_by_index(
+        &self,
+        table: &str,
+        index_name: &str,
+        lookup_values: &[Value],
+    ) -> Result<Vec<Vec<u8>>>;
 }
 
 // Storage Adapter
@@ -222,11 +231,11 @@ impl StorageAdapter {
                 match func_name.as_str() {
                     "now" | "current_timestamp" => {
                         let now = chrono::Utc::now();
-                        Some(Value::DateTime(now.with_timezone(&chrono::FixedOffset::east_opt(0).unwrap())))
+                        Some(Value::DateTime(
+                            now.with_timezone(&chrono::FixedOffset::east_opt(0).unwrap()),
+                        ))
                     }
-                    "uuid" | "gen_random_uuid" => {
-                        Some(Value::Uuid(uuid::Uuid::new_v4()))
-                    }
+                    "uuid" | "gen_random_uuid" => Some(Value::Uuid(uuid::Uuid::new_v4())),
                     _ => None,
                 }
             }
@@ -296,7 +305,8 @@ impl StorageAdapter {
     pub fn describe_table(&self, table: &str) -> Result<Value> {
         use std::collections::BTreeMap;
 
-        let schema = self.engine
+        let schema = self
+            .engine
             .schema_catalog()
             .get(table)
             .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", table)))?;
@@ -334,7 +344,9 @@ impl StorageAdapter {
                                 Value::Int64(i) => i.to_string(),
                                 Value::Float32(f) => f.to_string(),
                                 Value::Float64(f) => f.to_string(),
-                                Value::DateTime(dt) => format!("now() [{}]", dt.format("%Y-%m-%d %H:%M:%S")),
+                                Value::DateTime(dt) => {
+                                    format!("now() [{}]", dt.format("%Y-%m-%d %H:%M:%S"))
+                                }
                                 Value::Uuid(u) => format!("uuid() [{}]", u),
                                 other => format!("{:?}", other),
                             };
@@ -362,7 +374,12 @@ impl StorageAdapter {
                         idx_obj.insert("name".to_string(), Value::String(idx.name.clone()));
                         idx_obj.insert(
                             "columns".to_string(),
-                            Value::Array(idx.columns.iter().map(|c| Value::String(c.clone())).collect()),
+                            Value::Array(
+                                idx.columns
+                                    .iter()
+                                    .map(|c| Value::String(c.clone()))
+                                    .collect(),
+                            ),
                         );
                         idx_obj.insert("unique".to_string(), Value::Bool(idx.unique));
                         idx_obj.insert(
@@ -385,7 +402,12 @@ impl StorageAdapter {
                         idx_obj.insert("name".to_string(), Value::String(idx.name.clone()));
                         idx_obj.insert(
                             "columns".to_string(),
-                            Value::Array(idx.columns.iter().map(|c| Value::String(c.clone())).collect()),
+                            Value::Array(
+                                idx.columns
+                                    .iter()
+                                    .map(|c| Value::String(c.clone()))
+                                    .collect(),
+                            ),
                         );
                         idx_obj.insert("unique".to_string(), Value::Bool(idx.unique));
                         idx_obj.insert(
@@ -468,7 +490,9 @@ impl StorageAdapter {
         self.backfill_new_columns(table, &stored_columns)?;
 
         // Update schema catalog
-        self.engine.schema_catalog().add_columns(table, &stored_columns)
+        self.engine
+            .schema_catalog()
+            .add_columns(table, &stored_columns)
     }
 
     /// Backfill existing rows with default values for new columns.
@@ -480,9 +504,7 @@ impl StorageAdapter {
         // Collect columns that have default values
         let defaults: Vec<(String, Value)> = columns
             .iter()
-            .filter_map(|col| {
-                col.default.as_ref().map(|d| (col.name.clone(), d.clone()))
-            })
+            .filter_map(|col| col.default.as_ref().map(|d| (col.name.clone(), d.clone())))
             .collect();
 
         if defaults.is_empty() {
@@ -517,11 +539,11 @@ impl StorageAdapter {
                 }
             }
 
-            if !updates.is_empty() {
-                if let Err(e) = self.update(tx_id, table, &key, updates) {
-                    let _ = self.rollback(tx_id);
-                    return Err(e);
-                }
+            if !updates.is_empty()
+                && let Err(e) = self.update(tx_id, table, &key, updates)
+            {
+                let _ = self.rollback(tx_id);
+                return Err(e);
             }
         }
 
@@ -553,15 +575,25 @@ impl StorageAdapter {
         new_nullable: Option<bool>,
         new_type: Option<crate::storage::schema::StoredDataType>,
     ) -> Result<()> {
-        self.engine
-            .schema_catalog()
-            .alter_column(table, column, new_default, new_nullable, new_type)
+        self.engine.schema_catalog().alter_column(
+            table,
+            column,
+            new_default,
+            new_nullable,
+            new_type,
+        )
     }
 
     /// Evaluate a default expression to a Value (public wrapper for network layer)
-    pub fn eval_default_expr(&self, expr: &crate::query_engine::ast::Spanned<crate::query_engine::ast::Expr>) -> Result<Value> {
-        Self::eval_constant_expr(&expr.node)
-            .ok_or_else(|| MonoError::InvalidOperation("Cannot evaluate expression as constant default value".into()))
+    pub fn eval_default_expr(
+        &self,
+        expr: &crate::query_engine::ast::Spanned<crate::query_engine::ast::Expr>,
+    ) -> Result<Value> {
+        Self::eval_constant_expr(&expr.node).ok_or_else(|| {
+            MonoError::InvalidOperation(
+                "Cannot evaluate expression as constant default value".into(),
+            )
+        })
     }
 
     /// Create a table with full schema definition
@@ -573,7 +605,9 @@ impl StorageAdapter {
         constraints: &[crate::query_engine::ast::TableConstraint],
     ) -> Result<()> {
         use crate::query_engine::ast::TableType;
-        use crate::storage::schema::{StoredColumnSchema, StoredDataType, StoredTableSchema, StoredTableType};
+        use crate::storage::schema::{
+            StoredColumnSchema, StoredDataType, StoredTableSchema, StoredTableType,
+        };
 
         match table_type {
             TableType::Relational => {
@@ -582,21 +616,37 @@ impl StorageAdapter {
                     .iter()
                     .map(|col| {
                         // Check constraints
-                        let is_primary = col.constraints.iter().any(|c| matches!(c, crate::query_engine::ast::ColumnConstraint::PrimaryKey));
-                        let is_not_null = col.constraints.iter().any(|c| matches!(c, crate::query_engine::ast::ColumnConstraint::NotNull));
+                        let is_primary = col.constraints.iter().any(|c| {
+                            matches!(c, crate::query_engine::ast::ColumnConstraint::PrimaryKey)
+                        });
+                        let is_not_null = col.constraints.iter().any(|c| {
+                            matches!(c, crate::query_engine::ast::ColumnConstraint::NotNull)
+                        });
                         let default_val = col.constraints.iter().find_map(|c| {
                             if let crate::query_engine::ast::ColumnConstraint::Default(expr) = c {
                                 // Try to evaluate default value
                                 // For now, only support literals
-                                if let crate::query_engine::ast::Expr::Literal(lit_slot) = &expr.node {
+                                if let crate::query_engine::ast::Expr::Literal(lit_slot) =
+                                    &expr.node
+                                {
                                     // Convert LiteralValue to Value
                                     Some(match &lit_slot.value {
                                         crate::query_engine::ast::LiteralValue::Null => Value::Null,
-                                        crate::query_engine::ast::LiteralValue::Bool(b) => Value::Bool(*b),
-                                        crate::query_engine::ast::LiteralValue::Int64(n) => Value::Int64(*n),
-                                        crate::query_engine::ast::LiteralValue::Float64(f) => Value::Float64(*f),
-                                        crate::query_engine::ast::LiteralValue::String(s) => Value::String(s.to_string()),
-                                        crate::query_engine::ast::LiteralValue::Bytes(b) => Value::Binary(b.to_vec()),
+                                        crate::query_engine::ast::LiteralValue::Bool(b) => {
+                                            Value::Bool(*b)
+                                        }
+                                        crate::query_engine::ast::LiteralValue::Int64(n) => {
+                                            Value::Int64(*n)
+                                        }
+                                        crate::query_engine::ast::LiteralValue::Float64(f) => {
+                                            Value::Float64(*f)
+                                        }
+                                        crate::query_engine::ast::LiteralValue::String(s) => {
+                                            Value::String(s.to_string())
+                                        }
+                                        crate::query_engine::ast::LiteralValue::Bytes(b) => {
+                                            Value::Binary(b.to_vec())
+                                        }
                                     })
                                 } else {
                                     None
@@ -618,14 +668,17 @@ impl StorageAdapter {
                 // Extract primary key columns
                 let mut primary_keys = Vec::new();
                 for col in columns {
-                    if col.constraints.iter().any(|c| matches!(c, crate::query_engine::ast::ColumnConstraint::PrimaryKey)) {
+                    if col.constraints.iter().any(|c| {
+                        matches!(c, crate::query_engine::ast::ColumnConstraint::PrimaryKey)
+                    }) {
                         primary_keys.push(col.name.node.as_str().to_string());
                     }
                 }
 
                 // Also check table-level constraints for primary key
                 for constraint in constraints {
-                    if let crate::query_engine::ast::TableConstraint::PrimaryKey(cols) = constraint {
+                    if let crate::query_engine::ast::TableConstraint::PrimaryKey(cols) = constraint
+                    {
                         for col in cols {
                             let col_name = col.0.to_string();
                             if !primary_keys.contains(&col_name) {
@@ -754,10 +807,12 @@ impl QueryStorage for StorageAdapter {
 
     fn scan(&self, tx_id: u64, table: &str, config: &ScanConfig) -> Result<Vec<Row>> {
         use crate::storage::engine::StorageType;
-        
-        let storage_type = self.engine.get_storage_type(table)
+
+        let storage_type = self
+            .engine
+            .get_storage_type(table)
             .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", table)))?;
-        
+
         let offset = config.offset.unwrap_or(0);
         let limit = config.limit.unwrap_or(usize::MAX);
 
@@ -776,15 +831,20 @@ impl QueryStorage for StorageAdapter {
 
     fn read(&self, _tx_id: u64, table: &str, key: &Value) -> Result<Option<Row>> {
         use crate::storage::engine::StorageType;
-        
-        let storage_type = self.engine.get_storage_type(table)
+
+        let storage_type = self
+            .engine
+            .get_storage_type(table)
             .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", table)))?;
-        
+
         let key_bytes = Self::encode_key(key);
-        
+
         let bytes_opt = match storage_type {
             StorageType::Relational => self.engine.mvcc_read(_tx_id, table, &key_bytes)?,
-            StorageType::Document => self.engine.doc_get(table, &key_bytes)?.map(|(data, _)| data),
+            StorageType::Document => self
+                .engine
+                .doc_get(table, &key_bytes)?
+                .map(|(data, _)| data),
             StorageType::Keyspace => self.engine.ks_get(table, &key_bytes)?,
         };
 
@@ -798,76 +858,83 @@ impl QueryStorage for StorageAdapter {
         use crate::storage::engine::StorageType;
         use crate::storage::schema::StoredDataType;
 
-        let storage_type = self.engine.get_storage_type(table)
+        let storage_type = self
+            .engine
+            .get_storage_type(table)
             .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", table)))?;
 
         // For relational tables, apply schema-based transformations
-        if matches!(storage_type, StorageType::Relational) {
-            if let Some(schema) = self.engine.schema_catalog().get(table) {
-                // Handle primary key auto-generation
-                if schema.primary_key.len() == 1 {
-                    let pk_name = &schema.primary_key[0];
-                    if !row.columns.contains_key(pk_name) {
-                        // Check if PK column is numeric
-                        if let Some(pk_col) = schema.columns.iter().find(|c| &c.name == pk_name) {
-                            if matches!(pk_col.data_type, StoredDataType::Int32 | StoredDataType::Int64) {
-                                // Auto-generate primary key value, use a simple counter based on current rows
-                                // Get max existing value and increment
-                                let config = ScanConfig::new();
-                                let existing_rows = QueryStorage::scan(self, _tx_id, table, &config).unwrap_or_default();
-                                let max_id = existing_rows
-                                    .iter()
-                                    .filter_map(|r| r.get(pk_name))
-                                    .filter_map(|v| match v {
-                                        Value::Int64(n) => Some(*n),
-                                        Value::Int32(n) => Some(*n as i64),
-                                        _ => None,
-                                    })
-                                    .max()
-                                    .unwrap_or(0);
+        if matches!(storage_type, StorageType::Relational)
+            && let Some(schema) = self.engine.schema_catalog().get(table)
+        {
+            // Handle primary key auto-generation
+            if schema.primary_key.len() == 1 {
+                let pk_name = &schema.primary_key[0];
+                if !row.columns.contains_key(pk_name) {
+                    // Check if PK column is numeric
+                    if let Some(pk_col) = schema.columns.iter().find(|c| &c.name == pk_name)
+                        && matches!(
+                            pk_col.data_type,
+                            StoredDataType::Int32 | StoredDataType::Int64
+                        )
+                    {
+                        // Auto-generate primary key value, use a simple counter based on current rows
+                        // Get max existing value and increment
+                        let config = ScanConfig::new();
+                        let existing_rows =
+                            QueryStorage::scan(self, _tx_id, table, &config).unwrap_or_default();
+                        let max_id = existing_rows
+                            .iter()
+                            .filter_map(|r| r.get(pk_name))
+                            .filter_map(|v| match v {
+                                Value::Int64(n) => Some(*n),
+                                Value::Int32(n) => Some(*n as i64),
+                                _ => None,
+                            })
+                            .max()
+                            .unwrap_or(0);
 
-                                let next_id = max_id + 1;
-                                let pk_value = match pk_col.data_type {
-                                    StoredDataType::Int64 => Value::Int64(next_id),
-                                    StoredDataType::Int32 => Value::Int32(next_id as i32),
-                                    _ => unreachable!(),
-                                };
-                                row.insert(pk_name.clone(), pk_value);
-                            }
-                        }
+                        let next_id = max_id + 1;
+                        let pk_value = match pk_col.data_type {
+                            StoredDataType::Int64 => Value::Int64(next_id),
+                            StoredDataType::Int32 => Value::Int32(next_id as i32),
+                            _ => unreachable!(),
+                        };
+                        row.insert(pk_name.clone(), pk_value);
                     }
                 }
-
-                // Apply default values for missing columns
-                for col in &schema.columns {
-                    if !row.columns.contains_key(&col.name) {
-                        if let Some(default) = &col.default {
-                            row.insert(col.name.clone(), default.clone());
-                        } else if !col.nullable {
-                            // Required field missing without default
-                            return Err(MonoError::InvalidOperation(
-                                format!("Required field '{}' is missing", col.name)
-                            ));
-                        }
-                    }
-                }
-
-                // Ensure all defined columns are included (even if null)
-                for col in &schema.columns {
-                    if !row.columns.contains_key(&col.name) && col.nullable {
-                        row.insert(col.name.clone(), Value::Null);
-                    }
-                }
-
-                // Rebuild row in schema column order
-                let mut ordered_row = Row::new();
-                for col in &schema.columns {
-                    if let Some(value) = row.columns.get(&col.name) {
-                        ordered_row.insert(col.name.clone(), value.clone());
-                    }
-                }
-                row = ordered_row;
             }
+
+            // Apply default values for missing columns
+            for col in &schema.columns {
+                if !row.columns.contains_key(&col.name) {
+                    if let Some(default) = &col.default {
+                        row.insert(col.name.clone(), default.clone());
+                    } else if !col.nullable {
+                        // Required field missing without default
+                        return Err(MonoError::InvalidOperation(format!(
+                            "Required field '{}' is missing",
+                            col.name
+                        )));
+                    }
+                }
+            }
+
+            // Ensure all defined columns are included (even if null)
+            for col in &schema.columns {
+                if !row.columns.contains_key(&col.name) && col.nullable {
+                    row.insert(col.name.clone(), Value::Null);
+                }
+            }
+
+            // Rebuild row in schema column order
+            let mut ordered_row = Row::new();
+            for col in &schema.columns {
+                if let Some(value) = row.columns.get(&col.name) {
+                    ordered_row.insert(col.name.clone(), value.clone());
+                }
+            }
+            row = ordered_row;
         }
 
         let key = Self::extract_key(&row)?;
@@ -876,15 +943,14 @@ impl QueryStorage for StorageAdapter {
 
         match storage_type {
             StorageType::Relational => {
-                self.engine.mvcc_write(_tx_id, table, key_bytes, value_bytes)
+                self.engine
+                    .mvcc_write(_tx_id, table, key_bytes, value_bytes)
             }
             StorageType::Document => {
                 self.engine.doc_insert(table, key_bytes, value_bytes)?;
                 Ok(())
             }
-            StorageType::Keyspace => {
-                self.engine.ks_set(table, key_bytes, value_bytes)
-            }
+            StorageType::Keyspace => self.engine.ks_set(table, key_bytes, value_bytes),
         }
     }
 
@@ -896,30 +962,35 @@ impl QueryStorage for StorageAdapter {
         updates: HashMap<String, Value>,
     ) -> Result<bool> {
         use crate::storage::engine::StorageType;
-        
-        let storage_type = self.engine.get_storage_type(table)
+
+        let storage_type = self
+            .engine
+            .get_storage_type(table)
             .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", table)))?;
-        
+
         let key_bytes = Self::encode_key(key);
-        
+
         // Read existing row based on storage type
         let bytes_opt = match storage_type {
             StorageType::Relational => self.engine.mvcc_read(tx_id, table, &key_bytes)?,
-            StorageType::Document => self.engine.doc_get(table, &key_bytes)?.map(|(data, _)| data),
+            StorageType::Document => self
+                .engine
+                .doc_get(table, &key_bytes)?
+                .map(|(data, _)| data),
             StorageType::Keyspace => self.engine.ks_get(table, &key_bytes)?,
         };
-        
+
         let Some(bytes) = bytes_opt else {
             return Ok(false);
         };
-        
+
         let mut row = Self::decode_row(&bytes)?;
         for (col, val) in updates {
             row.insert(col, val);
         }
-        
+
         let new_bytes = Self::encode_row(&row);
-        
+
         match storage_type {
             StorageType::Relational => {
                 self.engine.mvcc_write(tx_id, table, key_bytes, new_bytes)?;
@@ -937,24 +1008,33 @@ impl QueryStorage for StorageAdapter {
 
     fn delete(&self, tx_id: u64, table: &str, key: &Value) -> Result<bool> {
         use crate::storage::engine::StorageType;
-        
-        let storage_type = self.engine.get_storage_type(table)
+
+        let storage_type = self
+            .engine
+            .get_storage_type(table)
             .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", table)))?;
-        
+
         let key_bytes = Self::encode_key(key);
-        
+
         match storage_type {
             StorageType::Relational => self.engine.mvcc_delete(tx_id, table, &key_bytes),
             StorageType::Document => {
                 // Documents need revision for deletion, just delete with revision 0
                 // FIXME: revision handling
-                Ok(self.engine.doc_delete(table, &key_bytes, 0).unwrap_or(false))
+                Ok(self
+                    .engine
+                    .doc_delete(table, &key_bytes, 0)
+                    .unwrap_or(false))
             }
             StorageType::Keyspace => self.engine.ks_delete(table, &key_bytes),
         }
     }
 
-    fn create_table(&self, name: &str, table_type: crate::query_engine::ast::TableType) -> Result<()> {
+    fn create_table(
+        &self,
+        name: &str,
+        table_type: crate::query_engine::ast::TableType,
+    ) -> Result<()> {
         use crate::query_engine::ast::TableType;
         match table_type {
             TableType::Relational => {
@@ -976,7 +1056,12 @@ impl QueryStorage for StorageAdapter {
         self.engine.drop_table(name)
     }
 
-    fn find_by_index(&self, table: &str, index_name: &str, lookup_values: &[Value]) -> Result<Vec<Vec<u8>>> {
+    fn find_by_index(
+        &self,
+        table: &str,
+        index_name: &str,
+        lookup_values: &[Value],
+    ) -> Result<Vec<Vec<u8>>> {
         self.engine.find_by_index(table, index_name, lookup_values)
     }
 }
@@ -1102,7 +1187,11 @@ impl QueryStorage for MemoryStorage {
         Ok(tbl.remove(&StorageAdapter::encode_key(key)).is_some())
     }
 
-    fn create_table(&self, name: &str, _table_type: crate::query_engine::ast::TableType) -> Result<()> {
+    fn create_table(
+        &self,
+        name: &str,
+        _table_type: crate::query_engine::ast::TableType,
+    ) -> Result<()> {
         self.tables.write().insert(name.to_string(), HashMap::new());
         Ok(())
     }
@@ -1112,7 +1201,12 @@ impl QueryStorage for MemoryStorage {
         Ok(())
     }
 
-    fn find_by_index(&self, _table: &str, _index_name: &str, _lookup_values: &[Value]) -> Result<Vec<Vec<u8>>> {
+    fn find_by_index(
+        &self,
+        _table: &str,
+        _index_name: &str,
+        _lookup_values: &[Value],
+    ) -> Result<Vec<Vec<u8>>> {
         // In-memory storage doesn't support secondary indexes
         Ok(vec![])
     }
@@ -1161,24 +1255,14 @@ impl monodb_plugin::PluginStorage for StorageAdapter {
         Ok(rows.into_iter().map(|r| r.into_value()).collect())
     }
 
-    fn get(
-        &self,
-        tx_id: u64,
-        table: &str,
-        key: &Value,
-    ) -> anyhow::Result<Option<Value>> {
-        let row = QueryStorage::read(self, tx_id, table, key)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+    fn get(&self, tx_id: u64, table: &str, key: &Value) -> anyhow::Result<Option<Value>> {
+        let row =
+            QueryStorage::read(self, tx_id, table, key).map_err(|e| anyhow::anyhow!("{}", e))?;
 
         Ok(row.map(|r| r.into_value()))
     }
 
-    fn insert(
-        &self,
-        tx_id: u64,
-        table: &str,
-        row: Value,
-    ) -> anyhow::Result<Option<Value>> {
+    fn insert(&self, tx_id: u64, table: &str, row: Value) -> anyhow::Result<Option<Value>> {
         // Convert Value to Row
         let row_data = match row {
             Value::Row(m) => Row { columns: m },
@@ -1191,8 +1275,7 @@ impl monodb_plugin::PluginStorage for StorageAdapter {
         // Extract key before insert
         let key = Self::extract_key(&row_data).ok();
 
-        QueryStorage::insert(self, tx_id, table, row_data)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        QueryStorage::insert(self, tx_id, table, row_data).map_err(|e| anyhow::anyhow!("{}", e))?;
 
         Ok(key)
     }
@@ -1209,14 +1292,8 @@ impl monodb_plugin::PluginStorage for StorageAdapter {
             .map_err(|e| anyhow::anyhow!("{}", e))
     }
 
-    fn delete(
-        &self,
-        tx_id: u64,
-        table: &str,
-        key: &Value,
-    ) -> anyhow::Result<bool> {
-        QueryStorage::delete(self, tx_id, table, key)
-            .map_err(|e| anyhow::anyhow!("{}", e))
+    fn delete(&self, tx_id: u64, table: &str, key: &Value) -> anyhow::Result<bool> {
+        QueryStorage::delete(self, tx_id, table, key).map_err(|e| anyhow::anyhow!("{}", e))
     }
 
     fn list_tables(&self) -> anyhow::Result<Vec<(String, String)>> {

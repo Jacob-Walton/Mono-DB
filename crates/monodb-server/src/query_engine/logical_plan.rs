@@ -660,7 +660,9 @@ impl ScalarExpr {
                     // Modulo returns integer type
                     BinaryOp::Mod => {
                         if left_vt.is_integer() && right_vt.is_integer() {
-                            InferredType::Known(left_vt.common_type(right_vt).unwrap_or(ValueType::Int64))
+                            InferredType::Known(
+                                left_vt.common_type(right_vt).unwrap_or(ValueType::Int64),
+                            )
                         } else {
                             InferredType::Unknown("Modulo requires integer operands".to_string())
                         }
@@ -725,13 +727,14 @@ impl ScalarExpr {
 
                 if let Some(else_expr) = else_result {
                     let else_ty = else_expr.infer_type(ctx);
-                    if let Some(prev) = &result_type {
-                        if !prev.is_compatible_with(&else_ty) {
-                            return InferredType::Unknown(
-                                "CASE ELSE has incompatible type with WHEN branches".to_string(),
-                            );
-                        }
+                    if let Some(prev) = &result_type
+                        && !prev.is_compatible_with(&else_ty)
+                    {
+                        return InferredType::Unknown(
+                            "CASE ELSE has incompatible type with WHEN branches".to_string(),
+                        );
                     }
+
                     result_type = Some(else_ty);
                 }
 

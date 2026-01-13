@@ -1,5 +1,5 @@
 //! Database interface implementation for plugins
-//! 
+//!
 //! TODO: Replace with full featured database impl.
 
 use crate::bindings::monodb::plugin::database::Host as DatabaseHost;
@@ -29,7 +29,10 @@ impl DatabaseHost for State {
         let tx_id = self.get_or_create_tx().map_err(to_db_error)?;
 
         let limit = Some(self.permissions.max_query_rows as u32);
-        let results = self.storage.scan(tx_id, &table, limit, None).map_err(to_db_error)?;
+        let results = self
+            .storage
+            .scan(tx_id, &table, limit, None)
+            .map_err(to_db_error)?;
 
         results
             .iter()
@@ -66,7 +69,10 @@ impl DatabaseHost for State {
 
         let tx_id = self.get_or_create_tx().map_err(to_db_error)?;
         let limit = limit.or(Some(self.permissions.max_query_rows as u32));
-        let results = self.storage.scan(tx_id, &table, limit, offset).map_err(to_db_error)?;
+        let results = self
+            .storage
+            .scan(tx_id, &table, limit, offset)
+            .map_err(to_db_error)?;
 
         results
             .iter()
@@ -84,7 +90,8 @@ impl DatabaseHost for State {
         let mono_row = ValueBridge::from_wit(&row).map_err(to_db_error)?;
         let tx_id = self.get_or_create_tx().map_err(to_db_error)?;
 
-        let result = self.storage
+        let result = self
+            .storage
             .insert(tx_id, &table, mono_row)
             .map_err(to_db_error)?;
 
@@ -163,7 +170,8 @@ impl TransactionHost for State {
             self.storage.begin_read_only()
         } else {
             self.storage.begin_transaction()
-        }.map_err(to_db_error)?;
+        }
+        .map_err(to_db_error)?;
 
         *self.current_tx.write() = Some(tx_id);
         Ok(tx_id)
@@ -214,12 +222,14 @@ impl SchemaHost for State {
         let tables = self.storage.list_tables().map_err(to_db_error)?;
         Ok(tables
             .into_iter()
-            .map(|(name, storage_type)| crate::bindings::monodb::plugin::schema::TableInfo {
-                name,
-                storage_type,
-                row_count: None,
-                size_bytes: None,
-            })
+            .map(
+                |(name, storage_type)| crate::bindings::monodb::plugin::schema::TableInfo {
+                    name,
+                    storage_type,
+                    row_count: None,
+                    size_bytes: None,
+                },
+            )
             .collect())
     }
 

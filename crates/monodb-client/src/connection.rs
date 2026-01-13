@@ -10,9 +10,7 @@ use std::time::Duration;
 use bytes::BytesMut;
 use monodb_common::{
     MonoError, Result, Value,
-    protocol::{
-        ProtocolDecoder, ProtocolEncoder, Request, Response,
-    },
+    protocol::{ProtocolDecoder, ProtocolEncoder, Request, Response},
 };
 use rustls::pki_types::{CertificateDer, ServerName};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -25,7 +23,7 @@ use crate::results::QueryResult;
 /// Stream type that can be either plain TCP or TLS-wrapped.
 enum Stream {
     Plain(TcpStream),
-    Tls(TlsStream<TcpStream>),
+    Tls(Box<TlsStream<TcpStream>>),
 }
 
 impl Stream {
@@ -66,19 +64,16 @@ impl Connection {
     }
 
     async fn connect_inner(addr: &str, cert_path: Option<&Path>) -> Result<Self> {
-        let tcp_stream = tokio::time::timeout(
-            Duration::from_secs(5),
-            TcpStream::connect(addr),
-        )
-        .await
-        .map_err(|_| MonoError::Network("Connection timeout".into()))?
-        .map_err(|e| MonoError::Network(format!("Failed to connect: {e}")))?;
+        let tcp_stream = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(addr))
+            .await
+            .map_err(|_| MonoError::Network("Connection timeout".into()))?
+            .map_err(|e| MonoError::Network(format!("Failed to connect: {e}")))?;
 
         tcp_stream.set_nodelay(true)?;
 
         let stream = if let Some(cert_path) = cert_path {
             let tls_stream = Self::wrap_tls(tcp_stream, addr, cert_path).await?;
-            Stream::Tls(tls_stream)
+            Stream::Tls(Box::new(tls_stream))
         } else {
             Stream::Plain(tcp_stream)
         };
@@ -97,12 +92,13 @@ impl Connection {
         Ok(conn)
     }
 
-    async fn wrap_tls(tcp: TcpStream, addr: &str, cert_path: &Path) -> Result<TlsStream<TcpStream>> {
+    async fn wrap_tls(
+        tcp: TcpStream,
+        addr: &str,
+        cert_path: &Path,
+    ) -> Result<TlsStream<TcpStream>> {
         // Extract hostname for SNI (strip port if present)
-        let hostname = addr
-            .split(':')
-            .next()
-            .unwrap_or("localhost");
+        let hostname = addr.split(':').next().unwrap_or("localhost");
 
         let server_name = ServerName::try_from(hostname.to_string())
             .map_err(|_| MonoError::Network(format!("Invalid server name: {hostname}")))?;
@@ -110,18 +106,21 @@ impl Connection {
         // Load CA certificate from file
         let cert_pem = std::fs::read(cert_path)
             .map_err(|e| MonoError::Network(format!("Failed to read certificate: {e}")))?;
-        
+
         let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_pem.as_slice())
             .filter_map(|r| r.ok())
             .collect();
-        
+
         if certs.is_empty() {
-            return Err(MonoError::Network("No valid certificates found in file".into()));
+            return Err(MonoError::Network(
+                "No valid certificates found in file".into(),
+            ));
         }
 
         let mut root_store = rustls::RootCertStore::empty();
         for cert in certs {
-            root_store.add(cert)
+            root_store
+                .add(cert)
                 .map_err(|e| MonoError::Network(format!("Failed to add certificate: {e}")))?;
         }
 
@@ -166,7 +165,9 @@ impl Connection {
 
         // Read response
         loop {
-            if let Some((response, _correlation_id)) = self.decoder.decode_response(&mut self.buffer)? {
+            if let Some((response, _correlation_id)) =
+                self.decoder.decode_response(&mut self.buffer)?
+            {
                 return Ok(response);
             }
 

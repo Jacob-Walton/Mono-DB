@@ -13,6 +13,7 @@ pub struct QueryResult {
     elapsed_ms: u64,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 enum Outcome {
     Rows {
@@ -23,10 +24,20 @@ enum Outcome {
         count: u64,
         ids: Option<Vec<Value>>,
     },
-    Updated { count: u64 },
-    Deleted { count: u64 },
-    Created { object_type: String, name: String },
-    Dropped { object_type: String, name: String },
+    Updated {
+        count: u64,
+    },
+    Deleted {
+        count: u64,
+    },
+    Created {
+        object_type: String,
+        name: String,
+    },
+    Dropped {
+        object_type: String,
+        name: String,
+    },
     Executed,
 }
 
@@ -34,12 +45,10 @@ impl QueryResult {
     /// Create a QueryResult from a protocol Response.
     pub(crate) fn from_response(response: Response) -> Result<Self> {
         match response {
-            Response::QueryResult { result, elapsed_ms } => {
-                Ok(Self {
-                    outcome: Self::outcome_from_protocol(result),
-                    elapsed_ms,
-                })
-            }
+            Response::QueryResult { result, elapsed_ms } => Ok(Self {
+                outcome: Self::outcome_from_protocol(result),
+                elapsed_ms,
+            }),
             Response::Ok => Ok(Self {
                 outcome: Outcome::Executed,
                 elapsed_ms: 0,
@@ -74,7 +83,15 @@ impl QueryResult {
             .collect();
 
         Self {
-            outcome: Outcome::Rows { data, columns: Some(vec!["name".into(), "schema".into(), "row_count".into(), "size_bytes".into()]) },
+            outcome: Outcome::Rows {
+                data,
+                columns: Some(vec![
+                    "name".into(),
+                    "schema".into(),
+                    "row_count".into(),
+                    "size_bytes".into(),
+                ]),
+            },
             elapsed_ms: 0,
         }
     }
@@ -82,17 +99,33 @@ impl QueryResult {
     fn outcome_from_protocol(outcome: QueryOutcome) -> Outcome {
         match outcome {
             QueryOutcome::Rows { data, columns, .. } => Outcome::Rows { data, columns },
-            QueryOutcome::Inserted { rows_inserted, generated_ids } => {
-                Outcome::Inserted { count: rows_inserted, ids: generated_ids }
-            }
-            QueryOutcome::Updated { rows_updated } => Outcome::Updated { count: rows_updated },
-            QueryOutcome::Deleted { rows_deleted } => Outcome::Deleted { count: rows_deleted },
-            QueryOutcome::Created { object_type, object_name } => {
-                Outcome::Created { object_type, name: object_name }
-            }
-            QueryOutcome::Dropped { object_type, object_name } => {
-                Outcome::Dropped { object_type, name: object_name }
-            }
+            QueryOutcome::Inserted {
+                rows_inserted,
+                generated_ids,
+            } => Outcome::Inserted {
+                count: rows_inserted,
+                ids: generated_ids,
+            },
+            QueryOutcome::Updated { rows_updated } => Outcome::Updated {
+                count: rows_updated,
+            },
+            QueryOutcome::Deleted { rows_deleted } => Outcome::Deleted {
+                count: rows_deleted,
+            },
+            QueryOutcome::Created {
+                object_type,
+                object_name,
+            } => Outcome::Created {
+                object_type,
+                name: object_name,
+            },
+            QueryOutcome::Dropped {
+                object_type,
+                object_name,
+            } => Outcome::Dropped {
+                object_type,
+                name: object_name,
+            },
             QueryOutcome::Executed => Outcome::Executed,
         }
     }
@@ -146,7 +179,10 @@ impl QueryResult {
 
     /// Check if this was an update/delete operation.
     pub fn is_modified(&self) -> bool {
-        matches!(&self.outcome, Outcome::Updated { .. } | Outcome::Deleted { .. })
+        matches!(
+            &self.outcome,
+            Outcome::Updated { .. } | Outcome::Deleted { .. }
+        )
     }
 
     /// Get elapsed time in milliseconds.
@@ -163,7 +199,9 @@ pub struct Row {
 
 impl Row {
     fn from_value(value: &Value) -> Self {
-        Self { value: value.clone() }
+        Self {
+            value: value.clone(),
+        }
     }
 
     /// Get the underlying value.
@@ -209,10 +247,13 @@ pub trait FromValue: Sized {
 
 impl FromValue for String {
     fn from_value(value: &Value) -> Result<Self> {
-        value.as_string().cloned().ok_or_else(|| MonoError::TypeError {
-            expected: "string".into(),
-            actual: value.type_name().into(),
-        })
+        value
+            .as_string()
+            .cloned()
+            .ok_or_else(|| MonoError::TypeError {
+                expected: "string".into(),
+                actual: value.type_name().into(),
+            })
     }
 }
 

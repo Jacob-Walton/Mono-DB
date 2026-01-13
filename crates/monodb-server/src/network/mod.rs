@@ -208,7 +208,8 @@ async fn handle_request(
         }
 
         Request::List => {
-            let tables = storage.list_tables()
+            let tables = storage
+                .list_tables()
                 .into_iter()
                 .map(|(name, table_type)| monodb_common::protocol::TableInfo {
                     name,
@@ -311,7 +312,11 @@ async fn handle_query(
             let namespace = use_stmt.namespace.node.to_string();
             if let Some(mut sess) = sessions.get_mut(&session_id) {
                 sess.current_namespace = namespace.clone();
-                tracing::debug!("Session {} switched to namespace '{}'", session_id, namespace);
+                tracing::debug!(
+                    "Session {} switched to namespace '{}'",
+                    session_id,
+                    namespace
+                );
             }
             last_result = QueryOutcome::Executed;
             continue;

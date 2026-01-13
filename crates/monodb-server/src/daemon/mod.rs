@@ -39,8 +39,7 @@ impl Server {
     pub async fn new(
         server_config: ServerConfig,
         storage_config: StorageConfig,
-        #[cfg_attr(not(feature = "plugins"), allow(unused_variables))]
-        plugin_config: PluginConfig,
+        #[cfg_attr(not(feature = "plugins"), allow(unused_variables))] plugin_config: PluginConfig,
     ) -> Result<Self> {
         let (shutdown_tx, _) = broadcast::channel(1);
 
@@ -166,9 +165,10 @@ impl Server {
                         interval.tick().await;
                         // Run in blocking thread since hot-reload involves filesystem operations
                         let host_clone = host.clone();
-                        if let Err(e) = tokio::task::spawn_blocking(move || {
-                            host_clone.process_hot_reload()
-                        }).await {
+                        if let Err(e) =
+                            tokio::task::spawn_blocking(move || host_clone.process_hot_reload())
+                                .await
+                        {
                             tracing::warn!(error = %e, "Hot-reload task error");
                         }
                     }

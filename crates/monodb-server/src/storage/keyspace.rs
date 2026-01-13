@@ -317,7 +317,10 @@ where
     }
 
     /// Open an existing disk-backed keyspace.
-    pub fn open(pool: Arc<LruBufferPool>, meta_page_id: crate::storage::page::PageId) -> Result<Self> {
+    pub fn open(
+        pool: Arc<LruBufferPool>,
+        meta_page_id: crate::storage::page::PageId,
+    ) -> Result<Self> {
         let tree = BTree::open(pool, meta_page_id)?;
         let count = tree.len() as u64;
 
@@ -594,7 +597,10 @@ where
     }
 
     /// Open an existing disk-backed keyspace.
-    pub fn open_disk(pool: Arc<LruBufferPool>, meta_page_id: crate::storage::page::PageId) -> Result<Self> {
+    pub fn open_disk(
+        pool: Arc<LruBufferPool>,
+        meta_page_id: crate::storage::page::PageId,
+    ) -> Result<Self> {
         Ok(Keyspace::Disk(DiskKeyspace::open(pool, meta_page_id)?))
     }
 }

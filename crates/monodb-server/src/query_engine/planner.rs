@@ -348,9 +348,9 @@ impl<C: Catalog> QueryPlanner<C> {
                 // Validate against built-in functions
                 if let Some(builtin) = crate::query_engine::builtins::lookup_builtin(func_name) {
                     // Check arity
-                    builtin.check_arity(converted_args.len()).map_err(|e| {
-                        MonoError::InvalidOperation(e)
-                    })?;
+                    builtin
+                        .check_arity(converted_args.len())
+                        .map_err(MonoError::InvalidOperation)?;
 
                     // Note: Full type checking would require a TypeContext with column types.
                     // For now, we defer detailed type checking to execution time for columns.
@@ -358,9 +358,9 @@ impl<C: Catalog> QueryPlanner<C> {
                     for (i, arg) in converted_args.iter().enumerate() {
                         if let ScalarExpr::Constant(val) = arg {
                             let arg_type = val.data_type();
-                            builtin.check_arg_type(i, &arg_type).map_err(|e| {
-                                MonoError::InvalidOperation(e)
-                            })?;
+                            builtin
+                                .check_arg_type(i, &arg_type)
+                                .map_err(MonoError::InvalidOperation)?;
                         }
                     }
                 }

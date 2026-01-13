@@ -262,10 +262,16 @@ pub enum Value {
     // Special types
     Row(IndexMap<String, Value>),
     SortedSet(Vec<(f64, String)>),
-    GeoPoint { lat: f64, lng: f64 },
+    GeoPoint {
+        lat: f64,
+        lng: f64,
+    },
 
     // Reference type
-    Reference { collection: String, id: Box<Value> },
+    Reference {
+        collection: String,
+        id: Box<Value>,
+    },
 
     // Plugin-defined extension type
     Extension {
@@ -277,7 +283,7 @@ pub enum Value {
 
 impl Value {
     /// Get the type name as a string
-    /// 
+    ///
     /// Returns a [`Cow<'_, str>`] representing the type name.
     ///
     /// # Example
@@ -353,7 +359,7 @@ impl Value {
     /// Attempt to coerce this value to the target type.
     ///
     /// Follows the type coercion rules defined in [`ValueType::common_type`].
-    /// Returns coerced [`Value`] on success, or a [`MonoError::TypeError`] 
+    /// Returns coerced [`Value`] on success, or a [`MonoError::TypeError`]
     /// if coercion is not possible.
     ///
     /// # Example
@@ -524,13 +530,26 @@ impl Value {
                 obj.insert("id".to_string(), id.to_json());
                 serde_json::Value::Object(obj)
             }
-            Value::Extension { type_name, plugin_id, data } => {
+            Value::Extension {
+                type_name,
+                plugin_id,
+                data,
+            } => {
                 let mut obj = serde_json::Map::new();
-                obj.insert("$type".to_string(), serde_json::Value::String(type_name.clone()));
-                obj.insert("$plugin".to_string(), serde_json::Value::String(plugin_id.clone()));
-                obj.insert("$data".to_string(), serde_json::Value::String(
-                    base64::engine::general_purpose::STANDARD.encode(data)
-                ));
+                obj.insert(
+                    "$type".to_string(),
+                    serde_json::Value::String(type_name.clone()),
+                );
+                obj.insert(
+                    "$plugin".to_string(),
+                    serde_json::Value::String(plugin_id.clone()),
+                );
+                obj.insert(
+                    "$data".to_string(),
+                    serde_json::Value::String(
+                        base64::engine::general_purpose::STANDARD.encode(data),
+                    ),
+                );
                 serde_json::Value::Object(obj)
             }
         }
@@ -1112,7 +1131,11 @@ impl Value {
                 id.write_to(out);
             }
 
-            Value::Extension { type_name, plugin_id, data } => {
+            Value::Extension {
+                type_name,
+                plugin_id,
+                data,
+            } => {
                 out.push(20);
 
                 // type_name : String
@@ -1185,9 +1208,11 @@ impl Value {
 
             Value::Reference { collection, id } => 1 + (4 + collection.len()) + id.encoded_len(),
 
-            Value::Extension { type_name, plugin_id, data } => {
-                1 + (4 + type_name.len()) + (4 + plugin_id.len()) + (4 + data.len())
-            }
+            Value::Extension {
+                type_name,
+                plugin_id,
+                data,
+            } => 1 + (4 + type_name.len()) + (4 + plugin_id.len()) + (4 + data.len()),
         }
     }
 }
@@ -1518,10 +1543,10 @@ impl std::str::FromStr for Value {
         }
 
         // Float - always use Float64 for precision
-        if s.contains('.') {
-            if let Ok(f) = s.parse::<f64>() {
-                return Ok(Value::Float64(f));
-            }
+        if s.contains('.')
+            && let Ok(f) = s.parse::<f64>()
+        {
+            return Ok(Value::Float64(f));
         }
 
         // Marked types
@@ -1737,8 +1762,18 @@ impl std::fmt::Display for Value {
             Value::Reference { collection, id } => {
                 write!(f, "Reference(\"{}\", {})", collection, id)
             }
-            Value::Extension { type_name, plugin_id, data } => {
-                write!(f, "Extension({}, {}, {} bytes)", type_name, plugin_id, data.len())
+            Value::Extension {
+                type_name,
+                plugin_id,
+                data,
+            } => {
+                write!(
+                    f,
+                    "Extension({}, {}, {} bytes)",
+                    type_name,
+                    plugin_id,
+                    data.len()
+                )
             }
         }
     }

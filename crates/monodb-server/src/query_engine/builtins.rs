@@ -82,39 +82,36 @@ impl BuiltinFunctionInfo {
                 self.name, self.min_args, arg_count
             ));
         }
-        if let Some(max) = self.max_args {
-            if arg_count > max {
-                return Err(format!(
-                    "Function '{}' accepts at most {} argument(s), got {}",
-                    self.name, max, arg_count
-                ));
-            }
+        if let Some(max) = self.max_args
+            && arg_count > max
+        {
+            return Err(format!(
+                "Function '{}' accepts at most {} argument(s), got {}",
+                self.name, max, arg_count
+            ));
         }
         Ok(())
     }
 
     /// Check if a given type can be coerced to the expected param type
-    pub fn check_arg_type(
-        &self,
-        arg_index: usize,
-        arg_type: &ValueType,
-    ) -> Result<(), String> {
+    pub fn check_arg_type(&self, arg_index: usize, arg_type: &ValueType) -> Result<(), String> {
         if arg_index >= self.params.len() {
             // For variadic functions, no type checking beyond defined params
             return Ok(());
         }
 
         let param = &self.params[arg_index];
-        if let Some(expected) = &param.expected_type {
-            if !arg_type.can_coerce_to(expected) && *arg_type != ValueType::Null {
-                return Err(format!(
-                    "Function '{}' expects {} for parameter '{}', got {}",
-                    self.name,
-                    expected.display_name(),
-                    param.name,
-                    arg_type.display_name()
-                ));
-            }
+        if let Some(expected) = &param.expected_type
+            && !arg_type.can_coerce_to(expected)
+            && *arg_type != ValueType::Null
+        {
+            return Err(format!(
+                "Function '{}' expects {} for parameter '{}', got {}",
+                self.name,
+                expected.display_name(),
+                param.name,
+                arg_type.display_name()
+            ));
         }
         Ok(())
     }
@@ -217,7 +214,7 @@ pub static ABS: BuiltinFunctionInfo = BuiltinFunctionInfo {
     aliases: &[],
     description: "Absolute value",
     params: &[ParamInfo::any("value")], // Accepts any numeric
-    return_type: None, // Returns same type as input
+    return_type: None,                  // Returns same type as input
     deterministic: true,
     min_args: 1,
     max_args: Some(1),
@@ -461,7 +458,7 @@ pub static BUILTINS: &[&BuiltinFunctionInfo] = &[
 /// Look up a built-in function by name (including aliases)
 pub fn lookup_builtin(name: &str) -> Option<&'static BuiltinFunctionInfo> {
     let name_lower = name.to_lowercase();
-    
+
     for func in BUILTINS {
         if func.name == name_lower {
             return Some(func);

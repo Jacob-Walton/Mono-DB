@@ -103,14 +103,14 @@ impl FunctionRegistry {
             let key = func.name.to_lowercase();
 
             // Check for collision with another plugin's function
-            if let Some(existing) = registry.get(&key) {
-                if existing.plugin_name != plugin_name {
-                    collisions.push(format!(
-                        "Function '{}' already registered by plugin '{}'",
-                        func.name, existing.plugin_name
-                    ));
-                    continue;
-                }
+            if let Some(existing) = registry.get(&key)
+                && existing.plugin_name != plugin_name
+            {
+                collisions.push(format!(
+                    "Function '{}' already registered by plugin '{}'",
+                    func.name, existing.plugin_name
+                ));
+                continue;
             }
 
             registry.insert(

@@ -1,5 +1,6 @@
 //! Plugin host, manages loading and running WASM plugins
 
+use crate::PluginStorage;
 use crate::bindings::{self, Plugin};
 use crate::component_cache::ComponentCache;
 use crate::config::PluginHostConfig;
@@ -9,13 +10,12 @@ use crate::registry::{PluginInfo, PluginRegistry};
 use crate::state::{PluginPermissions, State};
 use crate::tasks::{BackgroundTaskRegistry, PluginResult, TaskStatus};
 use crate::watcher::{DebouncedPluginWatcher, PluginEvent};
-use crate::PluginStorage;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use monodb_common::Value as MonoValue;
 use parking_lot::RwLock;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tracing::{error, info, warn};
 use wasmtime::component::{HasSelf, Linker};

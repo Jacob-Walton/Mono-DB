@@ -9,8 +9,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use tracing::{debug, info, warn};
-use wasmtime::component::Component;
 use wasmtime::Engine;
+use wasmtime::component::Component;
 
 /// Cached component with its source file modification time
 struct CachedComponent {
@@ -75,32 +75,32 @@ impl ComponentCache {
         }
 
         // Try loading from disk cache
-        if self.persist {
-            if let Some(component) = self.try_load_cached(engine, &canonical)? {
-                // Store in memory cache with modification time
-                self.components.write().insert(
-                    canonical.clone(),
-                    CachedComponent {
-                        component: component.clone(),
-                        modified: wasm_modified,
-                    },
-                );
-                return Ok(component);
-            }
+        if self.persist
+            && let Some(component) = self.try_load_cached(engine, &canonical)?
+        {
+            // Store in memory cache with modification time
+            self.components.write().insert(
+                canonical.clone(),
+                CachedComponent {
+                    component: component.clone(),
+                    modified: wasm_modified,
+                },
+            );
+            return Ok(component);
         }
 
         // Load fresh via mmap
         let component = self.load_and_compile(engine, &canonical)?;
 
         // Cache to disk if enabled
-        if self.persist {
-            if let Err(e) = self.save_to_cache(engine, &canonical, &component) {
-                warn!(
-                    path = %wasm_path.display(),
-                    error = %e,
-                    "Failed to cache compiled component"
-                );
-            }
+        if self.persist
+            && let Err(e) = self.save_to_cache(engine, &canonical, &component)
+        {
+            warn!(
+                path = %wasm_path.display(),
+                error = %e,
+                "Failed to cache compiled component"
+            );
         }
 
         // Store in memory cache with modification time
@@ -202,7 +202,9 @@ impl ComponentCache {
             fs::create_dir_all(parent)?;
         }
 
-        let serialized = component.serialize().context("Failed to serialize component")?;
+        let serialized = component
+            .serialize()
+            .context("Failed to serialize component")?;
 
         // Write atomically via temp file
         let temp_path = cache_path.with_extension("cwasm.tmp");

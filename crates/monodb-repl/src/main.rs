@@ -111,11 +111,7 @@ async fn run() -> anyhow::Result<()> {
 fn print_banner() {
     println!();
     println!("{}", "MonoDB Interactive Shell".bold());
-    println!(
-        "Type {} for help, {} to quit",
-        ":h".cyan(),
-        ":q".cyan()
-    );
+    println!("Type {} for help, {} to quit", ":h".cyan(), ":q".cyan());
     println!();
 }
 
@@ -283,21 +279,13 @@ impl Repl {
             ":x".cyan(),
             ":run".cyan()
         );
-        println!(
-            "  {}  {}    Clear buffer",
-            ":c".cyan(),
-            ":clear".cyan()
-        );
+        println!("  {}  {}    Clear buffer", ":c".cyan(), ":clear".cyan());
         println!(
             "  {}  {}     Show buffer contents",
             ":l".cyan(),
             ":list".cyan()
         );
-        println!(
-            "  {}  {}     Remove last line",
-            ":u".cyan(),
-            ":undo".cyan()
-        );
+        println!("  {}  {}     Remove last line", ":u".cyan(), ":undo".cyan());
         println!("  {} <N>         Delete line N", ":d".cyan());
         println!(
             "  {} {}   List tables in current namespace",
@@ -308,20 +296,9 @@ impl Repl {
             "  {}           List all tables across namespaces",
             ":ta".cyan()
         );
-        println!(
-            "  {}           Show current namespace",
-            ":ns".cyan()
-        );
-        println!(
-            "  {}  {}     Exit",
-            ":q".cyan(),
-            ":quit".cyan()
-        );
-        println!(
-            "  {}  {}     Show this help",
-            ":h".cyan(),
-            ":help".cyan()
-        );
+        println!("  {}           Show current namespace", ":ns".cyan());
+        println!("  {}  {}     Exit", ":q".cyan(), ":quit".cyan());
+        println!("  {}  {}     Show this help", ":h".cyan(), ":help".cyan());
         println!();
     }
 
@@ -471,11 +448,7 @@ impl Repl {
     fn print_namespace_header(&self, ns: &str) {
         let is_current = ns == self.current_namespace;
         let marker = if is_current { " *" } else { "" };
-        println!(
-            "{} {}",
-            format!("[{}]", ns).bold().blue(),
-            marker.green()
-        );
+        println!("{} {}", format!("[{}]", ns).bold().blue(), marker.green());
     }
 
     fn print_table_entry(&self, table: &str, kind: &str) {
