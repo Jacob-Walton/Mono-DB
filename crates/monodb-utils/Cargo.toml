@@ -6,4 +6,11 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "mdb_ready"
+path = "src/mdb_ready.rs"
+
 [dependencies]
+monodb-common = { path = "../monodb-common" }
+monodb-client = { path = "../monodb-client" }
+tokio.workspace = true

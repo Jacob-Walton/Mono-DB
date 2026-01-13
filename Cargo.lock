@@ -1419,6 +1419,11 @@ dependencies = [
 [[package]]
 name = "monodb-utils"
 version = "0.3.1"
+dependencies = [
+ "monodb-client",
+ "monodb-common",
+ "tokio",
+]
 
 [[package]]
 name = "nibble_vec"
