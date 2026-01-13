@@ -7,12 +7,13 @@
 use std::sync::Arc;
 
 use super::ast::{
-    Assignment, BinaryOp, ChangeMutation, ColumnConstraint, ColumnDef, ColumnRef, ControlStatement,
-    CountQuery, CreateIndexDdl, CreateTableDdl, DataType, DdlStatement, DescribeQuery,
-    DropIndexDdl, DropTableDdl, Expr, GetQuery, Ident, LimitValue, LiteralSlot, LiteralValue,
-    MutationStatement, OrderByClause, ParamRef, PutMutation, QueryStatement, RemoveMutation,
-    SortDirection, Span, Spanned, Statement, TableProperty, TableType, TransactionStatement,
-    UseStatement,
+    AlterTableDdl, AlterTableOperation, Assignment, BinaryOp, ChangeMutation, ColumnAlterAction,
+    ColumnAlteration, ColumnConstraint, ColumnDef, ColumnRef, ControlStatement, CountQuery,
+    CreateIndexDdl, CreateNamespaceDdl, CreateTableDdl, DataType, DdlStatement, DescribeQuery,
+    DropIndexDdl, DropNamespaceDdl, DropTableDdl, Expr, GetQuery, Ident, LimitValue, LiteralSlot,
+    LiteralValue, MutationStatement, OrderByClause, ParamRef, PutMutation, QualifiedIdent,
+    QueryStatement, RemoveMutation, SortDirection, Span, Spanned, Statement, TableProperty,
+    TableType, TransactionStatement, UseStatement,
 };
 use super::lexer::{Token, TokenKind};
 
@@ -234,10 +235,64 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parse a potentially qualified identifier (namespace.name or just name).
+    fn parse_qualified_ident(&mut self) -> ParseResult<Spanned<QualifiedIdent>> {
+        let start_span = self.current_span();
+        let first = self.expect_identifier()?;
+
+        // Check for dot followed by another identifier
+        if self.check(TokenKind::Dot) {
+            self.advance(); // consume dot
+            let second = self.expect_identifier()?;
+            let end_span = second.span;
+            Ok(Spanned::new(
+                QualifiedIdent::qualified(first.node, second.node),
+                start_span.merge(end_span),
+            ))
+        } else {
+            // Just a simple identifier
+            Ok(Spanned::new(
+                QualifiedIdent::simple(first.node),
+                first.span,
+            ))
+        }
+    }
+
     fn next_slot(&mut self) -> u32 {
         let id = self.next_slot_id;
         self.next_slot_id += 1;
         id
+    }
+
+    /// Get the span of the previous token (for building full spans)
+    fn previous_span(&self) -> Span {
+        if self.pos > 0 {
+            let token = &self.tokens[self.pos - 1];
+            Span::new(token.span.start, token.span.end)
+        } else {
+            self.current_span()
+        }
+    }
+
+    /// Parse comma-separated function arguments
+    fn parse_function_args(&mut self) -> ParseResult<Vec<Spanned<Expr>>> {
+        let mut args = Vec::new();
+        
+        // Handle empty argument list
+        if self.check(TokenKind::RightParen) {
+            return Ok(args);
+        }
+        
+        // Parse first argument
+        args.push(self.parse_expr()?);
+        
+        // Parse remaining arguments
+        while self.check(TokenKind::Comma) {
+            self.advance(); // consume ','
+            args.push(self.parse_expr()?);
+        }
+        
+        Ok(args)
     }
 
     fn synchronize(&mut self) {
@@ -297,7 +352,7 @@ impl<'a> Parser<'a> {
                 } else if self.check_keyword("put") {
                     Ok(Statement::Mutation(self.parse_put()?))
                 } else if self.check_keyword("change") {
-                    Ok(Statement::Mutation(self.parse_change()?))
+                    return self.parse_change_dispatch();
                 } else if self.check_keyword("remove") {
                     Ok(Statement::Mutation(self.parse_remove()?))
                 } else if self.check_keyword("make") {
@@ -509,6 +564,293 @@ impl<'a> Parser<'a> {
         }))
     }
 
+    /// Dispatch change statement, either mutation or table alteration.
+    fn parse_change_dispatch(&mut self) -> ParseResult<Statement> {
+        self.expect_keyword("change")?;
+
+        // Check if this is "change table" for ALTER TABLE
+        if self.check_keyword("table") {
+            return Ok(Statement::Ddl(self.parse_change_table()?));
+        }
+
+        // Otherwise it's a mutation
+        let target = self.expect_identifier()?;
+        self.parse_change_mutation(target)
+    }
+
+    /// Parse ALTER TABLE: change table <name> ...
+    fn parse_change_table(&mut self) -> ParseResult<DdlStatement> {
+        self.expect_keyword("table")?;
+        let table = self.expect_identifier()?;
+
+        // Check for inline "rename to" syntax: change table users rename to app_users
+        if self.check_keyword("rename") {
+            self.advance();
+            self.expect_keyword("to")?;
+            let new_name = self.expect_identifier()?;
+            return Ok(DdlStatement::AlterTable(AlterTableDdl {
+                table,
+                operations: vec![AlterTableOperation::RenameTable(new_name)],
+            }));
+        }
+
+        // Otherwise expect indented block with operations
+        self.skip_newlines();
+        self.expect(TokenKind::Indent)?;
+
+        let mut operations = Vec::new();
+
+        while !self.check(TokenKind::Dedent) && !self.is_at_end() {
+            self.skip_newlines();
+            if self.check(TokenKind::Dedent) {
+                break;
+            }
+
+            if self.check_keyword("add") {
+                self.advance();
+                self.skip_newlines();
+                self.expect(TokenKind::Indent)?;
+
+                let mut columns = Vec::new();
+                while !self.check(TokenKind::Dedent) && !self.is_at_end() {
+                    self.skip_newlines();
+                    if self.check(TokenKind::Dedent) {
+                        break;
+                    }
+
+                    let name = self.expect_identifier()?;
+                    let data_type = self.parse_column_type()?;
+                    let constraints = self.parse_column_constraints()?;
+                    columns.push(ColumnDef {
+                        name,
+                        data_type,
+                        constraints,
+                    });
+                    self.skip_newlines();
+                }
+                self.expect(TokenKind::Dedent)?;
+                operations.push(AlterTableOperation::AddColumns(columns));
+            } else if self.check_keyword("drop") {
+                self.advance();
+                self.skip_newlines();
+                self.expect(TokenKind::Indent)?;
+
+                let mut columns = Vec::new();
+                while !self.check(TokenKind::Dedent) && !self.is_at_end() {
+                    self.skip_newlines();
+                    if self.check(TokenKind::Dedent) {
+                        break;
+                    }
+
+                    let name = self.expect_identifier()?;
+                    columns.push(name);
+                    self.skip_newlines();
+                }
+                self.expect(TokenKind::Dedent)?;
+                operations.push(AlterTableOperation::DropColumns(columns));
+            } else if self.check_keyword("rename") {
+                self.advance();
+
+                // Check for "rename to" (table rename) vs rename block (column renames)
+                if self.check_keyword("to") {
+                    self.advance();
+                    let new_name = self.expect_identifier()?;
+                    operations.push(AlterTableOperation::RenameTable(new_name));
+                } else {
+                    self.skip_newlines();
+                    self.expect(TokenKind::Indent)?;
+
+                    let mut renames = Vec::new();
+                    while !self.check(TokenKind::Dedent) && !self.is_at_end() {
+                        self.skip_newlines();
+                        if self.check(TokenKind::Dedent) {
+                            break;
+                        }
+
+                        let old_name = self.expect_identifier()?;
+                        self.expect_keyword("to")?;
+                        let new_name = self.expect_identifier()?;
+                        renames.push((old_name, new_name));
+                        self.skip_newlines();
+                    }
+                    self.expect(TokenKind::Dedent)?;
+                    operations.push(AlterTableOperation::RenameColumns(renames));
+                }
+            } else if self.check_keyword("alter") {
+                self.advance();
+                self.skip_newlines();
+                self.expect(TokenKind::Indent)?;
+
+                let mut alterations = Vec::new();
+                while !self.check(TokenKind::Dedent) && !self.is_at_end() {
+                    self.skip_newlines();
+                    if self.check(TokenKind::Dedent) {
+                        break;
+                    }
+
+                    let column = self.expect_identifier()?;
+                    let action = self.parse_column_alter_action()?;
+                    alterations.push(ColumnAlteration { column, action });
+                    self.skip_newlines();
+                }
+                self.expect(TokenKind::Dedent)?;
+                operations.push(AlterTableOperation::AlterColumns(alterations));
+            } else {
+                return Err(self
+                    .error("expected 'add', 'drop', 'rename', or 'alter' in change table")
+                    .with_note("use 'add' to add columns, 'drop' to remove columns, 'rename' to rename, 'alter' to modify columns"));
+            }
+
+            self.skip_newlines();
+        }
+
+        self.expect(TokenKind::Dedent)?;
+
+        if operations.is_empty() {
+            return Err(self
+                .error("change table requires at least one operation")
+                .with_note("use 'add', 'drop', or 'rename' to modify the table schema"));
+        }
+
+        Ok(DdlStatement::AlterTable(AlterTableDdl { table, operations }))
+    }
+
+    /// Parse column type for ALTER TABLE add.
+    fn parse_column_type(&mut self) -> ParseResult<DataType> {
+        if self.check(TokenKind::Keyword) {
+            let type_str = {
+                let token = self.current().unwrap();
+                self.token_string(token)
+            };
+            self.advance();
+            Ok(match type_str.as_str() {
+                "int" => DataType::Int32,
+                "bigint" => DataType::Int64,
+                "text" => DataType::String,
+                "decimal" => DataType::Float32,
+                "double" => DataType::Float64,
+                "date" | "datetime" | "timestamp" => DataType::DateTime,
+                "time" => DataType::Time,
+                "boolean" | "bool" => DataType::Bool,
+                "binary" => DataType::Bytes,
+                "uuid" => DataType::Uuid,
+                "map" => DataType::Json,
+                "list" => DataType::Array(Box::new(DataType::Json)),
+                _ => DataType::String,
+            })
+        } else {
+            Ok(DataType::String)
+        }
+    }
+
+    /// Parse column constraints for ALTER TABLE add.
+    fn parse_column_constraints(&mut self) -> ParseResult<Vec<ColumnConstraint>> {
+        let mut constraints = Vec::new();
+
+        while self.check(TokenKind::Keyword) {
+            if self.check_keyword("primary") {
+                self.advance();
+                self.expect_keyword("key")?;
+                constraints.push(ColumnConstraint::PrimaryKey);
+            } else if self.check_keyword("unique") {
+                self.advance();
+                constraints.push(ColumnConstraint::Unique);
+            } else if self.check_keyword("required") {
+                self.advance();
+                constraints.push(ColumnConstraint::NotNull);
+            } else if self.check_keyword("default") {
+                self.advance();
+                let expr = self.parse_expr()?;
+                constraints.push(ColumnConstraint::Default(expr));
+            } else {
+                break;
+            }
+        }
+
+        Ok(constraints)
+    }
+
+    /// Parse a column alteration action.
+    fn parse_column_alter_action(&mut self) -> ParseResult<ColumnAlterAction> {
+        if self.check_keyword("remove") {
+            self.advance();
+            self.expect_keyword("default")?;
+            Ok(ColumnAlterAction::RemoveDefault)
+        } else if self.check_keyword("set") {
+            self.advance();
+            self.expect_keyword("default")?;
+            let expr = self.parse_expr()?;
+            Ok(ColumnAlterAction::SetDefault(expr))
+        } else if self.check_keyword("nullable") {
+            self.advance();
+            Ok(ColumnAlterAction::SetNullable)
+        } else if self.check_keyword("required") {
+            self.advance();
+            Ok(ColumnAlterAction::SetRequired)
+        } else if self.check_keyword("type") {
+            self.advance();
+            let data_type = self.parse_column_type()?;
+            Ok(ColumnAlterAction::SetType(data_type))
+        } else {
+            Err(self
+                .error("expected column alteration action")
+                .with_note("valid actions: 'remove default', 'set default <value>', 'nullable', 'required', 'type <type>'"))
+        }
+    }
+
+    /// Parse change mutation (not table alteration).
+    fn parse_change_mutation(&mut self, target: Spanned<Ident>) -> ParseResult<Statement> {
+        let mut filter = None;
+        let mut assignments = Vec::new();
+
+        if self.check_keyword("where") {
+            filter = Some(self.parse_where_clause()?);
+        }
+
+        if self.check(TokenKind::Newline) {
+            self.skip_newlines();
+            if self.check(TokenKind::Indent) {
+                self.advance();
+
+                while !self.check(TokenKind::Dedent) && !self.is_at_end() {
+                    self.skip_newlines();
+                    if self.check(TokenKind::Dedent) {
+                        break;
+                    }
+
+                    let field = self.expect_identifier()?;
+                    self.expect(TokenKind::Equals)?;
+                    let value = self.parse_expr()?;
+                    assignments.push(Assignment { field, value });
+                    self.skip_newlines();
+                }
+
+                self.expect(TokenKind::Dedent)?;
+            }
+        } else {
+            loop {
+                if !self.check(TokenKind::Identifier) && !self.check(TokenKind::Keyword) {
+                    break;
+                }
+                let field = self.expect_identifier()?;
+                self.expect(TokenKind::Equals)?;
+                let value = self.parse_expr()?;
+                assignments.push(Assignment { field, value });
+
+                if !self.check(TokenKind::Comma) {
+                    break;
+                }
+                self.advance();
+            }
+        }
+
+        Ok(Statement::Mutation(MutationStatement::Change(ChangeMutation {
+            target,
+            filter,
+            assignments,
+        })))
+    }
+
     fn parse_change(&mut self) -> ParseResult<MutationStatement> {
         self.expect_keyword("change")?;
         let target = self.expect_identifier()?;
@@ -587,6 +929,10 @@ impl<'a> Parser<'a> {
 
         if self.check_keyword("index") || self.check_keyword("unique") {
             return self.parse_make_index();
+        }
+
+        if self.check_keyword("namespace") {
+            return self.parse_make_namespace();
         }
 
         self.expect_keyword("table")?;
@@ -707,6 +1053,34 @@ impl<'a> Parser<'a> {
         }))
     }
 
+    fn parse_make_namespace(&mut self) -> ParseResult<DdlStatement> {
+        self.expect_keyword("namespace")?;
+        let name = self.expect_identifier()?;
+
+        // Optional description
+        let description = if self.check_keyword("description") {
+            self.advance();
+            let expr = self.parse_expr()?;
+            if let Expr::Literal(slot) = &expr.node {
+                if let LiteralValue::String(s) = &slot.value {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Ok(DdlStatement::CreateNamespace(CreateNamespaceDdl {
+            name,
+            description,
+            if_not_exists: false,
+        }))
+    }
+
     fn parse_drop(&mut self) -> ParseResult<DdlStatement> {
         self.expect_keyword("drop")?;
 
@@ -729,10 +1103,27 @@ impl<'a> Parser<'a> {
                 name,
                 if_exists: false,
             }))
+        } else if self.check_keyword("namespace") {
+            self.expect_keyword("namespace")?;
+            let name = self.expect_identifier()?;
+
+            // Check for FORCE keyword
+            let force = if self.check_keyword("force") {
+                self.advance();
+                true
+            } else {
+                false
+            };
+
+            Ok(DdlStatement::DropNamespace(DropNamespaceDdl {
+                name,
+                force,
+                if_exists: false,
+            }))
         } else {
             Err(self
-                .error("expected 'index' or 'table' after 'drop'")
-                .with_note("usage: drop index <name> on <table> OR drop table <name>"))
+                .error("expected 'index', 'table', or 'namespace' after 'drop'")
+                .with_note("usage: drop index <name> on <table> OR drop table <name> OR drop namespace <name> [force]"))
         }
     }
 
@@ -765,8 +1156,11 @@ impl<'a> Parser<'a> {
                     "text" => DataType::String,
                     "decimal" => DataType::Float32,
                     "double" => DataType::Float64,
-                    "date" => DataType::DateTime,
-                    "boolean" => DataType::Bool,
+                    "date" | "datetime" | "timestamp" => DataType::DateTime,
+                    "time" => DataType::Time,
+                    "boolean" | "bool" => DataType::Bool,
+                    "binary" => DataType::Bytes,
+                    "uuid" => DataType::Uuid,
                     "map" => DataType::Json,
                     "list" => DataType::Array(Box::new(DataType::Json)),
                     _ => DataType::String,
@@ -990,10 +1384,30 @@ impl<'a> Parser<'a> {
 
             Some(TokenKind::Identifier) => {
                 let id = self.expect_identifier()?;
-                Ok(Spanned::new(
-                    Expr::Column(ColumnRef::simple(id.node)),
-                    id.span,
-                ))
+                
+                // Check if this is a function call (identifier followed by '(')
+                if self.check(TokenKind::LeftParen) {
+                    self.advance(); // consume '('
+                    let args = self.parse_function_args()?;
+                    self.expect(TokenKind::RightParen)?;
+                    
+                    let end_span = self.previous_span();
+                    let full_span = Span::new(id.span.start, end_span.end);
+                    
+                    Ok(Spanned::new(
+                        Expr::FunctionCall {
+                            name: Spanned::new(id.node, id.span),
+                            args,
+                        },
+                        full_span,
+                    ))
+                } else {
+                    // Regular column reference
+                    Ok(Spanned::new(
+                        Expr::Column(ColumnRef::simple(id.node)),
+                        id.span,
+                    ))
+                }
             }
 
             Some(TokenKind::Variable) => {

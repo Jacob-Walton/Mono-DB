@@ -11,6 +11,7 @@ use monodb_common::{MonoError, Result};
 
 use super::btree::BTree;
 use super::buffer::LruBufferPool;
+use super::page::PageId;
 use super::traits::{Revision, Serializable, VersionedDocument, VersionedStore};
 
 // Document Metadata
@@ -181,6 +182,37 @@ where
             keep_history,
             max_history: 100, // Default max history per document
         })
+    }
+
+    /// Open an existing document store from disk.
+    pub fn open(pool: Arc<LruBufferPool>, meta_page_id: PageId, keep_history: bool) -> Result<Self> {
+        let documents: BTree<K, Document<V>> = BTree::open(pool.clone(), meta_page_id)?;
+        
+        // Find the max revision to continue numbering
+        let max_rev = documents.iter()?
+            .filter_map(|(_, doc)| Some(doc.revision))
+            .max()
+            .unwrap_or(0);
+
+        let history = if keep_history {
+            // TODO: store history btree meta_page_id separately
+            Some(BTree::new(pool)?)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            documents,
+            history,
+            next_revision: AtomicU64::new(max_rev + 1),
+            keep_history,
+            max_history: 100,
+        })
+    }
+
+    /// Get the metadata page ID for persistence.
+    pub fn meta_page_id(&self) -> PageId {
+        self.documents.meta_page_id()
     }
 
     /// Create without history tracking.

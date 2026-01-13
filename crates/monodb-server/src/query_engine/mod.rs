@@ -3,6 +3,7 @@
 //! Implements the query language for MonoDB.
 
 pub mod ast;
+pub mod builtins;
 pub mod cache;
 pub mod executor;
 pub mod lexer;

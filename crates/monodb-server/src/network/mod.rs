@@ -4,7 +4,7 @@
 
 use bytes::BytesMut;
 use monodb_common::{
-    Result, Value,
+    MonoError, Result, Value,
     permissions::BuiltinRole,
     protocol::{ErrorCode, ProtocolDecoder, ProtocolEncoder, QueryOutcome, Request, Response},
 };
@@ -52,6 +52,7 @@ where
                         // Client closed connection
                         break;
                     }
+                    #[allow(unused_variables)]
                     Ok(n) => {
                         #[cfg(debug_assertions)]
                         tracing::debug!("Received {n} bytes");
@@ -207,8 +208,16 @@ async fn handle_request(
         }
 
         Request::List => {
-            // List tables, for now return empty. FIXME
-            Ok(Response::TableList { tables: vec![] })
+            let tables = storage.list_tables()
+                .into_iter()
+                .map(|(name, table_type)| monodb_common::protocol::TableInfo {
+                    name,
+                    schema: Some(table_type),
+                    row_count: None,
+                    size_bytes: None,
+                })
+                .collect();
+            Ok(Response::TableList { tables })
         }
 
         _ => {
@@ -251,32 +260,91 @@ async fn handle_query(
         });
     }
 
-    // Get or create transaction
-    let tx_id = {
-        let sess = sessions.get(&session_id);
-        match sess.as_ref().and_then(|s| s.transaction_id()) {
-            Some(id) => id,
-            None => {
-                // Auto-transaction for single query
-                storage.begin_transaction()?
-            }
-        }
-    };
+    // Execute statements one by one, handling transaction statements specially
+    use crate::query_engine::ast::{Statement, TransactionStatement};
 
-    let auto_tx = sessions
-        .get(&session_id)
-        .map(|s| s.transaction_id().is_none())
-        .unwrap_or(true);
-
-    // Execute each statement
     let executor = Executor::new(storage.clone());
-    let ctx = ExecutionContext::new().with_params(params).with_tx(tx_id);
-
     let mut last_result = QueryOutcome::Executed;
 
     for stmt in statements {
+        // Handle transaction statements as they affect session state
+        if let Statement::Transaction(tx_stmt) = &stmt {
+            match tx_stmt {
+                TransactionStatement::Begin => {
+                    let tx_id = storage.begin_transaction()?;
+                    if let Some(mut sess) = sessions.get_mut(&session_id) {
+                        sess.begin_transaction(tx_id);
+                    }
+                    last_result = QueryOutcome::Executed;
+                    continue;
+                }
+                TransactionStatement::Commit => {
+                    let tx_id = sessions
+                        .get(&session_id)
+                        .and_then(|s| s.transaction_id())
+                        .ok_or_else(|| MonoError::Transaction("No active transaction".into()))?;
+                    storage.commit(tx_id)?;
+                    if let Some(mut sess) = sessions.get_mut(&session_id) {
+                        sess.end_transaction();
+                    }
+                    last_result = QueryOutcome::Executed;
+                    continue;
+                }
+                TransactionStatement::Rollback => {
+                    let tx_id = sessions
+                        .get(&session_id)
+                        .and_then(|s| s.transaction_id())
+                        .ok_or_else(|| MonoError::Transaction("No active transaction".into()))?;
+                    storage.rollback(tx_id)?;
+                    if let Some(mut sess) = sessions.get_mut(&session_id) {
+                        sess.end_transaction();
+                    }
+                    last_result = QueryOutcome::Executed;
+                    continue;
+                }
+            }
+        }
+
+        // Handle USE statements as they affect session namespace
+        if let Statement::Control(crate::query_engine::ast::ControlStatement::Use(use_stmt)) = &stmt
+        {
+            let namespace = use_stmt.namespace.node.to_string();
+            if let Some(mut sess) = sessions.get_mut(&session_id) {
+                sess.current_namespace = namespace.clone();
+                tracing::debug!("Session {} switched to namespace '{}'", session_id, namespace);
+            }
+            last_result = QueryOutcome::Executed;
+            continue;
+        }
+
+        // For non-transaction statements, get or create a transaction
+        let (tx_id, auto_tx, current_namespace) = {
+            let sess = sessions.get(&session_id);
+            match sess.as_ref() {
+                Some(s) => {
+                    let namespace = s.current_namespace.clone();
+                    match s.transaction_id() {
+                        Some(id) => (id, false, namespace),
+                        None => (storage.begin_transaction()?, true, namespace),
+                    }
+                }
+                None => (storage.begin_transaction()?, true, "default".to_string()),
+            }
+        };
+
+        let ctx = ExecutionContext::new()
+            .with_params(params.clone())
+            .with_tx(tx_id)
+            .with_namespace(&current_namespace);
+
         match execute_statement(&executor, &ctx, storage, stmt).await {
-            Ok(outcome) => last_result = outcome,
+            Ok(outcome) => {
+                last_result = outcome;
+                // Auto-commit if we started the transaction
+                if auto_tx {
+                    storage.commit(tx_id)?;
+                }
+            }
             Err(e) => {
                 if auto_tx {
                     let _ = storage.rollback(tx_id);
@@ -288,11 +356,6 @@ async fn handle_query(
                 });
             }
         }
-    }
-
-    // Auto-commit if we started the transaction
-    if auto_tx {
-        storage.commit(tx_id)?;
     }
 
     Ok(Response::QueryResult {
@@ -313,6 +376,18 @@ async fn execute_statement(
 
     match &stmt {
         Statement::Query(query) => {
+            // Handle DESCRIBE, it doesn't go through the planner
+            if let QueryStatement::Describe(describe) = query {
+                let qualified_name = ctx.qualify_table(describe.table.node.as_str());
+                let description = storage.describe_table(&qualified_name)?;
+                return Ok(QueryOutcome::Rows {
+                    row_count: 1,
+                    data: vec![description],
+                    columns: None,
+                    has_more: false,
+                });
+            }
+
             // Plan and execute the query
             let plan = planner.plan(&stmt)?;
             let result = executor.execute(&plan, ctx)?;
@@ -357,17 +432,151 @@ async fn execute_statement(
 
         Statement::Ddl(ddl) => match ddl {
             DdlStatement::CreateTable(create) => {
-                storage.create_table(create.name.node.as_str())?;
+                let qualified_name = ctx.qualify_table(create.name.node.as_str());
+                storage.create_table_with_schema(
+                    &qualified_name,
+                    create.table_type,
+                    &create.columns,
+                    &create.constraints,
+                )?;
                 Ok(QueryOutcome::Executed)
             }
             DdlStatement::DropTable(drop) => {
-                storage.drop_table(drop.name.node.as_str())?;
+                let qualified_name = ctx.qualify_table(drop.name.node.as_str());
+                storage.drop_table(&qualified_name)?;
                 Ok(QueryOutcome::Dropped {
                     object_type: "table".into(),
-                    object_name: drop.name.node.to_string(),
+                    object_name: qualified_name,
                 })
             }
-            _ => Ok(QueryOutcome::Executed),
+            DdlStatement::CreateNamespace(create_ns) => {
+                storage.create_namespace(create_ns.name.node.as_str())?;
+                Ok(QueryOutcome::Executed)
+            }
+            DdlStatement::DropNamespace(drop_ns) => {
+                storage.drop_namespace(drop_ns.name.node.as_str(), drop_ns.force)?;
+                Ok(QueryOutcome::Dropped {
+                    object_type: "namespace".into(),
+                    object_name: drop_ns.name.node.to_string(),
+                })
+            }
+            DdlStatement::AlterTable(alter) => {
+                use crate::query_engine::ast::AlterTableOperation;
+                let qualified_name = ctx.qualify_table(alter.table.node.as_str());
+
+                for op in &alter.operations {
+                    match op {
+                        AlterTableOperation::AddColumns(columns) => {
+                            storage.add_columns(&qualified_name, columns)?;
+                        }
+                        AlterTableOperation::DropColumns(columns) => {
+                            let col_names: Vec<String> =
+                                columns.iter().map(|c| c.node.to_string()).collect();
+                            storage.drop_columns(&qualified_name, &col_names)?;
+                        }
+                        AlterTableOperation::RenameColumns(renames) => {
+                            let rename_pairs: Vec<(String, String)> = renames
+                                .iter()
+                                .map(|(old, new)| (old.node.to_string(), new.node.to_string()))
+                                .collect();
+                            storage.rename_columns(&qualified_name, &rename_pairs)?;
+                        }
+                        AlterTableOperation::RenameTable(new_name) => {
+                            let new_qualified = ctx.qualify_table(new_name.node.as_str());
+                            storage.rename_table(&qualified_name, &new_qualified)?;
+                        }
+                        AlterTableOperation::AlterColumns(alterations) => {
+                            use crate::query_engine::ast::ColumnAlterAction;
+                            for alteration in alterations {
+                                let col_name = alteration.column.node.to_string();
+                                match &alteration.action {
+                                    ColumnAlterAction::RemoveDefault => {
+                                        storage.alter_column(
+                                            &qualified_name,
+                                            &col_name,
+                                            Some(None), // remove default
+                                            None,
+                                            None,
+                                        )?;
+                                    }
+                                    ColumnAlterAction::SetDefault(expr) => {
+                                        let value = storage.eval_default_expr(expr)?;
+                                        storage.alter_column(
+                                            &qualified_name,
+                                            &col_name,
+                                            Some(Some(value)),
+                                            None,
+                                            None,
+                                        )?;
+                                    }
+                                    ColumnAlterAction::SetNullable => {
+                                        storage.alter_column(
+                                            &qualified_name,
+                                            &col_name,
+                                            None,
+                                            Some(true),
+                                            None,
+                                        )?;
+                                    }
+                                    ColumnAlterAction::SetRequired => {
+                                        storage.alter_column(
+                                            &qualified_name,
+                                            &col_name,
+                                            None,
+                                            Some(false),
+                                            None,
+                                        )?;
+                                    }
+                                    ColumnAlterAction::SetType(data_type) => {
+                                        use crate::storage::schema::StoredDataType;
+                                        storage.alter_column(
+                                            &qualified_name,
+                                            &col_name,
+                                            None,
+                                            None,
+                                            Some(StoredDataType::from(data_type)),
+                                        )?;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Ok(QueryOutcome::Executed)
+            }
+            DdlStatement::CreateIndex(create_idx) => {
+                let qualified_table = ctx.qualify_table(create_idx.table.node.as_str());
+                let index_name = create_idx.name.node.to_string();
+                let columns: Vec<String> = create_idx
+                    .columns
+                    .iter()
+                    .map(|c| c.node.to_string())
+                    .collect();
+
+                storage.create_index(
+                    &qualified_table,
+                    &index_name,
+                    columns.clone(),
+                    create_idx.unique,
+                )?;
+
+                Ok(QueryOutcome::Created {
+                    object_type: "index".into(),
+                    object_name: format!("{}.{}", qualified_table, index_name),
+                })
+            }
+            DdlStatement::DropIndex(drop_idx) => {
+                let qualified_table = ctx.qualify_table(drop_idx.table.node.as_str());
+                let index_name = drop_idx.name.node.to_string();
+
+                storage.drop_index(&qualified_table, &index_name)?;
+
+                Ok(QueryOutcome::Dropped {
+                    object_type: "index".into(),
+                    object_name: format!("{}.{}", qualified_table, index_name),
+                })
+            }
         },
 
         Statement::Transaction(_) => {

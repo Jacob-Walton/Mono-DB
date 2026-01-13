@@ -340,11 +340,35 @@ impl<C: Catalog> QueryPlanner<C> {
                 })
             }
             Expr::FunctionCall { name, args } => {
+                let func_name = name.node.as_str();
                 let converted_args: Result<Vec<_>> =
                     args.iter().map(|a| self.expr_to_scalar(&a.node)).collect();
+                let converted_args = converted_args?;
+
+                // Validate against built-in functions
+                if let Some(builtin) = crate::query_engine::builtins::lookup_builtin(func_name) {
+                    // Check arity
+                    builtin.check_arity(converted_args.len()).map_err(|e| {
+                        MonoError::InvalidOperation(e)
+                    })?;
+
+                    // Note: Full type checking would require a TypeContext with column types.
+                    // For now, we defer detailed type checking to execution time for columns.
+                    // We can still validate constant arguments here.
+                    for (i, arg) in converted_args.iter().enumerate() {
+                        if let ScalarExpr::Constant(val) = arg {
+                            let arg_type = val.data_type();
+                            builtin.check_arg_type(i, &arg_type).map_err(|e| {
+                                MonoError::InvalidOperation(e)
+                            })?;
+                        }
+                    }
+                }
+                // If not a builtin, it might be a plugin function - validated at execution time
+
                 Ok(ScalarExpr::FunctionCall {
                     name: name.node.clone(),
-                    args: converted_args?,
+                    args: converted_args,
                 })
             }
             Expr::Array(items) => {
@@ -870,6 +894,56 @@ impl Catalog for EmptyCatalog {
     }
 
     fn get_table_stats(&self, _table: &str) -> Option<TableStats> {
+        None
+    }
+}
+
+/// Storage-backed catalog that reads from the SchemaCatalog.
+///
+/// This is what connects the query planner to the actual
+/// persisted table schemas.
+pub struct StorageCatalog {
+    schema_catalog: Arc<crate::storage::SchemaCatalog>,
+}
+
+impl StorageCatalog {
+    /// Create a new storage catalog backed by the given schema catalog.
+    pub fn new(schema_catalog: Arc<crate::storage::SchemaCatalog>) -> Self {
+        Self { schema_catalog }
+    }
+}
+
+impl Catalog for StorageCatalog {
+    fn get_table_schema(&self, name: &str) -> Option<Arc<TableSchema>> {
+        let stored = self.schema_catalog.get(name)?;
+
+        // Convert StoredTableSchema to TableSchema
+        let columns = stored
+            .columns
+            .iter()
+            .map(|col| ColumnSchema {
+                name: col.name.clone(),
+                data_type: col.data_type.to_ast_type(),
+                nullable: col.nullable,
+                default: col.default.clone(),
+            })
+            .collect();
+
+        Some(Arc::new(TableSchema {
+            name: stored.name.clone(),
+            table_type: stored.table_type.into(),
+            columns,
+            primary_key: stored.primary_key.clone(),
+        }))
+    }
+
+    fn get_indexes(&self, _table: &str) -> Vec<IndexInfo> {
+        // TODO: Implement index metadata storage
+        Vec::new()
+    }
+
+    fn get_table_stats(&self, _table: &str) -> Option<TableStats> {
+        // TODO: Implement statistics collection
         None
     }
 }

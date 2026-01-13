@@ -1,0 +1,48 @@
+package monodb:plugin@0.1.0;
+
+world plugin {
+    import database;
+    import transaction;
+    import schema;
+    import types;
+
+    export api: interface {
+        use types.{version-number, db-error, value, function-info};
+
+        // Main plugin entry point
+        run: func() -> result<_, db-error>;
+
+        // Plugin metadata
+        name: func() -> string;
+        description: func() -> string;
+        version: func() -> version-number;
+
+        record plugin-config {
+            long-running: bool,
+            epoch-deadline: option<u64>,
+            fuel-limit: option<u64>,
+            read-only: bool,
+            allowed-tables: option<list<string>>,
+        }
+        config: func() -> plugin-config;
+
+        // Functions provided by the plugin
+        list-functions: func() -> list<function-info>;
+        call-function: func(name: string, args: list<value>) -> result<value, db-error>;
+
+        // Aggregate function lifecycle
+        aggregate-init: func(name: string) -> result<u64, db-error>;
+        aggregate-step: func(handle: u64, value: value) -> result<_, db-error>;
+        aggregate-finalize: func(handle: u64) -> result<value, db-error>;
+
+        // Custom types provided by the plugin
+        use types.{type-info};
+        list-types: func() -> list<type-info>;
+
+        // Type handler operations
+        type-parse: func(type-name: string, input: string) -> result<value, db-error>;
+        type-format: func(type-name: string, data: value) -> result<string, db-error>;
+        type-compare: func(type-name: string, a: value, b: value) -> result<s32, db-error>;
+        type-hash: func(type-name: string, data: value) -> result<u64, db-error>;
+    }
+}

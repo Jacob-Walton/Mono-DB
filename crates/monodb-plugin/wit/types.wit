@@ -1,0 +1,74 @@
+package monodb:plugin@0.1.0;
+
+interface types {
+    type value = list<u8>;
+
+    // Error kinds for database operations
+    enum error-kind {
+        io-error,
+        storage-error,
+        parse-error,
+        execution-error,
+        type-error,
+        not-found,
+        already-exists,
+        invalid-operation,
+        transaction-error,
+        write-conflict,
+    }
+
+    record db-error {
+        kind: error-kind,
+        message: string,
+        details: option<string>,
+    }
+
+    record version-number {
+        major: u32,
+        minor: u32,
+        patch: u32,
+    }
+
+    // Value types for function signatures
+    enum value-type {
+        type-null,
+        type-bool,
+        type-int32,
+        type-int64,
+        type-float32,
+        type-float64,
+        type-string,
+        type-binary,
+        type-array,
+        type-object,
+        type-uuid,
+        type-datetime,
+        type-geopoint,
+        type-any,
+    }
+
+    // Function parameter metadata
+    record param-info {
+        name: string,
+        param-type: value-type,
+        optional: bool,
+    }
+
+    // Function metadata
+    record function-info {
+        name: string,
+        description: string,
+        params: list<param-info>,
+        return-type: value-type,
+        deterministic: bool,
+        aggregate: bool,
+    }
+
+    // Custom type metadata for plugin-defined types
+    record type-info {
+        name: string,
+        description: string,
+        supports-ordering: bool,
+        supports-hashing: bool,
+    }
+}

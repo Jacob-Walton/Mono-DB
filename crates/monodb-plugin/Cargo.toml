@@ -1,0 +1,30 @@
+[package]
+name = "monodb-plugin"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Workspace dependencies
+monodb-common = { path = "../monodb-common", default-features = false }
+anyhow.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+indexmap.workspace = true
+
+# WASM runtime
+wasmtime.workspace = true
+wasmtime-wasi.workspace = true
+
+# Concurrency
+parking_lot.workspace = true
+
+# Memory-mapped files
+memmap2.workspace = true
+
+# File watching for hot-reload
+notify.workspace = true
+
+[build-dependencies]
+# None needed - we use wasmtime::component::bindgen! macro

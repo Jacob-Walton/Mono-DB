@@ -85,10 +85,60 @@ impl Default for StorageConfig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+/// Plugin system configuration.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PluginConfig {
+    /// Whether the plugin system is enabled
+    pub enabled: bool,
+    /// Directory containing plugin .wasm files
+    pub plugins_dir: String,
+    /// Enable hot-reload when plugins change
+    pub hot_reload: bool,
+    /// Maximum memory per plugin in bytes
+    pub max_memory: usize,
+    /// Default fuel limit per plugin execution
+    pub default_fuel: u64,
+    /// Maximum fuel limit a plugin can request
+    pub max_fuel: u64,
+    /// Default epoch deadline for plugins
+    pub default_deadline: u64,
+    /// Maximum epoch deadline for plugins
+    pub max_deadline: u64,
+}
+
+impl Default for PluginConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            plugins_dir: "./data/plugins".into(),
+            hot_reload: true,
+            max_memory: 128 * 1024 * 1024, // 128 MiB
+            default_fuel: 100_000_000,
+            max_fuel: 1_000_000_000,
+            default_deadline: 4,
+            max_deadline: 16,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default)]
     pub server: ServerConfig,
+    #[serde(default)]
     pub storage: StorageConfig,
+    #[serde(default)]
+    pub plugins: PluginConfig,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            server: ServerConfig::default(),
+            storage: StorageConfig::default(),
+            plugins: PluginConfig::default(),
+        }
+    }
 }
 
 impl Config {

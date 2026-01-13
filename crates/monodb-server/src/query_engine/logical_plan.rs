@@ -483,6 +483,314 @@ impl ScalarExpr {
     }
 }
 
+// Type Inference for Expressions
+
+use monodb_common::ValueType;
+
+/// Context for type inference, providing access to column types.
+pub trait TypeContext {
+    /// Get the type of a column by name.
+    /// For document tables, this may return None (type resolved at runtime).
+    fn get_column_type(&self, table: Option<&str>, column: &str) -> Option<ValueType>;
+}
+
+/// A simple type context backed by a map of column types.
+pub struct SimpleTypeContext {
+    columns: std::collections::HashMap<String, ValueType>,
+    default_table: Option<String>,
+}
+
+impl SimpleTypeContext {
+    pub fn new() -> Self {
+        Self {
+            columns: std::collections::HashMap::new(),
+            default_table: None,
+        }
+    }
+
+    pub fn with_column(mut self, name: &str, ty: ValueType) -> Self {
+        self.columns.insert(name.to_string(), ty);
+        self
+    }
+
+    pub fn set_default_table(&mut self, table: &str) {
+        self.default_table = Some(table.to_string());
+    }
+}
+
+impl Default for SimpleTypeContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TypeContext for SimpleTypeContext {
+    fn get_column_type(&self, _table: Option<&str>, column: &str) -> Option<ValueType> {
+        self.columns.get(column).cloned()
+    }
+}
+
+/// Result of type inference.
+#[derive(Debug, Clone)]
+pub enum InferredType {
+    /// Known concrete type
+    Known(ValueType),
+    /// Type will be determined at runtime (e.g., for document columns)
+    Runtime,
+    /// Type cannot be determined (error condition)
+    Unknown(String),
+}
+
+impl InferredType {
+    /// Check if this type is known at compile time
+    pub fn is_known(&self) -> bool {
+        matches!(self, InferredType::Known(_))
+    }
+
+    /// Get the known type, if any
+    pub fn as_known(&self) -> Option<&ValueType> {
+        match self {
+            InferredType::Known(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// Check if this type is compatible with another for an operation
+    pub fn is_compatible_with(&self, other: &InferredType) -> bool {
+        match (self, other) {
+            // Runtime types are always potentially compatible
+            (InferredType::Runtime, _) | (_, InferredType::Runtime) => true,
+            // Known types check via coercion
+            (InferredType::Known(a), InferredType::Known(b)) => a.common_type(b).is_some(),
+            // Unknown types are not compatible
+            _ => false,
+        }
+    }
+}
+
+impl ScalarExpr {
+    /// Infer the type of this expression given a type context.
+    ///
+    /// Returns the inferred type, which may be:
+    /// - [`InferredType::Known`] for statically known types
+    /// - [`InferredType::Runtime`] for types that can only be determined at runtime
+    /// - [`InferredType::Unknown`] for type errors
+    pub fn infer_type(&self, ctx: &dyn TypeContext) -> InferredType {
+        match self {
+            ScalarExpr::Constant(v) => InferredType::Known(v.data_type()),
+
+            ScalarExpr::Column(col) => {
+                let table = col.table.as_ref().map(|t| t.as_str());
+                match ctx.get_column_type(table, col.column.as_str()) {
+                    Some(ty) => InferredType::Known(ty),
+                    // Column not in context, could be a document field resolved at runtime
+                    None => InferredType::Runtime,
+                }
+            }
+
+            ScalarExpr::Param(_) => {
+                // Parameters are bound at execution time
+                InferredType::Runtime
+            }
+
+            ScalarExpr::BinaryOp { left, op, right } => {
+                let left_ty = left.infer_type(ctx);
+                let right_ty = right.infer_type(ctx);
+
+                // If either is unknown/error, propagate
+                if let InferredType::Unknown(reason) = &left_ty {
+                    return InferredType::Unknown(reason.clone());
+                }
+                if let InferredType::Unknown(reason) = &right_ty {
+                    return InferredType::Unknown(reason.clone());
+                }
+
+                // If either is runtime, result is runtime (for non-boolean ops)
+                if matches!(&left_ty, InferredType::Runtime)
+                    || matches!(&right_ty, InferredType::Runtime)
+                {
+                    return match op {
+                        // Comparison ops always return Bool
+                        BinaryOp::Eq
+                        | BinaryOp::NotEq
+                        | BinaryOp::Lt
+                        | BinaryOp::LtEq
+                        | BinaryOp::Gt
+                        | BinaryOp::GtEq
+                        | BinaryOp::And
+                        | BinaryOp::Or
+                        | BinaryOp::Like
+                        | BinaryOp::In
+                        | BinaryOp::Contains => InferredType::Known(ValueType::Bool),
+                        _ => InferredType::Runtime,
+                    };
+                }
+
+                let left_vt = left_ty.as_known().unwrap();
+                let right_vt = right_ty.as_known().unwrap();
+
+                match op {
+                    // Comparison operators return Bool
+                    BinaryOp::Eq
+                    | BinaryOp::NotEq
+                    | BinaryOp::Lt
+                    | BinaryOp::LtEq
+                    | BinaryOp::Gt
+                    | BinaryOp::GtEq
+                    | BinaryOp::Like
+                    | BinaryOp::In
+                    | BinaryOp::Contains => InferredType::Known(ValueType::Bool),
+
+                    // Logical operators return Bool
+                    BinaryOp::And | BinaryOp::Or => InferredType::Known(ValueType::Bool),
+
+                    // Arithmetic operators use type coercion
+                    BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => {
+                        match left_vt.common_type(right_vt) {
+                            Some(common) => InferredType::Known(common),
+                            None => InferredType::Unknown(format!(
+                                "Cannot apply {} to {} and {}",
+                                op_name(op),
+                                left_vt.display_name(),
+                                right_vt.display_name()
+                            )),
+                        }
+                    }
+
+                    // Modulo returns integer type
+                    BinaryOp::Mod => {
+                        if left_vt.is_integer() && right_vt.is_integer() {
+                            InferredType::Known(left_vt.common_type(right_vt).unwrap_or(ValueType::Int64))
+                        } else {
+                            InferredType::Unknown("Modulo requires integer operands".to_string())
+                        }
+                    }
+
+                    // Compound assignment, type of left operand
+                    BinaryOp::PlusEq | BinaryOp::MinusEq => left_ty,
+                }
+            }
+
+            ScalarExpr::UnaryOp { op, operand } => {
+                let operand_ty = operand.infer_type(ctx);
+
+                match op {
+                    UnaryOp::Not => InferredType::Known(ValueType::Bool),
+                    UnaryOp::Neg => operand_ty,
+                    UnaryOp::IsNull | UnaryOp::IsNotNull => InferredType::Known(ValueType::Bool),
+                }
+            }
+
+            ScalarExpr::FunctionCall { name, args: _ } => {
+                // Function return types need the function registry
+                // For now, return Runtime, will be resolved in planner with function registry
+                InferredType::Unknown(format!(
+                    "Function '{}' type not resolved (requires function registry)",
+                    name.as_str()
+                ))
+            }
+
+            ScalarExpr::Case {
+                when_clauses,
+                else_result,
+                ..
+            } => {
+                // Result type is the common type of all branches
+                let mut result_type: Option<InferredType> = None;
+
+                for (_, then_expr) in when_clauses {
+                    let then_ty = then_expr.infer_type(ctx);
+                    result_type = Some(match result_type {
+                        None => then_ty,
+                        Some(prev) => {
+                            if prev.is_compatible_with(&then_ty) {
+                                // Use the more specific type
+                                match (&prev, &then_ty) {
+                                    (InferredType::Known(a), InferredType::Known(b)) => {
+                                        InferredType::Known(a.common_type(b).unwrap_or(a.clone()))
+                                    }
+                                    (InferredType::Runtime, _) | (_, InferredType::Runtime) => {
+                                        InferredType::Runtime
+                                    }
+                                    _ => prev,
+                                }
+                            } else {
+                                return InferredType::Unknown(
+                                    "CASE branches have incompatible types".to_string(),
+                                );
+                            }
+                        }
+                    });
+                }
+
+                if let Some(else_expr) = else_result {
+                    let else_ty = else_expr.infer_type(ctx);
+                    if let Some(prev) = &result_type {
+                        if !prev.is_compatible_with(&else_ty) {
+                            return InferredType::Unknown(
+                                "CASE ELSE has incompatible type with WHEN branches".to_string(),
+                            );
+                        }
+                    }
+                    result_type = Some(else_ty);
+                }
+
+                result_type.unwrap_or(InferredType::Known(ValueType::Null))
+            }
+
+            ScalarExpr::Array(items) => {
+                // Array type, could infer element type but for now just Array
+                if items.is_empty() {
+                    InferredType::Known(ValueType::Array)
+                } else {
+                    // Check all items have compatible types
+                    let first_ty = items[0].infer_type(ctx);
+                    for item in items.iter().skip(1) {
+                        let item_ty = item.infer_type(ctx);
+                        if !first_ty.is_compatible_with(&item_ty) {
+                            return InferredType::Unknown(
+                                "Array elements have incompatible types".to_string(),
+                            );
+                        }
+                    }
+                    InferredType::Known(ValueType::Array)
+                }
+            }
+
+            ScalarExpr::Object(_) => InferredType::Known(ValueType::Object),
+
+            ScalarExpr::AggregateRef { .. } => {
+                // Aggregate references are resolved during planning
+                InferredType::Runtime
+            }
+        }
+    }
+}
+
+/// Helper to get operator name for error messages
+fn op_name(op: &BinaryOp) -> &'static str {
+    match op {
+        BinaryOp::Add => "addition",
+        BinaryOp::Sub => "subtraction",
+        BinaryOp::Mul => "multiplication",
+        BinaryOp::Div => "division",
+        BinaryOp::Mod => "modulo",
+        BinaryOp::Eq => "equality",
+        BinaryOp::NotEq => "inequality",
+        BinaryOp::Lt => "less than",
+        BinaryOp::LtEq => "less or equal",
+        BinaryOp::Gt => "greater than",
+        BinaryOp::GtEq => "greater or equal",
+        BinaryOp::And => "and",
+        BinaryOp::Or => "or",
+        BinaryOp::Like => "like",
+        BinaryOp::In => "in",
+        BinaryOp::Contains => "contains",
+        BinaryOp::PlusEq => "add-assign",
+        BinaryOp::MinusEq => "sub-assign",
+    }
+}
+
 // Plan Builder Helpers
 
 impl LogicalPlan {

@@ -15,6 +15,9 @@ use crate::query_engine::logical_plan::{AggregateFunction, JoinType, ScalarExpr}
 use crate::query_engine::physical_plan::*;
 use crate::query_engine::storage::{QueryStorage, Row, ScanConfig};
 
+#[cfg(feature = "plugins")]
+use monodb_plugin::{PluginHost, PluginPermissions};
+
 // Execution Context
 
 /// Context for query execution.
@@ -27,6 +30,14 @@ pub struct ExecutionContext {
     pub tx_id: Option<u64>,
     /// Row limit for safety
     pub max_rows: usize,
+    /// Optional plugin host for user-defined functions
+    #[cfg(feature = "plugins")]
+    pub plugin_host: Option<Arc<PluginHost>>,
+    /// User permissions for plugin execution
+    #[cfg(feature = "plugins")]
+    pub user_permissions: Option<PluginPermissions>,
+    /// Current namespace for table name resolution
+    pub current_namespace: String,
 }
 
 impl ExecutionContext {
@@ -36,6 +47,11 @@ impl ExecutionContext {
             named_params: HashMap::new(),
             tx_id: None,
             max_rows: 100_000,
+            #[cfg(feature = "plugins")]
+            plugin_host: None,
+            #[cfg(feature = "plugins")]
+            user_permissions: None,
+            current_namespace: "default".to_string(),
         }
     }
 
@@ -49,6 +65,35 @@ impl ExecutionContext {
         self
     }
 
+    /// Set the current namespace for table name resolution
+    pub fn with_namespace(mut self, namespace: impl Into<String>) -> Self {
+        self.current_namespace = namespace.into();
+        self
+    }
+
+    /// Set the plugin host for user-defined function execution
+    #[cfg(feature = "plugins")]
+    pub fn with_plugin_host(mut self, host: Arc<PluginHost>) -> Self {
+        self.plugin_host = Some(host);
+        self
+    }
+
+    /// Set user permissions for plugin execution
+    #[cfg(feature = "plugins")]
+    pub fn with_user_permissions(mut self, perms: PluginPermissions) -> Self {
+        self.user_permissions = Some(perms);
+        self
+    }
+
+    /// Qualify a table name with the current namespace if not already qualified.
+    pub fn qualify_table(&self, name: &str) -> String {
+        if name.contains('.') {
+            name.to_string()
+        } else {
+            format!("{}.{}", self.current_namespace, name)
+        }
+    }
+
     pub fn get_param(&self, param: &ParamRef) -> Result<&Value> {
         match param {
             ParamRef::Positional(idx) => self.params.get(*idx as usize).ok_or_else(|| {
@@ -59,6 +104,26 @@ impl ExecutionContext {
                 .get(name.as_str())
                 .ok_or_else(|| MonoError::InvalidOperation(format!("param :{} not found", name))),
         }
+    }
+
+    /// Try to call a plugin function if available
+    #[cfg(feature = "plugins")]
+    pub fn call_plugin_function(&self, name: &str, args: Vec<Value>) -> Option<Result<Value>> {
+        let host = self.plugin_host.as_ref()?;
+        
+        // Check if function exists
+        if !host.has_function(name) {
+            return None;
+        }
+
+        // Get user permissions (default to read-only if not set)
+        let perms = self.user_permissions.clone()
+            .unwrap_or_else(PluginPermissions::read_only);
+
+        // Call the plugin function
+        Some(host.call_function(name, args, perms).map_err(|e| {
+            MonoError::InvalidOperation(format!("Plugin function error: {}", e))
+        }))
     }
 }
 
@@ -155,7 +220,8 @@ impl<S: QueryStorage> Executor<S> {
             offset: None,
         };
 
-        let mut rows = self.storage.scan(tx_id, op.table.as_str(), &config)?;
+        let table = ctx.qualify_table(op.table.as_str());
+        let mut rows = self.storage.scan(tx_id, &table, &config)?;
 
         // Apply filter if present
         if let Some(ref pred) = op.filter {
@@ -176,7 +242,8 @@ impl<S: QueryStorage> Executor<S> {
         ctx: &ExecutionContext,
     ) -> Result<QueryResult> {
         let key = self.eval_expr(&op.key, &Row::new(), ctx)?;
-        match self.storage.read(tx_id, op.table.as_str(), &key)? {
+        let table = ctx.qualify_table(op.table.as_str());
+        match self.storage.read(tx_id, &table, &key)? {
             Some(row) => Ok(QueryResult::from_rows(vec![row])),
             None => Ok(QueryResult::empty()),
         }
@@ -188,10 +255,57 @@ impl<S: QueryStorage> Executor<S> {
         tx_id: u64,
         ctx: &ExecutionContext,
     ) -> Result<QueryResult> {
-        // Fall back to seq scan + filter for now
-        let config = ScanConfig::new();
-        let mut rows = self.storage.scan(tx_id, op.table.as_str(), &config)?;
+        use crate::query_engine::physical_plan::IndexScanType;
 
+        let table = ctx.qualify_table(op.table.as_str());
+        let index_name = op.index_name.as_str();
+
+        let mut rows = match op.scan_type {
+            IndexScanType::ExactMatch => {
+                // Point lookup using secondary index
+                if let Some(ref lookup_expr) = op.lookup_key {
+                    // Evaluate the lookup key value
+                    let lookup_value = self.eval_expr(lookup_expr, &Row::new(), ctx)?;
+                    
+                    // Find primary keys via index lookup
+                    let pks = self.storage.find_by_index(&table, index_name, &[lookup_value])?;
+                    
+                    // Fetch actual rows by primary key
+                    let config = ScanConfig::new();
+                    let all_rows = self.storage.scan(tx_id, &table, &config)?;
+                    
+                    // Filter to just the matching rows
+                    // FIXME: Direct PK lookup would be more efficient
+                    all_rows.into_iter()
+                        .filter(|row| {
+                            // Get the primary key value from the row and check if it's in pks
+                            if let Some(pk_val) = row.get("_pk").or_else(|| row.get("id")).cloned() {
+                                let pk_bytes = pk_val.to_bytes();
+                                pks.contains(&pk_bytes)
+                            } else {
+                                false
+                            }
+                        })
+                        .collect()
+                } else {
+                    // No lookup key, fall back to scan
+                    let config = ScanConfig::new();
+                    self.storage.scan(tx_id, &table, &config)?
+                }
+            }
+            IndexScanType::RangeScan | IndexScanType::PrefixScan => {
+                // Range/prefix scans, not yet fully implemented, fall back to filtered scan
+                let config = ScanConfig::new();
+                self.storage.scan(tx_id, &table, &config)?
+            }
+            IndexScanType::OrderedScan { ascending: _ } => {
+                // Ordered scan for ORDER BY, not yet fully implemented
+                let config = ScanConfig::new();
+                self.storage.scan(tx_id, &table, &config)?
+            }
+        };
+
+        // Apply residual filter (for any predicates not fully covered by index)
         if let Some(ref filter) = op.residual_filter {
             rows.retain(|row| {
                 self.eval_expr(filter, row, ctx)
@@ -631,9 +745,10 @@ impl<S: QueryStorage> Executor<S> {
     ) -> Result<QueryResult> {
         let source = self.execute(&op.source, ctx)?;
         let mut count = 0u64;
+        let table = ctx.qualify_table(op.table.as_str());
 
         for row in source.rows {
-            self.storage.insert(tx_id, op.table.as_str(), row)?;
+            self.storage.insert(tx_id, &table, row)?;
             count += 1;
         }
 
@@ -648,6 +763,7 @@ impl<S: QueryStorage> Executor<S> {
     ) -> Result<QueryResult> {
         let scan = self.execute(&op.scan, ctx)?;
         let mut count = 0u64;
+        let table = ctx.qualify_table(op.table.as_str());
 
         for row in scan.rows {
             // Extract key
@@ -664,10 +780,7 @@ impl<S: QueryStorage> Executor<S> {
                 updates.insert(col.as_str().to_string(), val);
             }
 
-            if self
-                .storage
-                .update(tx_id, op.table.as_str(), &key, updates)?
-            {
+            if self.storage.update(tx_id, &table, &key, updates)? {
                 count += 1;
             }
         }
@@ -683,6 +796,7 @@ impl<S: QueryStorage> Executor<S> {
     ) -> Result<QueryResult> {
         let scan = self.execute(&op.scan, ctx)?;
         let mut count = 0u64;
+        let table = ctx.qualify_table(op.table.as_str());
 
         for row in scan.rows {
             let key = row
@@ -691,7 +805,7 @@ impl<S: QueryStorage> Executor<S> {
                 .cloned()
                 .ok_or_else(|| MonoError::InvalidOperation("no key for delete".into()))?;
 
-            if self.storage.delete(tx_id, op.table.as_str(), &key)? {
+            if self.storage.delete(tx_id, &table, &key)? {
                 count += 1;
             }
         }
@@ -733,7 +847,24 @@ impl<S: QueryStorage> Executor<S> {
                     .iter()
                     .map(|a| self.eval_expr(a, row, ctx))
                     .collect::<Result<_>>()?;
-                eval_function(name.as_str(), &arg_vals)
+                
+                // Try built-in functions first
+                match eval_function(name.as_str(), &arg_vals) {
+                    Ok(val) => Ok(val),
+                    Err(_) => {
+                        // If not a built-in, try plugin functions
+                        #[cfg(feature = "plugins")]
+                        if let Some(result) = ctx.call_plugin_function(name.as_str(), arg_vals) {
+                            return result;
+                        }
+                        
+                        // No matching function found
+                        Err(MonoError::InvalidOperation(format!(
+                            "unknown function: {}",
+                            name.as_str()
+                        )))
+                    }
+                }
             }
 
             ScalarExpr::Case {

@@ -2,19 +2,21 @@
 
 //! Storage engine facade.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use monodb_common::{MonoError, Result};
+use monodb_common::{MonoError, Result, Value};
 use parking_lot::RwLock;
 
+use crate::namespace::NamespaceManager;
 use super::buffer::LruBufferPool;
 use super::disk::DiskManager;
 use super::document::{DocumentStore, HistoryEntry};
 use super::keyspace::Keyspace;
 use super::mvcc::{MvccTable, Snapshot, TransactionManager};
+use super::schema::SchemaCatalog;
 use super::traits::{IsolationLevel, VersionedDocument};
 use super::wal::{Wal, WalConfig};
 
@@ -106,11 +108,15 @@ pub struct TableInfo {
 type MvccTableMap = DashMap<String, Arc<MvccTable<Vec<u8>, Vec<u8>>>>;
 type DocumentStoreMap = DashMap<String, Arc<DocumentStore<Vec<u8>, Vec<u8>>>>;
 type KeyspaceMap = DashMap<String, Arc<Keyspace<Vec<u8>, Vec<u8>>>>;
+type IndexEntry = DashMap<Vec<u8>, HashSet<Vec<u8>>>;
+type SecondaryIndexMap = DashMap<String, DashMap<String, Arc<IndexEntry>>>;
 
 // Storage Engine
 pub struct StorageEngine {
     /// Configuration.
     config: StorageConfig,
+    /// Namespace manager.
+    namespace_manager: Arc<NamespaceManager>,
     /// Transaction manager (shared across all MVCC tables).
     tx_manager: Arc<TransactionManager>,
     /// Write-ahead log.
@@ -125,10 +131,14 @@ pub struct StorageEngine {
     document_stores: DocumentStoreMap,
     /// Keyspaces.
     keyspaces: KeyspaceMap,
+    /// Secondary indexes for tables.
+    secondary_indexes: SecondaryIndexMap,
     /// Table metadata.
     tables: RwLock<HashMap<String, TableInfo>>,
     /// Active transactions.
     active_txs: DashMap<u64, Transaction>,
+    /// Schema catalog for table schemas.
+    schema_catalog: Arc<SchemaCatalog>,
 }
 
 impl StorageEngine {
@@ -137,6 +147,12 @@ impl StorageEngine {
         // Ensure data directory exists
         std::fs::create_dir_all(&config.data_dir)
             .map_err(|e| MonoError::Io(format!("Failed to create data directory: {}", e)))?;
+
+        // Create namespace manager (creates default/system namespaces and directories)
+        let namespace_manager = Arc::new(NamespaceManager::new(&config.data_dir)?);
+
+        // Run migration before loading schemas
+        Self::migrate_to_namespaces(&config.data_dir, &namespace_manager)?;
 
         // Initialize WAL if enabled
         let wal = if config.wal_enabled {
@@ -153,8 +169,12 @@ impl StorageEngine {
         // Create transaction manager
         let tx_manager = Arc::new(TransactionManager::new());
 
-        Ok(Self {
+        // Create schema catalog
+        let schema_catalog = Arc::new(SchemaCatalog::new(&config.data_dir)?);
+
+        let engine = Self {
             config,
+            namespace_manager,
             tx_manager,
             wal,
             disk_managers: DashMap::new(),
@@ -162,9 +182,197 @@ impl StorageEngine {
             mvcc_tables: DashMap::new(),
             document_stores: DashMap::new(),
             keyspaces: DashMap::new(),
+            secondary_indexes: DashMap::new(),
             tables: RwLock::new(HashMap::new()),
             active_txs: DashMap::new(),
-        })
+            schema_catalog,
+        };
+
+        // Restore tables from schema catalog
+        engine.load_tables_from_schemas()?;
+
+        Ok(engine)
+    }
+
+    /// Migrate existing tables to namespace directories.
+    fn migrate_to_namespaces(data_dir: &Path, namespace_manager: &NamespaceManager) -> Result<()> {
+        let migration_marker = data_dir.join(".namespace_migrated");
+
+        // Skip if already migrated
+        if migration_marker.exists() {
+            return Ok(());
+        }
+
+        tracing::info!("Migrating existing tables to namespace directories...");
+
+        let default_dir = namespace_manager.namespace_dir("default");
+        std::fs::create_dir_all(&default_dir)
+            .map_err(|e| MonoError::Io(format!("Failed to create default namespace dir: {}", e)))?;
+
+        // Find all data files in root data_dir (not in subdirectories)
+        let extensions = [".rel", ".doc", ".ks"];
+        let mut migrated_count = 0;
+
+        if let Ok(entries) = std::fs::read_dir(data_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+
+                let file_name = match path.file_name().and_then(|n| n.to_str()) {
+                    Some(n) => n.to_string(),
+                    None => continue,
+                };
+
+                // Check if it's a data file
+                if !extensions.iter().any(|ext| file_name.ends_with(ext)) {
+                    continue;
+                }
+
+                // Move to default namespace directory
+                let new_path = default_dir.join(&file_name);
+                if let Err(e) = std::fs::rename(&path, &new_path) {
+                    tracing::warn!("Failed to migrate {}: {}", file_name, e);
+                } else {
+                    tracing::debug!("Migrated {} to default namespace", file_name);
+                    migrated_count += 1;
+                }
+            }
+        }
+
+        // Write migration marker
+        std::fs::write(&migration_marker, format!("migrated {} files", migrated_count))
+            .map_err(|e| MonoError::Io(format!("Failed to write migration marker: {}", e)))?;
+
+        if migrated_count > 0 {
+            tracing::info!("Migration complete: {} files moved to default namespace", migrated_count);
+        }
+
+        Ok(())
+    }
+
+    /// Get the namespace manager.
+    pub fn namespace_manager(&self) -> &NamespaceManager {
+        &self.namespace_manager
+    }
+
+    /// Load tables from persisted schemas on startup.
+    fn load_tables_from_schemas(&self) -> Result<()> {
+        use super::schema::StoredTableType;
+
+        let schemas = self.schema_catalog.list();
+        if schemas.is_empty() {
+            return Ok(());
+        }
+
+        tracing::info!("Loading {} tables from schema catalog", schemas.len());
+
+        for schema in schemas {
+            let name = &schema.name;
+            let meta_page_id = super::page::PageId(schema.meta_page_id);
+
+            // Parse qualified name to get namespace and table
+            let (namespace, table_name) = NamespaceManager::parse_qualified(name);
+
+            match schema.table_type {
+                StoredTableType::Relation => {
+                    let path = self.namespace_manager.table_path(namespace, table_name, "rel");
+
+                    // Only load if file exists
+                    if path.exists() {
+                        let pool = self.get_or_create_pool(&path)?;
+                        let table = Arc::new(MvccTable::open(pool, self.tx_manager.clone(), meta_page_id)?);
+                        self.mvcc_tables.insert(name.clone(), table);
+
+                        self.tables.write().insert(
+                            name.clone(),
+                            TableInfo {
+                                name: name.clone(),
+                                storage_type: StorageType::Relational,
+                                path,
+                            },
+                        );
+
+                        // Initialize secondary index storage if table has indexes
+                        if !schema.indexes.is_empty() {
+                            self.initialize_table_indexes(name, &schema.indexes);
+                        }
+
+                        tracing::debug!("Loaded relational table: {}", name);
+                    } else {
+                        tracing::warn!("Schema exists for {} but data file missing at {:?}", name, path);
+                    }
+                }
+                StoredTableType::Document => {
+                    let path = self.namespace_manager.table_path(namespace, table_name, "doc");
+
+                    if path.exists() {
+                        let pool = self.get_or_create_pool(&path)?;
+                        let store = Arc::new(DocumentStore::open(pool, meta_page_id, false)?);
+                        self.document_stores.insert(name.clone(), store);
+
+                        self.tables.write().insert(
+                            name.clone(),
+                            TableInfo {
+                                name: name.clone(),
+                                storage_type: StorageType::Document,
+                                path,
+                            },
+                        );
+
+                        // Initialize secondary index storage if collection has indexes
+                        if !schema.indexes.is_empty() {
+                            self.initialize_table_indexes(name, &schema.indexes);
+                        }
+
+                        tracing::debug!("Loaded document store: {}", name);
+                    } else {
+                        tracing::warn!("Schema exists for {} but data file missing at {:?}", name, path);
+                    }
+                }
+                StoredTableType::Keyspace => {
+                    // Check if it's a disk keyspace (has a file)
+                    let path = self.namespace_manager.table_path(namespace, table_name, "ks");
+                    if path.exists() {
+                        let pool = self.get_or_create_pool(&path)?;
+                        let keyspace = Arc::new(Keyspace::open_disk(pool, meta_page_id)?);
+                        self.keyspaces.insert(name.clone(), keyspace);
+
+                        self.tables.write().insert(
+                            name.clone(),
+                            TableInfo {
+                                name: name.clone(),
+                                storage_type: StorageType::Keyspace,
+                                path,
+                            },
+                        );
+                        tracing::debug!("Loaded disk keyspace: {}", name);
+                    } else {
+                        // Memory keyspace, recreate empty
+                        let keyspace = Arc::new(Keyspace::memory());
+                        self.keyspaces.insert(name.clone(), keyspace);
+
+                        self.tables.write().insert(
+                            name.clone(),
+                            TableInfo {
+                                name: name.clone(),
+                                storage_type: StorageType::Keyspace,
+                                path: PathBuf::new(),
+                            },
+                        );
+                        tracing::debug!("Created memory keyspace: {}", name);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get the schema catalog
+    pub fn schema_catalog(&self) -> &Arc<SchemaCatalog> {
+        &self.schema_catalog
     }
 
     /// Get or create a buffer pool for a path.
@@ -183,6 +391,283 @@ impl StorageEngine {
 
         Ok(pool)
     }
+
+    // Secondary Index API
+
+    /// Initialize secondary index storage for a table's indexes.
+    fn initialize_table_indexes(&self, table: &str, indexes: &[super::schema::StoredIndex]) {
+        let table_indexes = self.secondary_indexes.entry(table.to_string()).or_default();
+        for idx in indexes {
+            table_indexes.entry(idx.name.clone()).or_insert_with(|| Arc::new(DashMap::new()));
+        }
+        tracing::debug!("Initialized {} indexes for table {}", indexes.len(), table);
+    }
+
+    /// Create a new secondary index on a table.
+    pub fn create_index(
+        &self,
+        table: &str,
+        index_name: &str,
+        columns: Vec<String>,
+        unique: bool,
+    ) -> Result<()> {
+        use super::schema::{StoredIndex, StoredIndexType};
+
+        // Get current schema
+        let schema = self.schema_catalog.get(table)
+            .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", table)))?;
+
+        // Check index doesn't already exist
+        if schema.indexes.iter().any(|idx| idx.name == index_name) {
+            return Err(MonoError::AlreadyExists(format!(
+                "Index '{}' already exists on table '{}'", index_name, table
+            )));
+        }
+
+        // Validate columns exist (for relational tables)
+        if !schema.columns.is_empty() {
+            for col in &columns {
+                if !schema.columns.iter().any(|c| &c.name == col) {
+                    return Err(MonoError::NotFound(format!(
+                        "Column '{}' not found in table '{}'", col, table
+                    )));
+                }
+            }
+        }
+
+        // Create the index definition
+        let new_index = StoredIndex {
+            name: index_name.to_string(),
+            columns: columns.clone(),
+            unique,
+            index_type: StoredIndexType::BTree,
+        };
+
+        // Update schema with new index
+        let mut new_schema = (*schema).clone();
+        new_schema.indexes.push(new_index);
+        self.schema_catalog.update(table, new_schema)?;
+
+        // Initialize in-memory index storage
+        let table_indexes = self.secondary_indexes.entry(table.to_string()).or_default();
+        table_indexes.insert(index_name.to_string(), Arc::new(DashMap::new()));
+
+        tracing::info!("Created index '{}' on table '{}' columns {:?}", index_name, table, columns);
+
+        Ok(())
+    }
+
+    /// Drop a secondary index from a table.
+    pub fn drop_index(&self, table: &str, index_name: &str) -> Result<()> {
+        // Get current schema
+        let schema = self.schema_catalog.get(table)
+            .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", table)))?;
+
+        // Find and remove the index
+        let idx_pos = schema.indexes.iter().position(|idx| idx.name == index_name)
+            .ok_or_else(|| MonoError::NotFound(format!(
+                "Index '{}' not found on table '{}'", index_name, table
+            )))?;
+
+        // Update schema without this index
+        let mut new_schema = (*schema).clone();
+        new_schema.indexes.remove(idx_pos);
+        self.schema_catalog.update(table, new_schema)?;
+
+        // Remove from in-memory storage
+        if let Some(table_indexes) = self.secondary_indexes.get(table) {
+            table_indexes.remove(index_name);
+        }
+
+        tracing::info!("Dropped index '{}' from table '{}'", index_name, table);
+
+        Ok(())
+    }
+
+    /// Encode a composite key from multiple values for index lookup.
+    pub fn encode_index_key(values: &[Value]) -> Vec<u8> {
+        let mut key = Vec::new();
+        for value in values {
+            let bytes = value.to_bytes();
+            // Length-prefix each value for unambiguous parsing
+            key.extend(&(bytes.len() as u32).to_le_bytes());
+            key.extend(&bytes);
+        }
+        key
+    }
+
+    /// Update secondary indexes after an insert or update.
+    pub fn update_secondary_indexes(
+        &self,
+        table: &str,
+        primary_key: &[u8],
+        row_data: &HashMap<String, Value>,
+    ) -> Result<()> {
+        // Get schema with index definitions
+        let schema = match self.schema_catalog.get(table) {
+            Some(s) => s,
+            None => return Ok(()), // No schema means no indexes
+        };
+
+        if schema.indexes.is_empty() {
+            return Ok(());
+        }
+
+        // Get or create table's index storage
+        let table_indexes = self.secondary_indexes.entry(table.to_string()).or_default();
+
+        for index in &schema.indexes {
+            // Extract values for the indexed columns
+            let index_values: Vec<Value> = index.columns
+                .iter()
+                .map(|col| row_data.get(col).cloned().unwrap_or(Value::Null))
+                .collect();
+
+            let index_key = Self::encode_index_key(&index_values);
+
+            // Get or create this specific index
+            let secondary_index = table_indexes
+                .entry(index.name.clone())
+                .or_insert_with(|| Arc::new(DashMap::new()));
+
+            // Add the primary key to the index
+            secondary_index
+                .entry(index_key)
+                .or_default()
+                .insert(primary_key.to_vec());
+        }
+
+        Ok(())
+    }
+
+    /// Remove entries from secondary indexes (called before delete).
+    pub fn remove_from_secondary_indexes(
+        &self,
+        table: &str,
+        primary_key: &[u8],
+        row_data: &HashMap<String, Value>,
+    ) -> Result<()> {
+        let schema = match self.schema_catalog.get(table) {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        if schema.indexes.is_empty() {
+            return Ok(());
+        }
+
+        let table_indexes = match self.secondary_indexes.get(table) {
+            Some(ti) => ti,
+            None => return Ok(()),
+        };
+
+        for index in &schema.indexes {
+            if let Some(secondary_index) = table_indexes.get(&index.name) {
+                // Extract index key from the row data
+                let index_values: Vec<Value> = index.columns
+                    .iter()
+                    .map(|col| row_data.get(col).cloned().unwrap_or(Value::Null))
+                    .collect();
+
+                let index_key = Self::encode_index_key(&index_values);
+
+                // Remove from index
+                if let Some(mut pk_set) = secondary_index.get_mut(&index_key) {
+                    pk_set.remove(primary_key);
+                    if pk_set.is_empty() {
+                        drop(pk_set);
+                        secondary_index.remove(&index_key);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check if a unique index would be violated by inserting a value.
+    pub fn check_unique_index_violation(
+        &self,
+        table: &str,
+        row_data: &HashMap<String, Value>,
+        exclude_pk: Option<&[u8]>,
+    ) -> Result<()> {
+        let schema = match self.schema_catalog.get(table) {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        let table_indexes = match self.secondary_indexes.get(table) {
+            Some(ti) => ti,
+            None => return Ok(()),
+        };
+
+        for index in schema.indexes.iter().filter(|idx| idx.unique) {
+            if let Some(secondary_index) = table_indexes.get(&index.name) {
+                let index_values: Vec<Value> = index.columns
+                    .iter()
+                    .map(|col| row_data.get(col).cloned().unwrap_or(Value::Null))
+                    .collect();
+
+                let index_key = Self::encode_index_key(&index_values);
+
+                if let Some(existing_pks) = secondary_index.get(&index_key) {
+                    // Check if any existing PK is not the one we're excluding (for updates)
+                    let has_conflict = match exclude_pk {
+                        Some(pk) => existing_pks.iter().any(|existing| existing != pk),
+                        None => !existing_pks.is_empty(),
+                    };
+
+                    if has_conflict {
+                        let col_values: Vec<String> = index.columns
+                            .iter()
+                            .zip(index_values.iter())
+                            .map(|(col, val)| format!("{}={:?}", col, val))
+                            .collect();
+                        return Err(MonoError::InvalidOperation(format!(
+                            "Unique constraint violation on index '{}': {}",
+                            index.name,
+                            col_values.join(", ")
+                        )));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Find rows by secondary index lookup.
+    pub fn find_by_index(
+        &self,
+        table: &str,
+        index_name: &str,
+        lookup_values: &[Value],
+    ) -> Result<Vec<Vec<u8>>> {
+        let table_indexes = self.secondary_indexes.get(table)
+            .ok_or_else(|| MonoError::NotFound(format!("No indexes on table '{}'", table)))?;
+
+        let secondary_index = table_indexes.get(index_name)
+            .ok_or_else(|| MonoError::NotFound(format!("Index '{}' not found", index_name)))?;
+
+        let index_key = Self::encode_index_key(lookup_values);
+
+        let primary_keys = secondary_index
+            .get(&index_key)
+            .map(|pks| pks.iter().cloned().collect())
+            .unwrap_or_default();
+
+        Ok(primary_keys)
+    }
+
+    /// Get all indexes for a table (for query planner).
+    pub fn get_indexes(&self, table: &str) -> Vec<super::schema::StoredIndex> {
+        self.schema_catalog
+            .get(table)
+            .map(|s| s.indexes.clone())
+            .unwrap_or_default()
+    }
+
     // Transaction API
 
     /// Begin a new transaction with default isolation level.
@@ -254,6 +739,7 @@ impl StorageEngine {
         }
 
         // Rollback in transaction manager
+        // Records created by this transaction will be invisible due to aborted_txs tracking
         self.tx_manager.rollback(tx_id)?;
 
         // Log to WAL
@@ -286,77 +772,122 @@ impl StorageEngine {
     // Table Management
 
     /// Create a relational (MVCC) table.
-    pub fn create_relational_table(&self, name: &str) -> Result<()> {
-        if self.tables.read().contains_key(name) {
-            return Err(MonoError::AlreadyExists(format!(
-                "Table '{}' already exists",
-                name
+    /// Name can be qualified (namespace.table) or unqualified (uses default namespace).
+    /// Returns the meta_page_id for the caller to update the schema.
+    pub fn create_relational_table(&self, name: &str) -> Result<u64> {
+        // Parse qualified name
+        let (namespace, table_name) = NamespaceManager::parse_qualified(name);
+        let qualified_name = format!("{}.{}", namespace, table_name);
+
+        // Verify namespace exists
+        if !self.namespace_manager.exists(namespace) {
+            return Err(MonoError::NotFound(format!(
+                "Namespace '{}' does not exist",
+                namespace
             )));
         }
 
-        let path = self.config.data_dir.join(format!("{}.rel", name));
+        if self.tables.read().contains_key(&qualified_name) {
+            return Err(MonoError::AlreadyExists(format!(
+                "Table '{}' already exists",
+                qualified_name
+            )));
+        }
+
+        // Use namespace directory for storage
+        let path = self.namespace_manager.table_path(namespace, table_name, "rel");
         let pool = self.get_or_create_pool(&path)?;
 
         let table = Arc::new(MvccTable::new(pool, self.tx_manager.clone())?);
-        self.mvcc_tables.insert(name.to_string(), table);
+        let meta_page_id = table.meta_page_id().0 as u64;
+        self.mvcc_tables.insert(qualified_name.clone(), table);
 
         self.tables.write().insert(
-            name.to_string(),
+            qualified_name.clone(),
             TableInfo {
-                name: name.to_string(),
+                name: qualified_name,
                 storage_type: StorageType::Relational,
                 path,
             },
         );
 
-        Ok(())
+        Ok(meta_page_id)
     }
 
     /// Create a document store.
-    pub fn create_document_store(&self, name: &str, keep_history: bool) -> Result<()> {
-        if self.tables.read().contains_key(name) {
-            return Err(MonoError::AlreadyExists(format!(
-                "Store '{}' already exists",
-                name
+    /// Name can be qualified (namespace.store) or unqualified (uses default namespace).
+    /// Returns the meta_page_id for the caller to update the schema.
+    pub fn create_document_store(&self, name: &str, keep_history: bool) -> Result<u64> {
+        // Parse qualified name
+        let (namespace, store_name) = NamespaceManager::parse_qualified(name);
+        let qualified_name = format!("{}.{}", namespace, store_name);
+
+        // Verify namespace exists
+        if !self.namespace_manager.exists(namespace) {
+            return Err(MonoError::NotFound(format!(
+                "Namespace '{}' does not exist",
+                namespace
             )));
         }
 
-        let path = self.config.data_dir.join(format!("{}.doc", name));
+        if self.tables.read().contains_key(&qualified_name) {
+            return Err(MonoError::AlreadyExists(format!(
+                "Store '{}' already exists",
+                qualified_name
+            )));
+        }
+
+        // Use namespace directory for storage
+        let path = self.namespace_manager.table_path(namespace, store_name, "doc");
         let pool = self.get_or_create_pool(&path)?;
 
         let store = Arc::new(DocumentStore::new(pool, keep_history)?);
-        self.document_stores.insert(name.to_string(), store);
+        let meta_page_id = store.meta_page_id().0 as u64;
+        self.document_stores.insert(qualified_name.clone(), store);
 
         self.tables.write().insert(
-            name.to_string(),
+            qualified_name.clone(),
             TableInfo {
-                name: name.to_string(),
+                name: qualified_name,
                 storage_type: StorageType::Document,
                 path,
             },
         );
 
-        Ok(())
+        Ok(meta_page_id)
     }
 
     /// Create a memory-backed keyspace.
+    /// Name can be qualified (namespace.keyspace) or unqualified (uses default namespace).
     pub fn create_memory_keyspace(&self, name: &str) -> Result<()> {
-        if self.tables.read().contains_key(name) {
+        // Parse qualified name
+        let (namespace, ks_name) = NamespaceManager::parse_qualified(name);
+        let qualified_name = format!("{}.{}", namespace, ks_name);
+
+        // Verify namespace exists
+        if !self.namespace_manager.exists(namespace) {
+            return Err(MonoError::NotFound(format!(
+                "Namespace '{}' does not exist",
+                namespace
+            )));
+        }
+
+        if self.tables.read().contains_key(&qualified_name) {
             return Err(MonoError::AlreadyExists(format!(
                 "Keyspace '{}' already exists",
-                name
+                qualified_name
             )));
         }
 
         let keyspace = Arc::new(Keyspace::memory());
-        self.keyspaces.insert(name.to_string(), keyspace);
+        self.keyspaces.insert(qualified_name.clone(), keyspace);
 
         self.tables.write().insert(
-            name.to_string(),
+            qualified_name.clone(),
             TableInfo {
-                name: name.to_string(),
+                name: qualified_name,
                 storage_type: StorageType::Keyspace,
-                path: PathBuf::new(),
+                path: PathBuf::new(), // Memory keyspaces have no path
             },
         );
 
@@ -364,49 +895,67 @@ impl StorageEngine {
     }
 
     /// Create a disk-backed keyspace.
-    pub fn create_disk_keyspace(&self, name: &str) -> Result<()> {
-        if self.tables.read().contains_key(name) {
-            return Err(MonoError::AlreadyExists(format!(
-                "Keyspace '{}' already exists",
-                name
+    /// Name can be qualified (namespace.keyspace) or unqualified (uses default namespace).
+    /// Returns the meta_page_id for the caller to update the schema.
+    pub fn create_disk_keyspace(&self, name: &str) -> Result<u64> {
+        // Parse qualified name
+        let (namespace, ks_name) = NamespaceManager::parse_qualified(name);
+        let qualified_name = format!("{}.{}", namespace, ks_name);
+
+        // Verify namespace exists
+        if !self.namespace_manager.exists(namespace) {
+            return Err(MonoError::NotFound(format!(
+                "Namespace '{}' does not exist",
+                namespace
             )));
         }
 
-        let path = self.config.data_dir.join(format!("{}.ks", name));
+        if self.tables.read().contains_key(&qualified_name) {
+            return Err(MonoError::AlreadyExists(format!(
+                "Keyspace '{}' already exists",
+                qualified_name
+            )));
+        }
+
+        // Use namespace directory for storage
+        let path = self.namespace_manager.table_path(namespace, ks_name, "ks");
         let pool = self.get_or_create_pool(&path)?;
 
         let keyspace = Arc::new(Keyspace::disk(pool)?);
-        self.keyspaces.insert(name.to_string(), keyspace);
+        // Disk keyspaces use BTree internally, get meta_page_id
+        let meta_page_id = keyspace.meta_page_id().map(|p| p.0 as u64).unwrap_or(0);
+        self.keyspaces.insert(qualified_name.clone(), keyspace);
 
         self.tables.write().insert(
-            name.to_string(),
+            qualified_name.clone(),
             TableInfo {
-                name: name.to_string(),
+                name: qualified_name,
                 storage_type: StorageType::Keyspace,
                 path,
             },
         );
 
-        Ok(())
+        Ok(meta_page_id)
     }
 
     /// Drop a table/store/keyspace.
     pub fn drop_table(&self, name: &str) -> Result<()> {
+        let qualified = self.qualify_table_name(name);
         let info = self
             .tables
             .write()
-            .remove(name)
-            .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", name)))?;
+            .remove(&qualified)
+            .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", qualified)))?;
 
         match info.storage_type {
             StorageType::Relational => {
-                self.mvcc_tables.remove(name);
+                self.mvcc_tables.remove(&qualified);
             }
             StorageType::Document => {
-                self.document_stores.remove(name);
+                self.document_stores.remove(&qualified);
             }
             StorageType::Keyspace => {
-                self.keyspaces.remove(name);
+                self.keyspaces.remove(&qualified);
             }
         }
 
@@ -417,7 +966,102 @@ impl StorageEngine {
             self.disk_managers.remove(&info.path);
         }
 
+        // Remove from schema catalog
+        self.schema_catalog.remove(&qualified)?;
+
         Ok(())
+    }
+
+    /// Rename a table/store/keyspace.
+    pub fn rename_table(&self, old_name: &str, new_name: &str) -> Result<()> {
+        let old_qualified = self.qualify_table_name(old_name);
+        let new_qualified = self.qualify_table_name(new_name);
+
+        // Check old table exists
+        let info = {
+            let tables = self.tables.read();
+            tables
+                .get(&old_qualified)
+                .cloned()
+                .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", old_qualified)))?
+        };
+
+        // Check new name doesn't exist
+        if self.tables.read().contains_key(&new_qualified) {
+            return Err(MonoError::AlreadyExists(format!(
+                "Table '{}' already exists",
+                new_qualified
+            )));
+        }
+
+        // Parse namespaces for file paths
+        let (_old_ns, _old_table) = NamespaceManager::parse_qualified(&old_qualified);
+        let (new_ns, new_table) = NamespaceManager::parse_qualified(&new_qualified);
+
+        // Compute new file path
+        let extension = info.path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let new_path = self.namespace_manager.table_path(new_ns, new_table, extension);
+
+        // Rename the underlying storage structures
+        match info.storage_type {
+            StorageType::Relational => {
+                if let Some((_, table)) = self.mvcc_tables.remove(&old_qualified) {
+                    self.mvcc_tables.insert(new_qualified.clone(), table);
+                }
+            }
+            StorageType::Document => {
+                if let Some((_, store)) = self.document_stores.remove(&old_qualified) {
+                    self.document_stores.insert(new_qualified.clone(), store);
+                }
+            }
+            StorageType::Keyspace => {
+                if let Some((_, ks)) = self.keyspaces.remove(&old_qualified) {
+                    self.keyspaces.insert(new_qualified.clone(), ks);
+                }
+            }
+        }
+
+        // Rename file on disk if it exists
+        if !info.path.as_os_str().is_empty() && info.path.exists() {
+            // Ensure target directory exists
+            if let Some(parent) = new_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            std::fs::rename(&info.path, &new_path)
+                .map_err(|e| MonoError::Io(format!("Failed to rename table file: {}", e)))?;
+
+            // Update buffer pool and disk manager references
+            if let Some((_, pool)) = self.buffer_pools.remove(&info.path) {
+                self.buffer_pools.insert(new_path.clone(), pool);
+            }
+            if let Some((_, dm)) = self.disk_managers.remove(&info.path) {
+                self.disk_managers.insert(new_path.clone(), dm);
+            }
+        }
+
+        // Update tables map
+        {
+            let mut tables = self.tables.write();
+            tables.remove(&old_qualified);
+            tables.insert(
+                new_qualified.clone(),
+                TableInfo {
+                    name: new_qualified.clone(),
+                    storage_type: info.storage_type,
+                    path: new_path,
+                },
+            );
+        }
+
+        // Update schema catalog
+        self.schema_catalog.rename_table(&old_qualified, &new_qualified)?;
+
+        Ok(())
+    }
+
+    /// Get the storage type of a table.
+    pub fn get_storage_type(&self, name: &str) -> Option<StorageType> {
+        self.tables.read().get(name).map(|info| info.storage_type.clone())
     }
 
     /// List all tables.
@@ -438,8 +1082,16 @@ impl StorageEngine {
 
     /// Get table info by name.
     pub fn get_table_info(&self, name: &str) -> Option<TableInfo> {
-        self.tables.read().get(name).cloned()
+        let qualified = self.qualify_table_name(name);
+        self.tables.read().get(&qualified).cloned()
     }
+
+    /// Qualify a table name with default namespace if not already qualified.
+    fn qualify_table_name(&self, name: &str) -> String {
+        let (namespace, table) = NamespaceManager::parse_qualified(name);
+        format!("{}.{}", namespace, table)
+    }
+
     // Relational (MVCC) Operations
 
     /// Write a key-value pair in an MVCC table (insert or update).
@@ -450,11 +1102,12 @@ impl StorageEngine {
             ));
         }
 
+        let qualified = self.qualify_table_name(table);
         let snapshot = self.get_snapshot(tx_id)?;
         let mvcc = self
             .mvcc_tables
-            .get(table)
-            .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", table)))?;
+            .get(&qualified)
+            .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", qualified)))?;
 
         mvcc.write(&snapshot, key.clone(), value.clone())?;
 
@@ -468,11 +1121,12 @@ impl StorageEngine {
 
     /// Read a value from an MVCC table within a transaction.
     pub fn mvcc_read(&self, tx_id: u64, table: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let qualified = self.qualify_table_name(table);
         let snapshot = self.get_snapshot(tx_id)?;
         let mvcc = self
             .mvcc_tables
-            .get(table)
-            .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", table)))?;
+            .get(&qualified)
+            .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", qualified)))?;
 
         mvcc.read(&snapshot, &key.to_vec())
     }
@@ -485,17 +1139,18 @@ impl StorageEngine {
             ));
         }
 
+        let qualified = self.qualify_table_name(table);
         let snapshot = self.get_snapshot(tx_id)?;
         let mvcc = self
             .mvcc_tables
-            .get(table)
-            .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", table)))?;
+            .get(&qualified)
+            .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", qualified)))?;
 
         let deleted = mvcc.delete(&snapshot, &key.to_vec())?;
 
         // Log to WAL
         if deleted && let Some(wal) = &self.wal {
-            wal.log_delete::<Vec<u8>>(tx_id, table, &key.to_vec())?;
+            wal.log_delete::<Vec<u8>>(tx_id, &qualified, &key.to_vec())?;
         }
 
         Ok(deleted)
@@ -503,11 +1158,12 @@ impl StorageEngine {
 
     /// Scan all visible records in an MVCC table.
     pub fn mvcc_scan(&self, tx_id: u64, table: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let qualified = self.qualify_table_name(table);
         let snapshot = self.get_snapshot(tx_id)?;
         let mvcc = self
             .mvcc_tables
-            .get(table)
-            .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", table)))?;
+            .get(&qualified)
+            .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", qualified)))?;
 
         mvcc.scan(&snapshot)
     }
@@ -520,11 +1176,12 @@ impl StorageEngine {
         start: &[u8],
         end: &[u8],
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let qualified = self.qualify_table_name(table);
         let snapshot = self.get_snapshot(tx_id)?;
         let mvcc = self
             .mvcc_tables
-            .get(table)
-            .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", table)))?;
+            .get(&qualified)
+            .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", qualified)))?;
 
         mvcc.range_scan(&snapshot, &start.to_vec(), &end.to_vec())
     }
@@ -532,19 +1189,21 @@ impl StorageEngine {
 
     /// Insert a document. Returns the revision number.
     pub fn doc_insert(&self, store: &str, key: Vec<u8>, value: Vec<u8>) -> Result<u64> {
+        let qualified = self.qualify_table_name(store);
         let doc_store = self
             .document_stores
-            .get(store)
-            .ok_or_else(|| MonoError::NotFound(format!("Document store '{}' not found", store)))?;
+            .get(&qualified)
+            .ok_or_else(|| MonoError::NotFound(format!("Document store '{}' not found", qualified)))?;
 
         doc_store.insert(key, value)
     }
 
     /// Get a document. Returns the value and revision if it exists and is not deleted.
     pub fn doc_get(&self, store: &str, key: &[u8]) -> Result<Option<(Vec<u8>, u64)>> {
+        let _qualified = self.qualify_table_name(store);
         let doc_store = self
             .document_stores
-            .get(store)
+            .get(&self.qualify_table_name(store))
             .ok_or_else(|| MonoError::NotFound(format!("Document store '{}' not found", store)))?;
 
         match doc_store.get(&key.to_vec())? {
@@ -561,7 +1220,7 @@ impl StorageEngine {
     ) -> Result<Option<VersionedDocument<Vec<u8>>>> {
         let doc_store = self
             .document_stores
-            .get(store)
+            .get(&self.qualify_table_name(store))
             .ok_or_else(|| MonoError::NotFound(format!("Document store '{}' not found", store)))?;
 
         doc_store.get(&key.to_vec())
@@ -578,7 +1237,7 @@ impl StorageEngine {
     ) -> Result<u64> {
         let doc_store = self
             .document_stores
-            .get(store)
+            .get(&self.qualify_table_name(store))
             .ok_or_else(|| MonoError::NotFound(format!("Document store '{}' not found", store)))?;
 
         doc_store.update(&key.to_vec(), value, expected_revision)
@@ -588,7 +1247,7 @@ impl StorageEngine {
     pub fn doc_delete(&self, store: &str, key: &[u8], expected_revision: u64) -> Result<bool> {
         let doc_store = self
             .document_stores
-            .get(store)
+            .get(&self.qualify_table_name(store))
             .ok_or_else(|| MonoError::NotFound(format!("Document store '{}' not found", store)))?;
 
         doc_store.delete(&key.to_vec(), expected_revision)
@@ -598,7 +1257,7 @@ impl StorageEngine {
     pub fn doc_upsert(&self, store: &str, key: Vec<u8>, value: Vec<u8>) -> Result<u64> {
         let doc_store = self
             .document_stores
-            .get(store)
+            .get(&self.qualify_table_name(store))
             .ok_or_else(|| MonoError::NotFound(format!("Document store '{}' not found", store)))?;
 
         doc_store.upsert(key, value)
@@ -613,7 +1272,7 @@ impl StorageEngine {
     ) -> Result<Vec<HistoryEntry<Vec<u8>>>> {
         let doc_store = self
             .document_stores
-            .get(store)
+            .get(&self.qualify_table_name(store))
             .ok_or_else(|| MonoError::NotFound(format!("Document store '{}' not found", store)))?;
 
         let key_vec = key.to_vec();
@@ -647,18 +1306,34 @@ impl StorageEngine {
     ) -> Result<Option<Vec<u8>>> {
         let doc_store = self
             .document_stores
-            .get(store)
+            .get(&self.qualify_table_name(store))
             .ok_or_else(|| MonoError::NotFound(format!("Document store '{}' not found", store)))?;
 
         doc_store.get_revision(&key.to_vec(), revision)
     }
+
+    /// Scan all documents in a store.
+    pub fn doc_scan(&self, store: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let doc_store = self
+            .document_stores
+            .get(&self.qualify_table_name(store))
+            .ok_or_else(|| MonoError::NotFound(format!("Document store '{}' not found", store)))?;
+
+        let docs = doc_store.scan()?;
+        Ok(docs
+            .into_iter()
+            .filter(|(_, doc)| !doc.deleted)
+            .map(|(k, doc)| (k, doc.data))
+            .collect())
+    }
+
     // Keyspace Operations
 
     /// Get a value from a keyspace.
     pub fn ks_get(&self, name: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let ks = self
             .keyspaces
-            .get(name)
+            .get(&self.qualify_table_name(name))
             .ok_or_else(|| MonoError::NotFound(format!("Keyspace '{}' not found", name)))?;
 
         ks.get(&key.to_vec())
@@ -668,7 +1343,7 @@ impl StorageEngine {
     pub fn ks_set(&self, name: &str, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
         let ks = self
             .keyspaces
-            .get(name)
+            .get(&self.qualify_table_name(name))
             .ok_or_else(|| MonoError::NotFound(format!("Keyspace '{}' not found", name)))?;
 
         ks.set(key, value)
@@ -684,7 +1359,7 @@ impl StorageEngine {
     ) -> Result<()> {
         let ks = self
             .keyspaces
-            .get(name)
+            .get(&self.qualify_table_name(name))
             .ok_or_else(|| MonoError::NotFound(format!("Keyspace '{}' not found", name)))?;
 
         ks.set_with_ttl(key, value, ttl_ms)
@@ -694,7 +1369,7 @@ impl StorageEngine {
     pub fn ks_delete(&self, name: &str, key: &[u8]) -> Result<bool> {
         let ks = self
             .keyspaces
-            .get(name)
+            .get(&self.qualify_table_name(name))
             .ok_or_else(|| MonoError::NotFound(format!("Keyspace '{}' not found", name)))?;
 
         ks.delete(&key.to_vec())
@@ -704,7 +1379,7 @@ impl StorageEngine {
     pub fn ks_exists(&self, name: &str, key: &[u8]) -> Result<bool> {
         let ks = self
             .keyspaces
-            .get(name)
+            .get(&self.qualify_table_name(name))
             .ok_or_else(|| MonoError::NotFound(format!("Keyspace '{}' not found", name)))?;
 
         ks.exists(&key.to_vec())
@@ -714,7 +1389,7 @@ impl StorageEngine {
     pub fn ks_ttl(&self, name: &str, key: &[u8]) -> Result<Option<u64>> {
         let ks = self
             .keyspaces
-            .get(name)
+            .get(&self.qualify_table_name(name))
             .ok_or_else(|| MonoError::NotFound(format!("Keyspace '{}' not found", name)))?;
 
         ks.ttl(&key.to_vec())
@@ -724,11 +1399,29 @@ impl StorageEngine {
     pub fn ks_cleanup(&self, name: &str) -> Result<usize> {
         let ks = self
             .keyspaces
-            .get(name)
+            .get(&self.qualify_table_name(name))
             .ok_or_else(|| MonoError::NotFound(format!("Keyspace '{}' not found", name)))?;
 
         ks.cleanup()
     }
+
+    /// Scan all key-value pairs in a keyspace.
+    pub fn ks_scan(&self, name: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let ks = self
+            .keyspaces
+            .get(&self.qualify_table_name(name))
+            .ok_or_else(|| MonoError::NotFound(format!("Keyspace '{}' not found", name)))?;
+
+        let keys = ks.keys()?;
+        let mut results = Vec::new();
+        for key in keys {
+            if let Some(value) = ks.get(&key)? {
+                results.push((key, value));
+            }
+        }
+        Ok(results)
+    }
+
     // Maintenance Operations
 
     /// Flush all buffers to disk.
@@ -1092,10 +1785,18 @@ mod tests {
         let tables = engine.list_tables();
         assert_eq!(tables.len(), 3);
 
+        // Tables are stored with qualified names (namespace.table)
         let names: Vec<&str> = tables.iter().map(|t| t.name.as_str()).collect();
-        assert!(names.contains(&"users"));
-        assert!(names.contains(&"posts"));
-        assert!(names.contains(&"sessions"));
+        assert!(names.contains(&"default.users"));
+        assert!(names.contains(&"default.posts"));
+        assert!(names.contains(&"default.sessions"));
+
+        // Test list_tables_in_namespace
+        let default_tables = engine.list_tables_in_namespace("default");
+        assert_eq!(default_tables.len(), 3);
+
+        let empty_tables = engine.list_tables_in_namespace("nonexistent");
+        assert_eq!(empty_tables.len(), 0);
     }
 
     #[test]

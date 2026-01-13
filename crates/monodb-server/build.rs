@@ -32,6 +32,8 @@ fn generate_keywords() {
     map.entry(b"with", "TokenKind::Keyword");
     map.entry(b"set", "TokenKind::Keyword");
     map.entry(b"as", "TokenKind::Keyword");
+    map.entry(b"to", "TokenKind::Keyword");
+    map.entry(b"add", "TokenKind::Keyword");
 
     // Table/structure keywords
     map.entry(b"table", "TokenKind::Keyword");
@@ -53,7 +55,13 @@ fn generate_keywords() {
     map.entry(b"decimal", "TokenKind::Keyword");
     map.entry(b"double", "TokenKind::Keyword");
     map.entry(b"date", "TokenKind::Keyword");
+    map.entry(b"datetime", "TokenKind::Keyword");
+    map.entry(b"timestamp", "TokenKind::Keyword");
+    map.entry(b"time", "TokenKind::Keyword");
     map.entry(b"boolean", "TokenKind::Keyword");
+    map.entry(b"bool", "TokenKind::Keyword");
+    map.entry(b"binary", "TokenKind::Keyword");
+    map.entry(b"uuid", "TokenKind::Keyword");
     map.entry(b"map", "TokenKind::Keyword");
     map.entry(b"list", "TokenKind::Keyword");
 
@@ -88,6 +96,12 @@ fn generate_keywords() {
 
     // Schema inspection
     map.entry(b"describe", "TokenKind::Keyword");
+
+    // Schema modification
+    map.entry(b"alter", "TokenKind::Keyword");
+    map.entry(b"nullable", "TokenKind::Keyword");
+    map.entry(b"type", "TokenKind::Keyword");
+    map.entry(b"rename", "TokenKind::Keyword");
 
     // Aggregation
     map.entry(b"count", "TokenKind::Keyword");

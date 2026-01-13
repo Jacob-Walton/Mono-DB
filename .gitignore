@@ -17,3 +17,4 @@ crates/monodb-server/Temp*
 certs/
 local/
 .zed/
+.mdb_history

@@ -22,6 +22,9 @@ mod mvcc;
 // Durability
 mod wal;
 
+// Schema persistence
+pub mod schema;
+
 // Unified interface
 pub mod engine;
 
@@ -34,6 +37,10 @@ pub use engine::{StorageConfig, StorageEngine, StorageStats, StorageType, TableI
 pub use keyspace::{DiskKeyspace, Keyspace, KeyspaceBackend, MemoryKeyspace, TtlEntry};
 pub use mvcc::{MvccRecord, MvccTable, Snapshot, TransactionManager, TxState};
 pub use page::{DiskPage, PAGE_SIZE, PageHeader, PageId, PageType, Slot};
+pub use schema::{
+    SchemaCatalog, SchemaVersion, StoredColumnSchema, StoredDataType, StoredTableSchema,
+    StoredTableType,
+};
 pub use traits::{
     BufferPool as BufferPoolTrait, IsolationLevel, MvccStore, PageStore, Serializable, Tree,
     VersionedStore,

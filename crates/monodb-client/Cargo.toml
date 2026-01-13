@@ -6,4 +6,18 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+name = "monodb_client"
+path = "src/lib.rs"
+
 [dependencies]
+monodb-common = { path = "../monodb-common" }
+tokio.workspace = true
+bytes.workspace = true
+parking_lot.workspace = true
+indexmap.workspace = true
+
+# TLS support
+rustls.workspace = true
+rustls-pemfile = "2"
+tokio-rustls.workspace = true

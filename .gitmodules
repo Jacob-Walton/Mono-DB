@@ -1,0 +1,3 @@
+[submodule "monodb-admin"]
+	path = monodb-admin
+	url = https://git.konpeki.co.uk/jacob/prototype_3_monodb_admin

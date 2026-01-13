@@ -141,6 +141,62 @@ impl std::fmt::Display for Ident {
     }
 }
 
+/// Qualified identifier with optional namespace prefix.
+/// Represents names like "namespace.table" or just "table".
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct QualifiedIdent {
+    /// Optional namespace prefix (e.g., "myapp" in "myapp.users")
+    pub namespace: Option<Ident>,
+    /// The actual name (e.g., "users")
+    pub name: Ident,
+}
+
+impl QualifiedIdent {
+    /// Create a new qualified identifier with no namespace.
+    pub fn simple(name: impl Into<Ident>) -> Self {
+        Self {
+            namespace: None,
+            name: name.into(),
+        }
+    }
+
+    /// Create a new qualified identifier with a namespace.
+    pub fn qualified(namespace: impl Into<Ident>, name: impl Into<Ident>) -> Self {
+        Self {
+            namespace: Some(namespace.into()),
+            name: name.into(),
+        }
+    }
+
+    /// Get the full qualified name as a string (namespace.name or just name).
+    pub fn full_name(&self) -> String {
+        if let Some(ns) = &self.namespace {
+            format!("{}.{}", ns, self.name)
+        } else {
+            self.name.to_string()
+        }
+    }
+
+    /// Get the full qualified name with a default namespace if none specified.
+    pub fn full_name_with_default(&self, default_ns: &str) -> String {
+        if let Some(ns) = &self.namespace {
+            format!("{}.{}", ns, self.name)
+        } else {
+            format!("{}.{}", default_ns, self.name)
+        }
+    }
+}
+
+impl std::fmt::Display for QualifiedIdent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(ns) = &self.namespace {
+            write!(f, "{}.{}", ns, self.name)
+        } else {
+            write!(f, "{}", self.name)
+        }
+    }
+}
+
 // Top-Level Statement Types
 
 /// Top-level parsed statement (query, mutation, DDL, transaction, or control).
@@ -291,13 +347,16 @@ pub struct Assignment {
 
 // Data definition language (DDL) statements
 
-/// DDL statements for creating and dropping tables and indexes.
+/// DDL statements for creating and dropping tables, indexes, and namespaces.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum DdlStatement {
     CreateTable(CreateTableDdl),
     DropTable(DropTableDdl),
+    AlterTable(AlterTableDdl),
     CreateIndex(CreateIndexDdl),
     DropIndex(DropIndexDdl),
+    CreateNamespace(CreateNamespaceDdl),
+    DropNamespace(DropNamespaceDdl),
 }
 
 /// CREATE TABLE statement with columns and constraints.
@@ -318,6 +377,52 @@ pub struct DropTableDdl {
     pub if_exists: bool,
 }
 
+/// ALTER TABLE statement for schema modifications.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct AlterTableDdl {
+    pub table: Spanned<Ident>,
+    pub operations: Vec<AlterTableOperation>,
+}
+
+/// Individual schema modification operations.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub enum AlterTableOperation {
+    /// Add new columns to the table.
+    AddColumns(Vec<ColumnDef>),
+    /// Drop columns from the table.
+    DropColumns(Vec<Spanned<Ident>>),
+    /// Rename columns (old_name, new_name).
+    RenameColumns(Vec<(Spanned<Ident>, Spanned<Ident>)>),
+    /// Rename the table itself.
+    RenameTable(Spanned<Ident>),
+    /// Alter column properties.
+    AlterColumns(Vec<ColumnAlteration>),
+}
+
+/// Individual column property alteration.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct ColumnAlteration {
+    /// Column name to alter.
+    pub column: Spanned<Ident>,
+    /// The alteration to apply.
+    pub action: ColumnAlterAction,
+}
+
+/// Actions that can be performed on a column.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub enum ColumnAlterAction {
+    /// Remove the default value.
+    RemoveDefault,
+    /// Set a new default value.
+    SetDefault(Spanned<Expr>),
+    /// Make the column nullable.
+    SetNullable,
+    /// Make the column required (not null).
+    SetRequired,
+    /// Change the column's data type.
+    SetType(DataType),
+}
+
 /// CREATE INDEX statement to create an index on one or more columns.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct CreateIndexDdl {
@@ -333,6 +438,22 @@ pub struct CreateIndexDdl {
 pub struct DropIndexDdl {
     pub name: Spanned<Ident>,
     pub table: Spanned<Ident>,
+    pub if_exists: bool,
+}
+
+/// CREATE NAMESPACE statement.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct CreateNamespaceDdl {
+    pub name: Spanned<Ident>,
+    pub description: Option<Arc<str>>,
+    pub if_not_exists: bool,
+}
+
+/// DROP NAMESPACE statement.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct DropNamespaceDdl {
+    pub name: Spanned<Ident>,
+    pub force: bool,
     pub if_exists: bool,
 }
 

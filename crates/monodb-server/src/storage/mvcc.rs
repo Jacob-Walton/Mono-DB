@@ -49,52 +49,87 @@ impl<V> MvccRecord<V> {
 
     /// Check if this record is visible to a transaction at the given snapshot.
     pub fn is_visible(&self, snapshot: &Snapshot, tx_manager: &TransactionManager) -> bool {
-        // Rule 1: xmin must be committed before our snapshot
-        if self.xmin == snapshot.tx_id {
-            // Our own insert - visible if not deleted by us
-            return self.xmax == 0 || self.xmax != snapshot.tx_id;
-        }
-
-        // xmin must be committed
-        if !tx_manager.is_committed(self.xmin) {
+        // Check visibility of INSERT (xmin)
+        let insert_visible = self.is_xmin_visible(snapshot, tx_manager);
+        if !insert_visible {
             return false;
         }
 
-        // xmin must have committed before our snapshot started
-        if self.cmin > snapshot.start_ts {
-            return false;
-        }
-
-        // xmin must not be in our active list
-        if snapshot.active_txs.contains(&self.xmin) {
-            return false;
-        }
-
-        // Rule 2: xmax must be either 0 or not visible to us
+        // Check visibility of DELETE (xmax)
         if self.xmax == 0 {
             return true; // Not deleted
         }
 
+        // Check if deletion is visible
+        !self.is_xmax_visible(snapshot, tx_manager)
+    }
+
+    /// Check if the creating transaction (xmin) makes this record visible.
+    fn is_xmin_visible(&self, snapshot: &Snapshot, tx_manager: &TransactionManager) -> bool {
+        // Our own write is always visible
+        if self.xmin == snapshot.tx_id {
+            return true;
+        }
+
+        // Look up the creating transaction
+        if let Some(creator_tx) = tx_manager.get(self.xmin) {
+            match creator_tx.status {
+                TxState::Committed => {
+                    // Visible if committed before our snapshot started
+                    if let Some(commit_ts) = creator_tx.commit_ts {
+                        commit_ts <= snapshot.start_ts
+                    } else {
+                        false // Shouldn't happen for committed tx
+                    }
+                }
+                TxState::Active => {
+                    // Only visible if it's our own transaction (checked above)
+                    false
+                }
+                TxState::Aborted => false,
+            }
+        } else {
+            // Transaction not in manager, assume it's an old committed transaction
+            // whose entry was cleaned up. The xmin IS the commit_ts in this case.
+            // For old data, cmin stores the commit timestamp.
+            if self.cmin > 0 {
+                self.cmin <= snapshot.start_ts
+            } else {
+                // No cmin recorded, assume visible if xmin < our start_ts
+                self.xmin <= snapshot.start_ts
+            }
+        }
+    }
+
+    /// Check if the deleting transaction (xmax) makes this record invisible.
+    fn is_xmax_visible(&self, snapshot: &Snapshot, tx_manager: &TransactionManager) -> bool {
+        // Our own delete is visible to us
         if self.xmax == snapshot.tx_id {
-            return false; // Deleted by us
+            return true;
         }
 
-        // xmax must be committed to make this invisible
-        if !tx_manager.is_committed(self.xmax) {
-            return true; // Deleter not committed yet
+        // Look up the deleting transaction
+        if let Some(deleter_tx) = tx_manager.get(self.xmax) {
+            match deleter_tx.status {
+                TxState::Committed => {
+                    // Deletion visible if committed before our snapshot
+                    if let Some(commit_ts) = deleter_tx.commit_ts {
+                        commit_ts <= snapshot.start_ts
+                    } else {
+                        false
+                    }
+                }
+                TxState::Active => false, // Active delete not visible
+                TxState::Aborted => false, // Aborted delete not visible
+            }
+        } else {
+            // Old committed deletion
+            if self.cmax > 0 {
+                self.cmax <= snapshot.start_ts
+            } else {
+                self.xmax <= snapshot.start_ts
+            }
         }
-
-        // xmax must have committed before our snapshot
-        if self.cmax > snapshot.start_ts {
-            return true; // Deleted after our snapshot
-        }
-
-        // xmax must not be in our active list
-        if snapshot.active_txs.contains(&self.xmax) {
-            return true; // Deleter was active when we started
-        }
-
-        false // Deleted and visible to us
     }
 
     /// Mark this record as deleted by a transaction.
@@ -177,7 +212,7 @@ impl Snapshot {
     }
 }
 
-// Transaction State
+// Transaction State (matching P2's TxStatus)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TxState {
     /// Transaction is active.
@@ -188,37 +223,47 @@ pub enum TxState {
     Aborted,
 }
 
-/// Internal transaction metadata.
+/// Transaction metadata (matching P2's Transaction struct).
 #[derive(Debug, Clone)]
-struct TxInfo {
+pub struct TxInfo {
     /// Transaction ID.
-    id: TxId,
-    /// Current state.
-    state: TxState,
+    pub tx_id: TxId,
     /// Start timestamp.
-    start_ts: Timestamp,
-    /// Commit timestamp (0 if not committed).
-    commit_ts: Timestamp,
+    pub start_ts: Timestamp,
+    /// Commit timestamp (None if not committed).
+    pub commit_ts: Option<Timestamp>,
+    /// Current status.
+    pub status: TxState,
     /// Isolation level.
-    isolation: IsolationLevel,
+    pub isolation: IsolationLevel,
     /// Read-only flag.
-    read_only: bool,
+    pub read_only: bool,
     /// Write set: keys modified by this transaction.
-    write_set: HashSet<Vec<u8>>,
+    pub write_set: HashSet<Vec<u8>>,
 }
 
-// Transaction Manager
+impl TxInfo {
+    fn new(tx_id: TxId, start_ts: Timestamp, isolation: IsolationLevel, read_only: bool) -> Self {
+        Self {
+            tx_id,
+            start_ts,
+            commit_ts: None,
+            status: TxState::Active,
+            isolation,
+            read_only,
+            write_set: HashSet::new(),
+        }
+    }
+}
+
+// Transaction Manager (simplified like P2)
 pub struct TransactionManager {
-    /// Next transaction ID.
-    next_tx_id: AtomicU64,
-    /// Next timestamp (for ordering).
-    next_timestamp: AtomicU64,
-    /// Active transactions.
-    active_txs: DashMap<TxId, TxInfo>,
-    /// Recently committed transactions (for visibility checks).
-    committed_txs: DashMap<TxId, Timestamp>,
-    /// Minimum active transaction ID (for garbage collection).
-    min_active_tx: AtomicU64,
+    /// Monotonically increasing timestamp generator.
+    next_ts: AtomicU64,
+    /// All transactions (active, committed, and recently aborted).
+    transactions: DashMap<TxId, TxInfo>,
+    /// Oldest active transaction timestamp (for GC).
+    oldest_active_ts: AtomicU64,
     /// Garbage collection channel.
     gc_sender: Option<Sender<GcTask>>,
     /// GC thread handle.
@@ -230,14 +275,25 @@ pub struct TransactionManager {
 }
 
 impl TransactionManager {
+    /// Get initial timestamp based on wall clock time.
+    /// This ensures new transactions have timestamps greater than any
+    /// previously committed data, even across server restarts.
+    fn initial_timestamp() -> u64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        // Use milliseconds since epoch as base timestamp
+        // This gives us ~300 years of headroom and survives restarts
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(1)
+    }
+
     /// Create a new transaction manager.
     pub fn new() -> Self {
         Self {
-            next_tx_id: AtomicU64::new(1),
-            next_timestamp: AtomicU64::new(1),
-            active_txs: DashMap::new(),
-            committed_txs: DashMap::new(),
-            min_active_tx: AtomicU64::new(u64::MAX),
+            next_ts: AtomicU64::new(Self::initial_timestamp()),
+            transactions: DashMap::new(),
+            oldest_active_ts: AtomicU64::new(u64::MAX),
             gc_sender: None,
             gc_handle: Mutex::new(None),
             shutdown_flag: AtomicBool::new(false),
@@ -250,11 +306,9 @@ impl TransactionManager {
         let (sender, receiver) = bounded(1000);
 
         let manager = Arc::new(Self {
-            next_tx_id: AtomicU64::new(1),
-            next_timestamp: AtomicU64::new(1),
-            active_txs: DashMap::new(),
-            committed_txs: DashMap::new(),
-            min_active_tx: AtomicU64::new(u64::MAX),
+            next_ts: AtomicU64::new(Self::initial_timestamp()),
+            transactions: DashMap::new(),
+            oldest_active_ts: AtomicU64::new(u64::MAX),
             gc_sender: Some(sender),
             gc_handle: Mutex::new(None),
             shutdown_flag: AtomicBool::new(false),
@@ -274,105 +328,124 @@ impl TransactionManager {
 
     /// Begin a new transaction.
     pub fn begin(&self, isolation: IsolationLevel, read_only: bool) -> Result<Snapshot> {
-        let tx_id = self.next_tx_id.fetch_add(1, Ordering::SeqCst);
-        let start_ts = self.next_timestamp.fetch_add(1, Ordering::SeqCst);
+        let ts = self.next_ts.fetch_add(1, Ordering::SeqCst);
+        let tx_id = ts; // tx_id == start_ts for simplicity
+
+        // Update oldest active timestamp
+        self.oldest_active_ts.fetch_min(ts, Ordering::SeqCst);
 
         // Collect active transaction IDs for snapshot
-        let active_txs: HashSet<TxId> = self.active_txs.iter().map(|e| *e.key()).collect();
+        let active_txs: HashSet<TxId> = self
+            .transactions
+            .iter()
+            .filter(|e| e.value().status == TxState::Active)
+            .map(|e| *e.key())
+            .collect();
 
-        // Create transaction info
-        let tx_info = TxInfo {
-            id: tx_id,
-            state: TxState::Active,
-            start_ts,
-            commit_ts: 0,
-            isolation,
-            read_only,
-            write_set: HashSet::new(),
-        };
+        // Create transaction info and store it
+        let tx_info = TxInfo::new(tx_id, ts, isolation, read_only);
+        self.transactions.insert(tx_id, tx_info);
 
-        self.active_txs.insert(tx_id, tx_info);
-        self.update_min_active();
-
-        Ok(Snapshot::new(tx_id, start_ts, active_txs, isolation))
+        Ok(Snapshot::new(tx_id, ts, active_txs, isolation))
     }
 
     /// Commit a transaction.
     pub fn commit(&self, tx_id: TxId) -> Result<Timestamp> {
-        let mut tx_info = self
-            .active_txs
-            .get_mut(&tx_id)
-            .ok_or_else(|| MonoError::Transaction(format!("transaction {} not found", tx_id)))?;
+        let commit_ts = self.next_ts.fetch_add(1, Ordering::SeqCst);
 
-        if tx_info.state != TxState::Active {
+        if let Some(mut tx) = self.transactions.get_mut(&tx_id) {
+            if tx.status != TxState::Active {
+                return Err(MonoError::Transaction(format!(
+                    "Transaction {} is not active (status: {:?})",
+                    tx_id, tx.status
+                )));
+            }
+            tx.commit_ts = Some(commit_ts);
+            tx.status = TxState::Committed;
+        } else {
             return Err(MonoError::Transaction(format!(
-                "transaction {} is not active",
+                "Transaction {} not found",
                 tx_id
             )));
         }
 
-        let commit_ts = self.next_timestamp.fetch_add(1, Ordering::SeqCst);
-        tx_info.state = TxState::Committed;
-        tx_info.commit_ts = commit_ts;
-
-        drop(tx_info);
-
-        // Move to committed set
-        self.committed_txs.insert(tx_id, commit_ts);
-        self.active_txs.remove(&tx_id);
-        self.update_min_active();
-
+        self.update_oldest_active();
         Ok(commit_ts)
     }
 
     /// Rollback a transaction.
     pub fn rollback(&self, tx_id: TxId) -> Result<()> {
-        let mut tx_info = self
-            .active_txs
-            .get_mut(&tx_id)
-            .ok_or_else(|| MonoError::Transaction(format!("transaction {} not found", tx_id)))?;
-
-        if tx_info.state != TxState::Active {
+        if let Some(mut tx) = self.transactions.get_mut(&tx_id) {
+            if tx.status != TxState::Active {
+                return Err(MonoError::Transaction(format!(
+                    "Transaction {} is not active (status: {:?})",
+                    tx_id, tx.status
+                )));
+            }
+            tx.status = TxState::Aborted;
+        } else {
             return Err(MonoError::Transaction(format!(
-                "transaction {} is not active",
+                "Transaction {} not found",
                 tx_id
             )));
         }
 
-        tx_info.state = TxState::Aborted;
-
-        drop(tx_info);
-
-        self.active_txs.remove(&tx_id);
         self.clear_written_keys(tx_id);
-        self.update_min_active();
-
+        self.update_oldest_active();
         Ok(())
+    }
+
+    /// Get a transaction by ID.
+    pub fn get(&self, tx_id: TxId) -> Option<TxInfo> {
+        self.transactions.get(&tx_id).map(|tx| tx.clone())
     }
 
     /// Check if a transaction is committed.
     pub fn is_committed(&self, tx_id: TxId) -> bool {
-        self.committed_txs.contains_key(&tx_id)
+        self.transactions
+            .get(&tx_id)
+            .map(|tx| tx.status == TxState::Committed)
+            .unwrap_or(false)
+    }
+
+    /// Check if a transaction is aborted.
+    pub fn is_aborted(&self, tx_id: TxId) -> bool {
+        self.transactions
+            .get(&tx_id)
+            .map(|tx| tx.status == TxState::Aborted)
+            .unwrap_or(false)
+    }
+
+    /// Check if a transaction is still active.
+    pub fn is_active(&self, tx_id: TxId) -> bool {
+        self.transactions
+            .get(&tx_id)
+            .map(|tx| tx.status == TxState::Active)
+            .unwrap_or(false)
     }
 
     /// Get the commit timestamp of a transaction.
     pub fn commit_timestamp(&self, tx_id: TxId) -> Option<Timestamp> {
-        self.committed_txs.get(&tx_id).map(|e| *e.value())
+        self.transactions
+            .get(&tx_id)
+            .and_then(|tx| tx.commit_ts)
     }
 
     /// Record a write for conflict detection.
     pub fn record_write(&self, tx_id: TxId, key: Vec<u8>) -> Result<()> {
-        if let Some(mut tx_info) = self.active_txs.get_mut(&tx_id) {
-            tx_info.write_set.insert(key);
+        if let Some(mut tx) = self.transactions.get_mut(&tx_id) {
+            tx.write_set.insert(key);
         }
         Ok(())
     }
 
     /// Check for write-write conflicts (for serializable isolation).
     pub fn check_conflicts(&self, tx_id: TxId, key: &[u8]) -> Result<()> {
-        // Check if any other active transaction has written to this key
-        for entry in self.active_txs.iter() {
-            if *entry.key() != tx_id && entry.value().write_set.contains(key) {
+        for entry in self.transactions.iter() {
+            if *entry.key() != tx_id
+                && entry.value().status == TxState::Active
+                && entry.value().write_set.contains(key)
+            {
                 return Err(MonoError::WriteConflict(format!(
                     "key conflict with transaction {}",
                     entry.key()
@@ -382,31 +455,39 @@ impl TransactionManager {
         Ok(())
     }
 
-    /// Update the minimum active transaction ID.
-    fn update_min_active(&self) {
-        let min = self
-            .active_txs
-            .iter()
-            .map(|e| *e.key())
-            .min()
-            .unwrap_or(u64::MAX);
-        self.min_active_tx.store(min, Ordering::Release);
+    /// Recalculate the oldest active transaction timestamp.
+    fn update_oldest_active(&self) {
+        let mut oldest = u64::MAX;
+        for entry in self.transactions.iter() {
+            if entry.status == TxState::Active && entry.start_ts < oldest {
+                oldest = entry.start_ts;
+            }
+        }
+        self.oldest_active_ts.store(oldest, Ordering::SeqCst);
     }
 
-    /// Get the minimum active transaction ID (for GC).
+    /// Get the oldest active transaction timestamp (for GC).
+    pub fn oldest_active(&self) -> Timestamp {
+        self.oldest_active_ts.load(Ordering::SeqCst)
+    }
+
+    /// Get the minimum active transaction ID (for GC), alias for oldest_active.
     pub fn min_active(&self) -> TxId {
-        self.min_active_tx.load(Ordering::Acquire)
+        self.oldest_active()
     }
 
     /// Get the number of active transactions.
     pub fn active_count(&self) -> usize {
-        self.active_txs.len()
+        self.transactions
+            .iter()
+            .filter(|e| e.status == TxState::Active)
+            .count()
     }
 
     /// Restore timestamp counter (for WAL replay).
-    pub fn restore_timestamp(&self, ts: Timestamp) {
-        self.next_timestamp.store(ts, Ordering::SeqCst);
-        self.next_tx_id.store(ts, Ordering::SeqCst);
+    /// Sets the counter to at least the given value.
+    pub fn restore_timestamp(&self, min_ts: Timestamp) {
+        self.next_ts.fetch_max(min_ts, Ordering::SeqCst);
     }
 
     /// Signal the GC to check for garbage.
@@ -417,16 +498,13 @@ impl TransactionManager {
     }
 
     /// Shutdown the transaction manager.
-    /// Stops the GC thread and marks the manager as shutting down.
     pub fn shutdown(&self) {
         self.shutdown_flag.store(true, Ordering::SeqCst);
 
-        // Signal GC thread to stop
         if let Some(ref sender) = self.gc_sender {
             let _ = sender.try_send(GcTask::Shutdown);
         }
 
-        // Wait for GC thread (if possible without blocking forever)
         if let Some(handle) = self.gc_handle.lock().take() {
             let _ = handle.join();
         }
@@ -438,7 +516,6 @@ impl TransactionManager {
     }
 
     /// Record a versioned key written by a transaction.
-    /// Used by [`MvccTable`] to track keys for finalize_commit.
     pub fn record_versioned_key(&self, tx_id: TxId, versioned_key: Vec<u8>) {
         self.tx_written_keys
             .entry(tx_id)
@@ -457,6 +534,13 @@ impl TransactionManager {
     /// Clear written keys for a transaction (on rollback).
     pub fn clear_written_keys(&self, tx_id: TxId) {
         self.tx_written_keys.remove(&tx_id);
+    }
+
+    /// Clean up old committed/aborted transactions (call periodically).
+    pub fn cleanup(&self, older_than: Timestamp) {
+        self.transactions.retain(|_, tx| {
+            tx.status == TxState::Active || tx.start_ts >= older_than
+        });
     }
 }
 
@@ -508,18 +592,10 @@ fn gc_worker(manager: Arc<TransactionManager>, receiver: Receiver<GcTask>, inter
         last_run = Instant::now();
 
         // Perform garbage collection
-        let min_active = manager.min_active();
-
-        // Remove old committed transactions from tracking
-        let to_remove: Vec<TxId> = manager
-            .committed_txs
-            .iter()
-            .filter(|e| *e.key() < min_active.saturating_sub(1000))
-            .map(|e| *e.key())
-            .collect();
-
-        for tx_id in to_remove {
-            manager.committed_txs.remove(&tx_id);
+        // Keep transactions newer than oldest_active - 1000
+        let oldest = manager.oldest_active();
+        if oldest != u64::MAX {
+            manager.cleanup(oldest.saturating_sub(1000));
         }
     }
 }
@@ -554,6 +630,20 @@ where
             tx_manager,
             _phantom: PhantomData,
         })
+    }
+
+    /// Open an existing MVCC table from disk.
+    pub fn open(pool: Arc<LruBufferPool>, tx_manager: Arc<TransactionManager>, meta_page_id: super::page::PageId) -> Result<Self> {
+        Ok(Self {
+            tree: BTree::open(pool, meta_page_id)?,
+            tx_manager,
+            _phantom: PhantomData,
+        })
+    }
+
+    /// Get the metadata page ID for persistence.
+    pub fn meta_page_id(&self) -> super::page::PageId {
+        self.tree.meta_page_id()
     }
 
     /// Create a versioned key from a key and version timestamp.
@@ -701,6 +791,32 @@ where
         Ok(())
     }
 
+    /// Finalize a rollback by removing all records written by the aborted transaction.
+    ///
+    /// Physically deletes records created by this transaction from the B-tree.
+    pub fn finalize_rollback(&self, tx_id: TxId) -> Result<()> {
+        // Get all versioned keys written by this transaction
+        let written_keys = self.tx_manager.take_written_keys(tx_id);
+
+        for versioned_key in written_keys {
+            // Check if this record was created by the aborted transaction
+            if let Ok(Some(record)) = self.tree.get(&versioned_key) {
+                if record.xmin == tx_id && record.cmin == 0 {
+                    // This record was created by the aborted transaction, delete it
+                    self.tree.delete(&versioned_key)?;
+                } else if record.xmax == tx_id {
+                    // This record was deleted by the aborted transaction, undelete it
+                    let mut record = record;
+                    record.xmax = 0;
+                    record.cmax = 0;
+                    self.tree.insert(versioned_key, record)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Range scan for visible records between start and end keys.
     pub fn range_scan(&self, snapshot: &Snapshot, start: &K, end: &K) -> Result<Vec<(K, V)>> {
         let mut results = Vec::new();
@@ -842,5 +958,32 @@ mod tests {
         // Should be visible to new transactions after commit
         let snapshot3 = tm.begin(IsolationLevel::ReadCommitted, false).unwrap();
         assert!(record.is_visible(&snapshot3, &tm));
+    }
+
+    #[test]
+    fn test_rollback_visibility() {
+        let tm = Arc::new(TransactionManager::new());
+
+        // Start tx1 and create a record
+        let snapshot1 = tm.begin(IsolationLevel::ReadCommitted, false).unwrap();
+        let record = MvccRecord::new(snapshot1.tx_id, "value".to_string());
+
+        // Record is visible to its own transaction
+        assert!(record.is_visible(&snapshot1, &tm));
+
+        // Rollback tx1
+        tm.rollback(snapshot1.tx_id).unwrap();
+
+        // Record should NOT be visible to any transaction after rollback
+        let snapshot2 = tm.begin(IsolationLevel::ReadCommitted, false).unwrap();
+        assert!(
+            !record.is_visible(&snapshot2, &tm),
+            "Record from rolled-back tx should not be visible!"
+        );
+
+        // Also verify the transaction status
+        assert!(tm.is_aborted(snapshot1.tx_id));
+        assert!(!tm.is_committed(snapshot1.tx_id));
+        assert!(!tm.is_active(snapshot1.tx_id));
     }
 }

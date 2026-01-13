@@ -66,6 +66,161 @@ pub enum ValueType {
     Extension,
 }
 
+impl ValueType {
+    /// Returns the common supertype for type coercion between two types.
+    ///
+    /// Type coercion follows these rules:
+    /// - Numeric promotion: Int32 -> Int64 -> Float64, Float32 -> Float64
+    /// - Null is compatible with any type (returns the non-null type)
+    /// - Extension types only coerce with the same extension type (handled separately)
+    /// - Same types always coerce to themselves
+    /// - Incompatible types return None
+    ///
+    /// # Example
+    /// ```rust
+    /// use monodb_common::ValueType;
+    ///
+    /// assert_eq!(ValueType::Int32.common_type(&ValueType::Int64), Some(ValueType::Int64));
+    /// assert_eq!(ValueType::Int32.common_type(&ValueType::Float64), Some(ValueType::Float64));
+    /// assert_eq!(ValueType::String.common_type(&ValueType::Int32), None);
+    /// ```
+    pub fn common_type(&self, other: &ValueType) -> Option<ValueType> {
+        use ValueType::*;
+
+        // Same type always works
+        if self == other {
+            return Some(self.clone());
+        }
+
+        // Null is compatible with anything
+        match (self, other) {
+            (Null, other) | (other, Null) => return Some(other.clone()),
+            _ => {}
+        }
+
+        // Numeric promotion ladder
+        match (self, other) {
+            // Int32 promotes to Int64
+            (Int32, Int64) | (Int64, Int32) => Some(Int64),
+
+            // Int32 promotes to Float32
+            (Int32, Float32) | (Float32, Int32) => Some(Float32),
+
+            // Int32 promotes to Float64
+            (Int32, Float64) | (Float64, Int32) => Some(Float64),
+
+            // Int64 promotes to Float64
+            (Int64, Float64) | (Float64, Int64) => Some(Float64),
+
+            // Float32 promotes to Float64
+            (Float32, Float64) | (Float64, Float32) => Some(Float64),
+
+            // Int64 and Float32 both promote to Float64
+            (Int64, Float32) | (Float32, Int64) => Some(Float64),
+
+            // Incompatible types
+            _ => None,
+        }
+    }
+
+    /// Check if this type can be coerced to the target type.
+    ///
+    /// A type can be coerced to another if [`common_type`](Self::common_type) returns the target type.
+    pub fn can_coerce_to(&self, target: &ValueType) -> bool {
+        match self.common_type(target) {
+            Some(common) => common == *target,
+            None => false,
+        }
+    }
+
+    /// Check if this type is a numeric type.
+    pub fn is_numeric(&self) -> bool {
+        matches!(
+            self,
+            ValueType::Int32 | ValueType::Int64 | ValueType::Float32 | ValueType::Float64
+        )
+    }
+
+    /// Check if this type is an integer type.
+    pub fn is_integer(&self) -> bool {
+        matches!(self, ValueType::Int32 | ValueType::Int64)
+    }
+
+    /// Check if this type is a floating-point type.
+    pub fn is_float(&self) -> bool {
+        matches!(self, ValueType::Float32 | ValueType::Float64)
+    }
+
+    /// Check if this type supports ordering/comparison operations.
+    pub fn is_comparable(&self) -> bool {
+        matches!(
+            self,
+            ValueType::Int32
+                | ValueType::Int64
+                | ValueType::Float32
+                | ValueType::Float64
+                | ValueType::String
+                | ValueType::DateTime
+                | ValueType::Date
+                | ValueType::Time
+        )
+    }
+
+    /// Check if this type supports equality comparison.
+    pub fn is_equatable(&self) -> bool {
+        // All types except Extension support equality
+        // Extension requires same type_name check at runtime
+        !matches!(self, ValueType::Extension)
+    }
+
+    /// Check if this type is a collection type.
+    pub fn is_collection(&self) -> bool {
+        matches!(
+            self,
+            ValueType::Array
+                | ValueType::Object
+                | ValueType::Set
+                | ValueType::Row
+                | ValueType::SortedSet
+        )
+    }
+
+    /// Check if this type is a temporal type.
+    pub fn is_temporal(&self) -> bool {
+        matches!(
+            self,
+            ValueType::DateTime | ValueType::Date | ValueType::Time
+        )
+    }
+
+    /// Returns a user-friendly display name for this type.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            ValueType::Null => "Null",
+            ValueType::Bool => "Bool",
+            ValueType::Int32 => "Int32",
+            ValueType::Int64 => "Int64",
+            ValueType::Float32 => "Float32",
+            ValueType::Float64 => "Float64",
+            ValueType::String => "String",
+            ValueType::Binary => "Binary",
+            ValueType::DateTime => "DateTime",
+            ValueType::Date => "Date",
+            ValueType::Time => "Time",
+            ValueType::Uuid => "Uuid",
+            ValueType::ObjectId => "ObjectId",
+            ValueType::Array => "Array",
+            ValueType::Object => "Object",
+            ValueType::Set => "Set",
+            ValueType::Row => "Row",
+            ValueType::SortedSet => "SortedSet",
+            ValueType::GeoPoint => "GeoPoint",
+            ValueType::Reference => "Reference",
+            ValueType::Extension => "Extension",
+        }
+    }
+}
+
 /// Universal value type for MonoDB
 ///
 /// Variants
@@ -192,6 +347,81 @@ impl Value {
             Value::GeoPoint { .. } => ValueType::GeoPoint,
             Value::Reference { .. } => ValueType::Reference,
             Value::Extension { .. } => ValueType::Extension,
+        }
+    }
+
+    /// Attempt to coerce this value to the target type.
+    ///
+    /// Follows the type coercion rules defined in [`ValueType::common_type`].
+    /// Returns coerced [`Value`] on success, or a [`MonoError::TypeError`] 
+    /// if coercion is not possible.
+    ///
+    /// # Example
+    /// ```rust
+    /// use monodb_common::{Value, ValueType};
+    ///
+    /// let val = Value::Int32(42);
+    /// let coerced = val.coerce_to(&ValueType::Int64).unwrap();
+    /// assert_eq!(coerced, Value::Int64(42));
+    ///
+    /// let val = Value::Int32(42);
+    /// let coerced = val.coerce_to(&ValueType::Float64).unwrap();
+    /// assert_eq!(coerced, Value::Float64(42.0));
+    /// ```
+    pub fn coerce_to(&self, target: &ValueType) -> Result<Value> {
+        let source_type = self.data_type();
+
+        // Same type, no coercion needed
+        if source_type == *target {
+            return Ok(self.clone());
+        }
+
+        // Null coerces to any type as Null
+        if source_type == ValueType::Null {
+            return Ok(Value::Null);
+        }
+
+        match (self, target) {
+            // Int32 promotions
+            (Value::Int32(v), ValueType::Int64) => Ok(Value::Int64(*v as i64)),
+            (Value::Int32(v), ValueType::Float32) => Ok(Value::Float32(*v as f32)),
+            (Value::Int32(v), ValueType::Float64) => Ok(Value::Float64(*v as f64)),
+
+            // Int64 promotions
+            (Value::Int64(v), ValueType::Float64) => Ok(Value::Float64(*v as f64)),
+
+            // Float32 promotions
+            (Value::Float32(v), ValueType::Float64) => Ok(Value::Float64(*v as f64)),
+
+            // Int64 to Float32
+            (Value::Int64(v), ValueType::Float32) => Ok(Value::Float32(*v as f32)),
+
+            // Float32 to Int64/Int32 (truncation)
+            (Value::Float32(v), ValueType::Int64) => Ok(Value::Int64(*v as i64)),
+            (Value::Float32(v), ValueType::Int32) => Ok(Value::Int32(*v as i32)),
+
+            // Float64 to narrower types (truncation/precision loss)
+            (Value::Float64(v), ValueType::Int64) => Ok(Value::Int64(*v as i64)),
+            (Value::Float64(v), ValueType::Int32) => Ok(Value::Int32(*v as i32)),
+            (Value::Float64(v), ValueType::Float32) => Ok(Value::Float32(*v as f32)),
+
+            // Int64 to Int32 (narrowing)
+            (Value::Int64(v), ValueType::Int32) => {
+                if *v >= i32::MIN as i64 && *v <= i32::MAX as i64 {
+                    Ok(Value::Int32(*v as i32))
+                } else {
+                    Err(MonoError::TypeError {
+                        expected: "Int32 range".into(),
+                        actual: format!("Int64 value {} out of range", v),
+                    })
+                }
+            }
+
+            // Incompatible types
+            _ => Err(MonoError::TypeError {
+                expected: target.display_name().into(),
+                actual: source_type.display_name().into(),
+            }),
         }
     }
 

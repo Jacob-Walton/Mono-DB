@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::debug!("Current Working Directory: {}", cwd.display());
     }
 
-    let server = Server::new(config.server, config.storage).await?;
+    let server = Server::new(config.server, config.storage, config.plugins).await?;
 
     tracing::info!("MonoDB Server starting on {}", server.address());
 

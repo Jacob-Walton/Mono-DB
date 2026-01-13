@@ -316,6 +316,22 @@ where
         })
     }
 
+    /// Open an existing disk-backed keyspace.
+    pub fn open(pool: Arc<LruBufferPool>, meta_page_id: crate::storage::page::PageId) -> Result<Self> {
+        let tree = BTree::open(pool, meta_page_id)?;
+        let count = tree.len() as u64;
+
+        Ok(Self {
+            tree,
+            count: AtomicU64::new(count),
+        })
+    }
+
+    /// Get the metadata page ID.
+    pub fn meta_page_id(&self) -> crate::storage::page::PageId {
+        self.tree.meta_page_id()
+    }
+
     /// Get remaining TTL for a key.
     pub fn ttl(&self, key: &K) -> Result<Option<u64>> {
         if let Some(entry) = self.tree.get(key)? {
@@ -567,6 +583,19 @@ where
             Keyspace::Memory(ks) => Ok(ks.cleanup()),
             Keyspace::Disk(ks) => ks.cleanup(),
         }
+    }
+
+    /// Get the metadata page ID (only for disk keyspaces).
+    pub fn meta_page_id(&self) -> Option<crate::storage::page::PageId> {
+        match self {
+            Keyspace::Memory(_) => None,
+            Keyspace::Disk(ks) => Some(ks.meta_page_id()),
+        }
+    }
+
+    /// Open an existing disk-backed keyspace.
+    pub fn open_disk(pool: Arc<LruBufferPool>, meta_page_id: crate::storage::page::PageId) -> Result<Self> {
+        Ok(Keyspace::Disk(DiskKeyspace::open(pool, meta_page_id)?))
     }
 }
 

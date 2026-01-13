@@ -1,0 +1,102 @@
+package monodb:plugin@0.1.0;
+
+interface database {
+    use types.{value, db-error};
+
+    // Query with parameterized statements
+    query: func(
+        statement: string,
+        params: list<value>,
+    ) -> result<list<value>, db-error>;
+
+    // Get single record by key
+    get: func(
+        table: string,
+        key: value,
+    ) -> result<option<value>, db-error>;
+
+    // Scan table with pagination
+    scan: func(
+        table: string,
+        limit: option<u32>,
+        offset: option<u32>,
+    ) -> result<list<value>, db-error>;
+
+    // Insert single record
+    insert: func(
+        table: string,
+        row: value,
+    ) -> result<option<value>, db-error>;  // Returns generated ID if any
+
+    // Insert multiple records
+    insert-batch: func(
+        table: string,
+        rows: list<value>,
+    ) -> result<list<option<value>>, db-error>;
+
+    // Update record by key
+    update: func(
+        table: string,
+        key: value,
+        updates: list<tuple<string, value>>,
+    ) -> result<bool, db-error>;  // Returns true if updated
+
+    // Delete record by key
+    delete: func(
+        table: string,
+        key: value,
+    ) -> result<bool, db-error>;  // Returns true if deleted
+}
+
+interface transaction {
+    use types.{db-error};
+
+    enum isolation-level {
+        read-uncommitted,
+        read-committed,
+        repeatable-read,
+        serializable,
+    }
+
+    // Begin transaction
+    begin: func(
+        isolation: isolation-level,
+        read-only: bool,
+    ) -> result<u64, db-error>;  // Returns transaction ID
+
+    // Commit transaction
+    commit: func(tx-id: u64) -> result<_, db-error>;
+
+    // Rollback transaction
+    rollback: func(tx-id: u64) -> result<_, db-error>;
+
+    // Get current transaction ID if any
+    current: func() -> option<u64>;
+}
+
+interface schema {
+    use types.{value, db-error};
+
+    record table-info {
+        name: string,
+        storage-type: string,
+        row-count: option<u64>,
+        size-bytes: option<u64>,
+    }
+
+    record column-info {
+        name: string,
+        data-type: string,
+        nullable: bool,
+        default-value: option<value>,
+    }
+
+    // List all tables
+    list-tables: func() -> result<list<table-info>, db-error>;
+
+    // Describe table schema
+    describe: func(table: string) -> result<list<column-info>, db-error>;
+
+    // Check if table exists
+    table-exists: func(table: string) -> bool;
+}

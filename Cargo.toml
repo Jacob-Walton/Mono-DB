@@ -6,6 +6,7 @@ members = [
     "crates/monodb-client", # Rust client library
     "crates/monodb-repl",   # TUI REPL similar to psql
     "crates/monodb-utils",  # Utility binaries
+    "crates/monodb-plugin", # WASM plugin system
     "crates/testing",       # Test playground
 ]
 
@@ -15,10 +16,11 @@ default-members = [
     "crates/monodb-client",
     "crates/monodb-repl",
     "crates/monodb-utils",
+    "crates/monodb-plugin",
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 authors = ["Jacob Walton"]
 license = ""
@@ -63,7 +65,19 @@ ahash = "0.8.12"
 # TLS Libraries
 rustls = "0.23.35"
 tokio-rustls = "0.26.4"
-# Embedded scripting language for Rust
+
+# WASM runtime for plugins
+wasmtime = { version = "40", features = ["component-model"] }
+wasmtime-wasi = "40"
+
+# Concurrency primitives
+parking_lot = "0.12"
+
+# Memory-mapped files
+memmap2 = "0.9"
+
+# Filesystem watching for hot-reload
+notify = { version = "8", default-features = false, features = ["macos_kqueue"] }
 
 [profile.release]
 opt-level = 3

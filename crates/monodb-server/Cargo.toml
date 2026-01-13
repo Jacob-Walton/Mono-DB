@@ -10,6 +10,10 @@ repository.workspace = true
 name = "monod"
 path = "src/main.rs"
 
+[features]
+default = ["plugins"]
+plugins = ["monodb-plugin"]
+
 [dependencies]
 tokio.workspace = true
 dashmap.workspace = true
@@ -17,6 +21,7 @@ rustls.workspace = true
 tokio-rustls.workspace = true
 serde.workspace = true
 monodb-common = { path = "../monodb-common" }
+monodb-plugin = { path = "../monodb-plugin", optional = true }
 toml = "0.9.8"
 anyhow.workspace = true
 tracing.workspace = true

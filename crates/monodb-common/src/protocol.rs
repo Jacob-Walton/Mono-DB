@@ -417,6 +417,12 @@ pub enum QueryOutcome {
     /// Delete operation result
     Deleted { rows_deleted: u64 },
 
+    /// Create operation result
+    Created {
+        object_type: String,
+        object_name: String,
+    },
+
     /// Drop operation result
     Dropped {
         object_type: String,
@@ -542,6 +548,7 @@ mod cmd {
     pub const OUTCOME_DELETED: u8 = 0x04;
     pub const OUTCOME_DROPPED: u8 = 0x05;
     pub const OUTCOME_EXECUTED: u8 = 0x06;
+    pub const OUTCOME_CREATED: u8 = 0x07;
 
     // Message kinds
     pub const KIND_REQUEST: u8 = 0x00;
@@ -1308,6 +1315,14 @@ fn encode_query_outcome(buf: &mut BytesMut, outcome: &QueryOutcome) {
             buf.put_u8(cmd::OUTCOME_DELETED);
             buf.put_u64_le(*rows_deleted);
         }
+        QueryOutcome::Created {
+            object_type,
+            object_name,
+        } => {
+            buf.put_u8(cmd::OUTCOME_CREATED);
+            put_string(buf, object_type);
+            put_string(buf, object_name);
+        }
         QueryOutcome::Dropped {
             object_type,
             object_name,
@@ -1365,6 +1380,14 @@ fn decode_query_outcome(cursor: &mut &[u8]) -> Result<QueryOutcome> {
             let object_type = get_string(cursor)?;
             let object_name = get_string(cursor)?;
             Ok(QueryOutcome::Dropped {
+                object_type,
+                object_name,
+            })
+        }
+        cmd::OUTCOME_CREATED => {
+            let object_type = get_string(cursor)?;
+            let object_name = get_string(cursor)?;
+            Ok(QueryOutcome::Created {
                 object_type,
                 object_name,
             })
