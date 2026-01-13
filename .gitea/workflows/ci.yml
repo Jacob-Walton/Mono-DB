@@ -1,0 +1,96 @@
+name: CI Runner
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**/*.rs'
+      - 'monodb-admin/**/*.rs'
+      - 'Cargo.toml'
+      - 'rust-toolchain.toml'
+
+jobs:
+  build:
+    runs-on: amd64
+    if: |
+      contains(github.event.head_commit.message, '[force-ci]') ||
+      !cancelled()
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          
+      - name: Install System Dependencies
+        run: |
+          apk add --no-cache \
+            nodejs npm \
+            python3 py3-pip \
+            gcc g++ python3-dev musl-dev linux-headers \
+            curl git openssl-dev pkgconfig \
+            build-base \
+            webkit2gtk-4.1-dev \
+            gtk+3.0-dev \
+            glib-dev \
+            gdk-pixbuf-dev \
+            cairo-dev \
+            pango-dev \
+            libayatana-appindicator-dev \
+            librsvg-dev \
+            harfbuzz-dev \
+            libsoup3-dev \
+            zlib-dev \
+            libgcc
+            
+      - name: Cache Yarn
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/yarn
+            node_modules
+          key: yarn-${{ runner.os }}-${{ hashFiles('yarn.lock', 'package.json') }}
+          restore-keys: |
+            yarn-${{ runner.os }}-
+            
+      - name: Install Yarn
+        run: npm install -g yarn
+        
+      - name: Install JS Dependencies
+        run: yarn install --frozen-lockfile
+        
+      - name: Cache pipx
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.local/pipx
+            ~/.cache/pipx
+          key: pipx-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements.txt') }}
+          restore-keys: |
+            pipx-${{ runner.os }}-
+            
+      - name: Install pipx and invoke
+        run: |
+          python3 -m pip install --break-system-packages pipx || python3 -m pip install pipx
+          pipx ensurepath
+          pipx install invoke
+          pipx inject invoke colorama psutil
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          
+      - name: Cache Cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+            
+      - name: Install Rust and Cargo
+        uses: dtolnay/rust-toolchain@stable
+        
+      - name: Run CI
+        env:
+          RUSTFLAGS: '-C target-feature=-crt-static'
+        run: invoke ci
