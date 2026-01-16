@@ -85,7 +85,7 @@ impl<V: Serializable> Serializable for TtlEntry<V> {
 }
 
 /// Get current time in milliseconds since epoch.
-fn current_time_ms() -> u64 {
+pub(crate) fn current_time_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -104,6 +104,9 @@ pub trait KeyspaceBackend<K, V>: Send + Sync {
 
     /// Set a key-value pair with TTL.
     fn set_with_ttl(&self, key: K, value: V, ttl_ms: u64) -> Result<()>;
+
+    /// Set a key-value pair with an explicit TTL entry.
+    fn set_entry(&self, key: K, entry: TtlEntry<V>) -> Result<()>;
 
     /// Delete a key.
     fn delete(&self, key: &K) -> Result<bool>;
@@ -246,14 +249,16 @@ where
     }
 
     fn set(&self, key: K, value: V) -> Result<()> {
-        self.maybe_cleanup();
-        self.data.insert(key, TtlEntry::new(value));
-        Ok(())
+        self.set_entry(key, TtlEntry::new(value))
     }
 
     fn set_with_ttl(&self, key: K, value: V, ttl_ms: u64) -> Result<()> {
+        self.set_entry(key, TtlEntry::with_ttl(value, ttl_ms))
+    }
+
+    fn set_entry(&self, key: K, entry: TtlEntry<V>) -> Result<()> {
         self.maybe_cleanup();
-        self.data.insert(key, TtlEntry::with_ttl(value, ttl_ms));
+        self.data.insert(key, entry);
         Ok(())
     }
 
@@ -408,17 +413,16 @@ where
     }
 
     fn set(&self, key: K, value: V) -> Result<()> {
-        let is_new = self.tree.get(&key)?.is_none();
-        self.tree.insert(key, TtlEntry::new(value))?;
-        if is_new {
-            self.count.fetch_add(1, Ordering::Relaxed);
-        }
-        Ok(())
+        self.set_entry(key, TtlEntry::new(value))
     }
 
     fn set_with_ttl(&self, key: K, value: V, ttl_ms: u64) -> Result<()> {
+        self.set_entry(key, TtlEntry::with_ttl(value, ttl_ms))
+    }
+
+    fn set_entry(&self, key: K, entry: TtlEntry<V>) -> Result<()> {
         let is_new = self.tree.get(&key)?.is_none();
-        self.tree.insert(key, TtlEntry::with_ttl(value, ttl_ms))?;
+        self.tree.insert(key, entry)?;
         if is_new {
             self.count.fetch_add(1, Ordering::Relaxed);
         }
@@ -524,6 +528,14 @@ where
         match self {
             Keyspace::Memory(ks) => ks.set_with_ttl(key, value, ttl_ms),
             Keyspace::Disk(ks) => ks.set_with_ttl(key, value, ttl_ms),
+        }
+    }
+
+    /// Set a value with an explicit TTL entry.
+    pub fn set_entry(&self, key: K, entry: TtlEntry<V>) -> Result<()> {
+        match self {
+            Keyspace::Memory(ks) => ks.set_entry(key, entry),
+            Keyspace::Disk(ks) => ks.set_entry(key, entry),
         }
     }
 

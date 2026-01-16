@@ -33,16 +33,10 @@ port = 6432
 # Env: MDB_DATA_DIR
 data_dir = "./data"
 
-# Buffer pool size (pages) for B-Tree storage.
+# Buffer pool size (pages) for storage.
 # Memory used ≈ buffer_pool_size x page_size.
-# With the default 16KB pages, 8192 pages ≈ 128MB.
-buffer_pool_size = 8192
-
-# Use LSM-tree storage engine instead of B-tree
-# Default: true
-# - false: Use B-tree (better for read-heavy workloads and range queries)
-# - true: Use LSM-tree (better for write-heavy workloads and sequential access)
-use_lsm = true
+# With the default 16KB pages, 1000 pages ≈ 16MB.
+buffer_pool_size = 1000
 
 # Page size in bytes (for B-tree engine)
 # Default: 16384 (16KB)
@@ -50,49 +44,13 @@ use_lsm = true
 # Larger pages reduce I/O but use more memory
 page_size = 16384
 
-# LSM-tree specific settings
-
-[storage.lsm]
-# Memory table size (bytes) before flushing to disk.
-# Smaller values = more frequent flushes = smaller WAL
-# Larger values = fewer flushes = better write throughput
-memtable_size = 33554432  # 32 MiB
-
-# Number of level-0 files that trigger compaction.
-# Higher values reduce compaction frequency when memtables are large.
-level0_file_num_compaction_trigger = 8
-
-# Maximum total size for level 0 (bytes).
-# Keep close to memtable_size.
-level0_size = 67108864  # 64 MiB (2x memtable_size)
-
-# Size multiplier between levels
-# Default: 10
-# Level N+1 is approximately this many times larger than level N
-level_multiplier = 10
-
-# Number of SSTable index blocks to keep hot in memory (0 disables cache).
-block_cache_capacity = 4096
-
-# Compression for SST files (placeholder; not implemented yet).
-compression = true
-
-# Maximum number of levels in LSM tree
-# Default: 7
-# More levels allow larger datasets but may increase read latency
-max_level = 7
-
-# Bloom filter false positive rate (0.01 = 1%).
-# Lower values reduce false positives but use more memory.
-bloom_filter_fp_rate = 0.01
-
 # Write-ahead log (WAL) configuration
 [storage.wal]
 # WAL buffer size (bytes) for write batching.
-buffer_size = 10485760  # 10 MiB
+buffer_size = 65536  # 64 KiB
 
 # Maximum WAL size (bytes) before rotation.
-max_size = 268435456  # 256 MiB
+max_size = 67108864  # 64 MiB
 
 # Sync changes to disk using the thresholds below.
 # Keep this enabled for durability.
@@ -100,10 +58,47 @@ sync_on_write = true
 
 # Background WAL writer (non-blocking appends).
 # Leave enabled for better parallel write throughput.
-async_write = true
+async_write = false
 
 # Group-commit thresholds:
 # - Sync after this many bytes appended to the WAL.
-sync_every_bytes = 1048576  # 1 MiB
+# sync_every_bytes = 1048576  # 1 MiB
 # - Ensure a sync at least this often (milliseconds), even if the byte threshold is not hit.
-sync_interval_ms = 1000  # 1 second
+# sync_interval_ms = 1000  # 1 second
+
+# Periodic checkpointing
+[storage.checkpoint]
+# Enable/disable periodic checkpoints.
+enabled = true
+
+# Checkpoint interval in milliseconds.
+interval_ms = 30000
+
+# Truncate WAL after a successful checkpoint (only when safe).
+truncate_wal = true
+
+# Plugin system configuration
+[plugins]
+# Enable/disable plugins
+enabled = true
+
+# Directory containing plugin .wasm files
+plugins_dir = "./data/plugins"
+
+# Hot-reload plugins on change
+hot_reload = true
+
+# Maximum memory per plugin in bytes (128 MiB)
+max_memory = 134217728
+
+# Default fuel limit per plugin execution
+default_fuel = 100000000
+
+# Maximum fuel limit a plugin can request
+max_fuel = 1000000000
+
+# Default epoch deadline for plugins
+default_deadline = 4
+
+# Maximum epoch deadline for plugins
+max_deadline = 16

@@ -12,12 +12,12 @@ use parking_lot::RwLock;
 
 use super::buffer::LruBufferPool;
 use super::disk::DiskManager;
-use super::document::{DocumentStore, HistoryEntry};
-use super::keyspace::Keyspace;
+use super::document::{Document, DocumentStore, HistoryEntry};
+use super::keyspace::{Keyspace, TtlEntry};
 use super::mvcc::{MvccTable, Snapshot, TransactionManager};
-use super::schema::SchemaCatalog;
-use super::traits::{IsolationLevel, VersionedDocument};
-use super::wal::{Wal, WalConfig};
+use super::schema::{SchemaCatalog, StoredColumnSchema, StoredIndex, StoredTableSchema};
+use super::traits::{IsolationLevel, Serializable, VersionedDocument};
+use super::wal::{Wal, WalConfig, WalDdlRecord, WalEntryType};
 use crate::namespace::NamespaceManager;
 
 // Storage Configuration
@@ -33,6 +33,14 @@ pub struct StorageConfig {
     pub wal_enabled: bool,
     /// Sync WAL on every commit.
     pub wal_sync_on_commit: bool,
+    /// WAL buffer size in bytes.
+    pub wal_buffer_size: usize,
+    /// WAL sync after this many bytes (None disables threshold).
+    pub wal_sync_every_bytes: Option<u64>,
+    /// WAL sync after this interval in milliseconds (None disables interval).
+    pub wal_sync_interval_ms: Option<u64>,
+    /// Truncate WAL after successful checkpoints (when safe).
+    pub wal_truncate_on_checkpoint: bool,
     /// Default isolation level for transactions.
     pub default_isolation: IsolationLevel,
     /// Enable memory-mapped I/O.
@@ -46,6 +54,10 @@ impl Default for StorageConfig {
             buffer_pool_size: 1000,
             wal_enabled: true,
             wal_sync_on_commit: true,
+            wal_buffer_size: 64 * 1024,
+            wal_sync_every_bytes: Some(64 * 1024),
+            wal_sync_interval_ms: Some(100),
+            wal_truncate_on_checkpoint: true,
             default_isolation: IsolationLevel::ReadCommitted,
             use_mmap: true,
         }
@@ -158,8 +170,10 @@ impl StorageEngine {
         let wal = if config.wal_enabled {
             let wal_config = WalConfig {
                 path: config.data_dir.join("wal.log"),
+                buffer_size: config.wal_buffer_size,
+                sync_every_bytes: config.wal_sync_every_bytes,
+                sync_interval_ms: config.wal_sync_interval_ms,
                 sync_on_commit: config.wal_sync_on_commit,
-                ..Default::default()
             };
             Some(Wal::open(wal_config)?)
         } else {
@@ -188,8 +202,14 @@ impl StorageEngine {
             schema_catalog,
         };
 
+        // Replay WAL DDL before loading tables
+        engine.replay_wal_ddl()?;
+
         // Restore tables from schema catalog
         engine.load_tables_from_schemas()?;
+
+        // Replay WAL for recovery
+        engine.replay_wal_mutations()?;
 
         Ok(engine)
     }
@@ -733,7 +753,7 @@ impl StorageEngine {
 
         // Log to WAL
         let start_lsn = if let Some(wal) = &self.wal {
-            wal.log_tx_begin(tx_id)?
+            wal.log_tx_begin(tx_id, snapshot.start_ts)?
         } else {
             0
         };
@@ -768,11 +788,18 @@ impl StorageEngine {
         }
 
         // Commit in transaction manager
-        self.tx_manager.commit(tx_id)?;
+        let commit_ts = self.tx_manager.commit(tx_id)?;
+
+        // Finalize MVCC records (persist commit timestamps)
+        for table in self.mvcc_tables.iter() {
+            if let Err(e) = table.finalize_commit(tx_id, commit_ts) {
+                tracing::warn!("Failed to finalize commit for table {}: {}", table.key(), e);
+            }
+        }
 
         // Log to WAL
         if let Some(wal) = &self.wal {
-            wal.log_tx_commit(tx_id)?;
+            wal.log_tx_commit(tx_id, commit_ts)?;
         }
 
         Ok(())
@@ -1232,12 +1259,18 @@ impl StorageEngine {
             .get(&qualified)
             .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", qualified)))?;
 
-        mvcc.write(&snapshot, key.clone(), value.clone())?;
+        let existed = mvcc.exists(&snapshot, &key)?;
 
-        // Log to WAL
+        // Log to WAL before applying changes
         if let Some(wal) = &self.wal {
-            wal.log_insert(tx_id, table, &key, &value)?;
+            if existed {
+                wal.log_update(tx_id, &qualified, &key, &value)?;
+            } else {
+                wal.log_insert(tx_id, &qualified, &key, &value)?;
+            }
         }
+
+        mvcc.write(&snapshot, key.clone(), value.clone())?;
 
         Ok(())
     }
@@ -1269,12 +1302,14 @@ impl StorageEngine {
             .get(&qualified)
             .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", qualified)))?;
 
-        let deleted = mvcc.delete(&snapshot, &key.to_vec())?;
+        let existed = mvcc.exists(&snapshot, &key.to_vec())?;
 
-        // Log to WAL
-        if deleted && let Some(wal) = &self.wal {
+        // Log to WAL before applying changes
+        if existed && let Some(wal) = &self.wal {
             wal.log_delete::<Vec<u8>>(tx_id, &qualified, &key.to_vec())?;
         }
+
+        let deleted = mvcc.delete(&snapshot, &key.to_vec())?;
 
         Ok(deleted)
     }
@@ -1308,6 +1343,350 @@ impl StorageEngine {
 
         mvcc.range_scan(&snapshot, &start.to_vec(), &end.to_vec())
     }
+
+    fn resolve_wal_table_name(&self, table: &str) -> Option<String> {
+        if self.tables.read().contains_key(table) {
+            return Some(table.to_string());
+        }
+
+        let qualified = self.qualify_table_name(table);
+        if self.tables.read().contains_key(&qualified) {
+            return Some(qualified);
+        }
+
+        None
+    }
+
+    fn snapshot_for_wal(&self, tx_id: u64, start_ts: u64) -> Snapshot {
+        Snapshot {
+            tx_id,
+            start_ts,
+            active_txs: HashSet::new(),
+            isolation: IsolationLevel::ReadCommitted,
+        }
+    }
+
+    fn mvcc_write_wal(
+        &self,
+        tx_id: u64,
+        start_ts: u64,
+        table: &str,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> Result<()> {
+        let mvcc = self
+            .mvcc_tables
+            .get(table)
+            .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", table)))?;
+        let snapshot = self.snapshot_for_wal(tx_id, start_ts);
+        mvcc.write(&snapshot, key, value)?;
+        Ok(())
+    }
+
+    fn mvcc_delete_wal(&self, tx_id: u64, start_ts: u64, table: &str, key: Vec<u8>) -> Result<()> {
+        let mvcc = self
+            .mvcc_tables
+            .get(table)
+            .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", table)))?;
+        let snapshot = self.snapshot_for_wal(tx_id, start_ts);
+        let _ = mvcc.delete(&snapshot, &key)?;
+        Ok(())
+    }
+
+    fn doc_apply_wal(&self, table: &str, key: Vec<u8>, doc: Document<Vec<u8>>) -> Result<()> {
+        let store = self
+            .document_stores
+            .get(table)
+            .ok_or_else(|| MonoError::NotFound(format!("Document store '{}' not found", table)))?;
+        store.apply_wal_document(key, doc)?;
+        Ok(())
+    }
+
+    fn ks_set_wal(&self, table: &str, key: Vec<u8>, entry: TtlEntry<Vec<u8>>) -> Result<()> {
+        let ks = self
+            .keyspaces
+            .get(table)
+            .ok_or_else(|| MonoError::NotFound(format!("Keyspace '{}' not found", table)))?;
+        ks.set_entry(key, entry)?;
+        Ok(())
+    }
+
+    fn ks_delete_wal(&self, table: &str, key: Vec<u8>) -> Result<()> {
+        let ks = self
+            .keyspaces
+            .get(table)
+            .ok_or_else(|| MonoError::NotFound(format!("Keyspace '{}' not found", table)))?;
+        let _ = ks.delete(&key)?;
+        Ok(())
+    }
+
+    fn replay_wal_ddl(&self) -> Result<()> {
+        let wal = match &self.wal {
+            Some(wal) => wal,
+            None => return Ok(()),
+        };
+
+        let entries = wal.read_entries()?;
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let mut committed = HashMap::new();
+        let mut aborted = HashSet::new();
+
+        for entry in &entries {
+            match entry.header.entry_type {
+                WalEntryType::TxCommit => {
+                    let (tx_id, commit_ts) =
+                        Wal::parse_tx_commit_payload(&entry.payload, entry.header.tx_id);
+                    committed.insert(tx_id, commit_ts);
+                }
+                WalEntryType::TxRollback => {
+                    let tx_id = Wal::parse_tx_rollback_payload(&entry.payload, entry.header.tx_id);
+                    aborted.insert(tx_id);
+                }
+                _ => {}
+            }
+        }
+
+        let mut applied = 0u64;
+        for entry in entries {
+            if entry.header.entry_type != WalEntryType::Ddl {
+                continue;
+            }
+
+            let tx_id = entry.header.tx_id;
+            if tx_id != 0 && (!committed.contains_key(&tx_id) || aborted.contains(&tx_id)) {
+                continue;
+            }
+
+            let ddl = Wal::parse_ddl_payload(&entry.payload)?;
+            self.apply_wal_ddl(ddl)?;
+            applied += 1;
+        }
+
+        if applied > 0 {
+            tracing::info!("WAL DDL replay complete: {} entries applied", applied);
+        }
+
+        Ok(())
+    }
+
+    fn apply_wal_ddl(&self, record: WalDdlRecord) -> Result<()> {
+        match record {
+            WalDdlRecord::SchemaUpsert(bytes) => {
+                let schema = SchemaCatalog::decode_schema_entry(&bytes)?;
+                let (namespace, _) = NamespaceManager::parse_qualified(&schema.name);
+                if !self.namespace_manager.exists(namespace) {
+                    self.namespace_manager.create(namespace, None)?;
+                }
+
+                if let Some(existing) = self.schema_catalog.get(&schema.name) {
+                    if Self::schema_equivalent(&existing, &schema) {
+                        return Ok(());
+                    }
+                    self.schema_catalog.remove(&schema.name)?;
+                }
+                self.schema_catalog.register(schema)?;
+            }
+            WalDdlRecord::SchemaDrop(name) => {
+                self.schema_catalog.remove(&name)?;
+            }
+            WalDdlRecord::NamespaceCreate(name) => {
+                if !self.namespace_manager.exists(&name) {
+                    self.namespace_manager.create(&name, None)?;
+                }
+            }
+            WalDdlRecord::NamespaceDrop { name, force } => {
+                if self.namespace_manager.exists(&name) {
+                    self.namespace_manager.remove(&name, force)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn schema_equivalent(lhs: &StoredTableSchema, rhs: &StoredTableSchema) -> bool {
+        if lhs.name != rhs.name
+            || lhs.table_type != rhs.table_type
+            || lhs.meta_page_id != rhs.meta_page_id
+            || lhs.primary_key != rhs.primary_key
+        {
+            return false;
+        }
+
+        if lhs.columns.len() != rhs.columns.len() || lhs.indexes.len() != rhs.indexes.len() {
+            return false;
+        }
+
+        for (left, right) in lhs.columns.iter().zip(rhs.columns.iter()) {
+            if !Self::column_equivalent(left, right) {
+                return false;
+            }
+        }
+
+        for (left, right) in lhs.indexes.iter().zip(rhs.indexes.iter()) {
+            if !Self::index_equivalent(left, right) {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    fn column_equivalent(lhs: &StoredColumnSchema, rhs: &StoredColumnSchema) -> bool {
+        lhs.name == rhs.name
+            && lhs.data_type == rhs.data_type
+            && lhs.nullable == rhs.nullable
+            && lhs.default == rhs.default
+    }
+
+    fn index_equivalent(lhs: &StoredIndex, rhs: &StoredIndex) -> bool {
+        lhs.name == rhs.name
+            && lhs.columns == rhs.columns
+            && lhs.unique == rhs.unique
+            && lhs.index_type == rhs.index_type
+    }
+
+    fn replay_wal_mutations(&self) -> Result<()> {
+        let wal = match &self.wal {
+            Some(wal) => wal,
+            None => return Ok(()),
+        };
+
+        let entries = wal.read_entries()?;
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let mut committed = HashMap::new();
+        let mut aborted = HashSet::new();
+        let mut start_ts = HashMap::new();
+        let mut max_ts = 0u64;
+
+        for entry in &entries {
+            match entry.header.entry_type {
+                WalEntryType::TxBegin => {
+                    let (tx_id, ts) =
+                        Wal::parse_tx_begin_payload(&entry.payload, entry.header.tx_id);
+                    start_ts.insert(tx_id, ts);
+                    max_ts = max_ts.max(tx_id).max(ts);
+                }
+                WalEntryType::TxCommit => {
+                    let (tx_id, commit_ts) =
+                        Wal::parse_tx_commit_payload(&entry.payload, entry.header.tx_id);
+                    committed.insert(tx_id, commit_ts);
+                    max_ts = max_ts.max(tx_id).max(commit_ts);
+                }
+                WalEntryType::TxRollback => {
+                    let tx_id = Wal::parse_tx_rollback_payload(&entry.payload, entry.header.tx_id);
+                    aborted.insert(tx_id);
+                    max_ts = max_ts.max(tx_id);
+                }
+                _ => {}
+            }
+        }
+
+        if max_ts > 0 {
+            self.tx_manager.restore_timestamp(max_ts + 1);
+        }
+
+        let mut replayed = 0u64;
+        let mut skipped = 0u64;
+
+        for entry in entries {
+            match entry.header.entry_type {
+                WalEntryType::Insert | WalEntryType::Update | WalEntryType::Delete => {
+                    let tx_id = entry.header.tx_id;
+                    if tx_id != 0 && (!committed.contains_key(&tx_id) || aborted.contains(&tx_id)) {
+                        skipped += 1;
+                        continue;
+                    }
+
+                    let (table, key, value_blob) = Wal::parse_mutation_payload(&entry.payload)?;
+
+                    let resolved = match self.resolve_wal_table_name(&table) {
+                        Some(name) => name,
+                        None => {
+                            tracing::warn!("WAL replay skipped unknown table '{}'", table);
+                            continue;
+                        }
+                    };
+
+                    let table_info = match self.tables.read().get(&resolved) {
+                        Some(info) => info.clone(),
+                        None => {
+                            tracing::warn!("WAL replay skipped missing table '{}'", resolved);
+                            continue;
+                        }
+                    };
+
+                    match table_info.storage_type {
+                        StorageType::Relational => {
+                            let snapshot_ts = start_ts.get(&tx_id).copied().unwrap_or(tx_id);
+                            match entry.header.entry_type {
+                                WalEntryType::Delete => {
+                                    self.mvcc_delete_wal(tx_id, snapshot_ts, &resolved, key)?;
+                                }
+                                _ => {
+                                    let blob = value_blob.ok_or_else(|| {
+                                        MonoError::Wal("Missing value for WAL write".into())
+                                    })?;
+                                    let (value, _) = Vec::<u8>::deserialize(&blob)?;
+                                    self.mvcc_write_wal(tx_id, snapshot_ts, &resolved, key, value)?;
+                                }
+                            }
+                        }
+                        StorageType::Document => {
+                            let blob = value_blob.ok_or_else(|| {
+                                MonoError::Wal("Missing document payload in WAL".into())
+                            })?;
+                            let (doc, _) = Document::<Vec<u8>>::deserialize(&blob)?;
+                            self.doc_apply_wal(&resolved, key, doc)?;
+                        }
+                        StorageType::Keyspace => match entry.header.entry_type {
+                            WalEntryType::Delete => {
+                                self.ks_delete_wal(&resolved, key)?;
+                            }
+                            _ => {
+                                let blob = value_blob.ok_or_else(|| {
+                                    MonoError::Wal("Missing keyspace payload in WAL".into())
+                                })?;
+                                let (entry, _) = TtlEntry::<Vec<u8>>::deserialize(&blob)?;
+                                self.ks_set_wal(&resolved, key, entry)?;
+                            }
+                        },
+                    }
+
+                    replayed += 1;
+                }
+                _ => {}
+            }
+        }
+
+        for (tx_id, commit_ts) in committed {
+            if tx_id == 0 {
+                continue;
+            }
+            for table in self.mvcc_tables.iter() {
+                if let Err(e) = table.finalize_commit(tx_id, commit_ts) {
+                    tracing::warn!(
+                        "Failed to finalize WAL commit for table {}: {}",
+                        table.key(),
+                        e
+                    );
+                }
+            }
+        }
+
+        tracing::info!(
+            "WAL replay complete: {} entries replayed, {} skipped",
+            replayed,
+            skipped
+        );
+        Ok(())
+    }
     // Document Operations
 
     /// Insert a document. Returns the revision number.
@@ -1317,7 +1696,15 @@ impl StorageEngine {
             MonoError::NotFound(format!("Document store '{}' not found", qualified))
         })?;
 
-        doc_store.insert(key, value)
+        let doc = doc_store.prepare_insert(&key, value)?;
+
+        if let Some(wal) = &self.wal {
+            wal.log_insert(0, &qualified, &key, &doc)?;
+        }
+
+        let revision = doc.revision;
+        doc_store.apply_prepared_insert(key, doc)?;
+        Ok(revision)
     }
 
     /// Get a document. Returns the value and revision if it exists and is not deleted.
@@ -1357,32 +1744,75 @@ impl StorageEngine {
         value: Vec<u8>,
         expected_revision: u64,
     ) -> Result<u64> {
+        let qualified = self.qualify_table_name(store);
         let doc_store = self
             .document_stores
-            .get(&self.qualify_table_name(store))
+            .get(&qualified)
             .ok_or_else(|| MonoError::NotFound(format!("Document store '{}' not found", store)))?;
 
-        doc_store.update(&key.to_vec(), value, expected_revision)
+        let key_vec = key.to_vec();
+        let (doc, previous) = doc_store.prepare_update(&key_vec, value, expected_revision)?;
+
+        if let Some(wal) = &self.wal {
+            wal.log_update(0, &qualified, &key_vec, &doc)?;
+        }
+
+        let revision = doc.revision;
+        doc_store.apply_prepared_update(key_vec, doc, previous)?;
+        Ok(revision)
     }
 
     /// Delete a document with optimistic concurrency.
     pub fn doc_delete(&self, store: &str, key: &[u8], expected_revision: u64) -> Result<bool> {
+        let qualified = self.qualify_table_name(store);
         let doc_store = self
             .document_stores
-            .get(&self.qualify_table_name(store))
+            .get(&qualified)
             .ok_or_else(|| MonoError::NotFound(format!("Document store '{}' not found", store)))?;
 
-        doc_store.delete(&key.to_vec(), expected_revision)
+        let key_vec = key.to_vec();
+        let (doc, previous) = match doc_store.prepare_delete(&key_vec, expected_revision) {
+            Ok(result) => result,
+            Err(MonoError::NotFound(_)) => return Ok(false),
+            Err(e) => return Err(e),
+        };
+
+        if let Some(wal) = &self.wal {
+            wal.log_delete_with_value(0, &qualified, &key_vec, &doc)?;
+        }
+
+        doc_store.apply_prepared_update(key_vec, doc, previous)?;
+        Ok(true)
     }
 
     /// Upsert a document (insert or update without revision check).
     pub fn doc_upsert(&self, store: &str, key: Vec<u8>, value: Vec<u8>) -> Result<u64> {
+        let qualified = self.qualify_table_name(store);
         let doc_store = self
             .document_stores
-            .get(&self.qualify_table_name(store))
+            .get(&qualified)
             .ok_or_else(|| MonoError::NotFound(format!("Document store '{}' not found", store)))?;
 
-        doc_store.upsert(key, value)
+        let existing = doc_store.get(&key)?;
+        if let Some(doc) = existing
+            && !doc.deleted
+        {
+            let (updated, previous) = doc_store.prepare_update(&key, value, doc.revision)?;
+            if let Some(wal) = &self.wal {
+                wal.log_update(0, &qualified, &key, &updated)?;
+            }
+            let revision = updated.revision;
+            doc_store.apply_prepared_update(key, updated, previous)?;
+            Ok(revision)
+        } else {
+            let doc = doc_store.prepare_insert(&key, value)?;
+            if let Some(wal) = &self.wal {
+                wal.log_insert(0, &qualified, &key, &doc)?;
+            }
+            let revision = doc.revision;
+            doc_store.apply_prepared_insert(key, doc)?;
+            Ok(revision)
+        }
     }
 
     /// Get document history (most recent first, including current version).
@@ -1463,12 +1893,24 @@ impl StorageEngine {
 
     /// Set a value in a keyspace.
     pub fn ks_set(&self, name: &str, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
+        let qualified = self.qualify_table_name(name);
         let ks = self
             .keyspaces
-            .get(&self.qualify_table_name(name))
+            .get(&qualified)
             .ok_or_else(|| MonoError::NotFound(format!("Keyspace '{}' not found", name)))?;
 
-        ks.set(key, value)
+        let existed = ks.exists(&key)?;
+        let entry = TtlEntry::new(value);
+
+        if let Some(wal) = &self.wal {
+            if existed {
+                wal.log_update(0, &qualified, &key, &entry)?;
+            } else {
+                wal.log_insert(0, &qualified, &key, &entry)?;
+            }
+        }
+
+        ks.set_entry(key, entry)
     }
 
     /// Set a value with TTL (time-to-live in milliseconds).
@@ -1479,20 +1921,39 @@ impl StorageEngine {
         value: Vec<u8>,
         ttl_ms: u64,
     ) -> Result<()> {
+        let qualified = self.qualify_table_name(name);
         let ks = self
             .keyspaces
-            .get(&self.qualify_table_name(name))
+            .get(&qualified)
             .ok_or_else(|| MonoError::NotFound(format!("Keyspace '{}' not found", name)))?;
 
-        ks.set_with_ttl(key, value, ttl_ms)
+        let existed = ks.exists(&key)?;
+        let expires_at = super::keyspace::current_time_ms().saturating_add(ttl_ms);
+        let entry = TtlEntry { value, expires_at };
+
+        if let Some(wal) = &self.wal {
+            if existed {
+                wal.log_update(0, &qualified, &key, &entry)?;
+            } else {
+                wal.log_insert(0, &qualified, &key, &entry)?;
+            }
+        }
+
+        ks.set_entry(key, entry)
     }
 
     /// Delete a key from a keyspace.
     pub fn ks_delete(&self, name: &str, key: &[u8]) -> Result<bool> {
+        let qualified = self.qualify_table_name(name);
         let ks = self
             .keyspaces
-            .get(&self.qualify_table_name(name))
+            .get(&qualified)
             .ok_or_else(|| MonoError::NotFound(format!("Keyspace '{}' not found", name)))?;
+
+        let existed = ks.exists(&key.to_vec())?;
+        if existed && let Some(wal) = &self.wal {
+            wal.log_delete::<Vec<u8>>(0, &qualified, &key.to_vec())?;
+        }
 
         ks.delete(&key.to_vec())
     }
@@ -1584,8 +2045,48 @@ impl StorageEngine {
         if let Some(wal) = &self.wal {
             wal.log_checkpoint()?;
             wal.sync()?;
+            if self.config.wal_truncate_on_checkpoint && self.active_txs.is_empty() {
+                wal.truncate()?;
+            }
         }
 
+        Ok(())
+    }
+
+    /// Log a schema upsert to the WAL.
+    pub fn wal_log_schema_upsert(&self, schema: &StoredTableSchema) -> Result<()> {
+        if let Some(wal) = &self.wal {
+            let payload = SchemaCatalog::encode_schema_entry(schema)?;
+            wal.log_schema_upsert(payload)?;
+            wal.sync()?;
+        }
+        Ok(())
+    }
+
+    /// Log a schema drop to the WAL.
+    pub fn wal_log_schema_drop(&self, name: &str) -> Result<()> {
+        if let Some(wal) = &self.wal {
+            wal.log_schema_drop(name)?;
+            wal.sync()?;
+        }
+        Ok(())
+    }
+
+    /// Log a namespace create to the WAL.
+    pub fn wal_log_namespace_create(&self, name: &str) -> Result<()> {
+        if let Some(wal) = &self.wal {
+            wal.log_namespace_create(name)?;
+            wal.sync()?;
+        }
+        Ok(())
+    }
+
+    /// Log a namespace drop to the WAL.
+    pub fn wal_log_namespace_drop(&self, name: &str, force: bool) -> Result<()> {
+        if let Some(wal) = &self.wal {
+            wal.log_namespace_drop(name, force)?;
+            wal.sync()?;
+        }
         Ok(())
     }
 
@@ -1695,7 +2196,12 @@ impl StorageStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use tempfile::TempDir;
+    use crate::query_engine::ast::{
+        ColumnConstraint, ColumnDef, DataType, Ident, Span, Spanned, TableType,
+    };
+    use crate::query_engine::storage::StorageAdapter;
 
     fn test_config() -> (StorageConfig, TempDir) {
         let dir = TempDir::new().unwrap();
@@ -1960,5 +2466,72 @@ mod tests {
         let results = engine.mvcc_scan(tx2, "items").unwrap();
         assert_eq!(results.len(), 3);
         engine.commit(tx2).unwrap();
+    }
+
+    fn spanned_ident(name: &str) -> Spanned<Ident> {
+        Spanned::new(Ident::new(name), Span::DUMMY)
+    }
+
+    #[test]
+    fn test_wal_replay_restores_schema() {
+        let dir = TempDir::new().unwrap();
+        let config = StorageConfig {
+            data_dir: dir.path().to_path_buf(),
+            buffer_pool_size: 64,
+            wal_enabled: true,
+            wal_sync_on_commit: false,
+            wal_sync_every_bytes: None,
+            wal_sync_interval_ms: None,
+            wal_truncate_on_checkpoint: false,
+            ..Default::default()
+        };
+
+        let engine = Arc::new(StorageEngine::new(config.clone()).unwrap());
+        let storage = StorageAdapter::new(Arc::clone(&engine));
+
+        storage.create_namespace("analytics").unwrap();
+
+        let columns = vec![
+            ColumnDef {
+                name: spanned_ident("id"),
+                data_type: DataType::Int64,
+                constraints: vec![ColumnConstraint::PrimaryKey],
+            },
+            ColumnDef {
+                name: spanned_ident("name"),
+                data_type: DataType::String,
+                constraints: Vec::new(),
+            },
+        ];
+
+        storage
+            .create_table_with_schema("analytics.users", TableType::Relational, &columns, &[])
+            .unwrap();
+
+        let version = engine
+            .schema_catalog()
+            .get("analytics.users")
+            .unwrap()
+            .version;
+
+        engine.shutdown().unwrap();
+        drop(storage);
+        drop(engine);
+
+        let schema_path = dir.path().join("schemas.bin");
+        let namespace_path = dir.path().join("namespaces.bin");
+        std::fs::remove_file(schema_path).unwrap();
+        std::fs::remove_file(namespace_path).unwrap();
+
+        let engine = StorageEngine::new(config).unwrap();
+        assert!(engine.namespace_manager().exists("analytics"));
+        assert!(engine.get_table_info("analytics.users").is_some());
+        let version_after = engine
+            .schema_catalog()
+            .get("analytics.users")
+            .unwrap()
+            .version;
+        assert_eq!(version_after, version);
+        engine.shutdown().unwrap();
     }
 }

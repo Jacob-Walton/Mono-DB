@@ -210,6 +210,11 @@ impl StorageAdapter {
         self.engine.flush()
     }
 
+    /// Run a checkpoint (flush + WAL marker).
+    pub fn checkpoint(&self) -> Result<()> {
+        self.engine.checkpoint()
+    }
+
     /// Encode a key value to bytes using the native binary format.
     fn encode_key(value: &Value) -> Vec<u8> {
         value.to_bytes()
@@ -432,9 +437,14 @@ impl StorageAdapter {
                         );
                         col_obj.insert("nullable".to_string(), Value::Bool(col.nullable));
                         let is_pk = schema.primary_key.contains(&col.name);
+                        let has_unique_index = schema.indexes.iter().any(|idx| {
+                            idx.unique && idx.columns.len() == 1 && idx.columns[0] == col.name
+                        });
                         col_obj.insert("is_primary".to_string(), Value::Bool(is_pk));
-                        // Primary keys are implicitly unique; separate UNIQUE constraint not yet tracked
-                        col_obj.insert("is_unique".to_string(), Value::Bool(is_pk));
+                        col_obj.insert(
+                            "is_unique".to_string(),
+                            Value::Bool(is_pk || has_unique_index),
+                        );
                         if let Some(ref default) = col.default {
                             // Format default value for display
                             let default_str = match default {
@@ -539,12 +549,20 @@ impl StorageAdapter {
 
     /// Create a new namespace
     pub fn create_namespace(&self, name: &str) -> Result<()> {
-        self.engine.namespace_manager().create(name, None)
+        self.engine.namespace_manager().create(name, None)?;
+        self.engine.wal_log_namespace_create(name)?;
+        Ok(())
     }
 
     /// Drop a namespace and all its tables
     pub fn drop_namespace(&self, name: &str, force: bool) -> Result<()> {
-        self.engine.drop_namespace(name, force)
+        let tables = self.engine.list_tables_in_namespace(name);
+        self.engine.drop_namespace(name, force)?;
+        for table in tables {
+            self.engine.wal_log_schema_drop(&table.name)?;
+        }
+        self.engine.wal_log_namespace_drop(name, force)?;
+        Ok(())
     }
 
     /// Add columns to an existing table
@@ -602,7 +620,8 @@ impl StorageAdapter {
         // Update schema catalog
         self.engine
             .schema_catalog()
-            .add_columns(table, &stored_columns)
+            .add_columns(table, &stored_columns)?;
+        self.wal_log_schema_upsert(table)
     }
 
     /// Backfill existing rows with default values for new columns.
@@ -679,6 +698,7 @@ impl StorageAdapter {
 
         // Update the schema first
         self.engine.schema_catalog().drop_columns(table, columns)?;
+        self.wal_log_schema_upsert(table)?;
 
         // Now update existing rows to remove the dropped columns
         let tx_id = self.engine.begin_transaction()?;
@@ -738,6 +758,7 @@ impl StorageAdapter {
         self.engine
             .schema_catalog()
             .rename_columns(table, renames)?;
+        self.wal_log_schema_upsert(table)?;
 
         // Now update existing rows to rename the columns
         let tx_id = self.engine.begin_transaction()?;
@@ -780,7 +801,10 @@ impl StorageAdapter {
 
     /// Rename a table
     pub fn rename_table(&self, old_name: &str, new_name: &str) -> Result<()> {
-        self.engine.rename_table(old_name, new_name)
+        self.engine.rename_table(old_name, new_name)?;
+        self.engine.wal_log_schema_drop(old_name)?;
+        self.wal_log_schema_upsert(new_name)?;
+        Ok(())
     }
 
     /// Alter a column's properties (default, nullability, type)
@@ -798,15 +822,13 @@ impl StorageAdapter {
             new_default,
             new_nullable,
             new_type,
-        )
+        )?;
+        self.wal_log_schema_upsert(table)
     }
 
     /// Evaluate a default expression to a Value (public wrapper for network layer)
     #[cfg(feature = "plugins")]
-    pub fn eval_default_expr(
-        &self,
-        expr: &Spanned<Expr>,
-    ) -> Result<Value> {
+    pub fn eval_default_expr(&self, expr: &Spanned<Expr>) -> Result<Value> {
         if let Some(value) = Self::eval_constant_expr(&expr.node) {
             // If it's a plugin function marker, verify the function exists
             if let Value::String(s) = &value
@@ -918,6 +940,22 @@ impl StorageAdapter {
                     }
                 }
 
+                let mut unique_columns = Vec::new();
+                for col in columns {
+                    let is_unique = col
+                        .constraints
+                        .iter()
+                        .any(|c| matches!(c, crate::query_engine::ast::ColumnConstraint::Unique));
+                    if !is_unique {
+                        continue;
+                    }
+                    let col_name = col.name.node.as_str().to_string();
+                    if primary_keys.contains(&col_name) {
+                        continue;
+                    }
+                    unique_columns.push(col_name);
+                }
+
                 // First create the physical table to get meta_page_id
                 let meta_page_id = self.engine.create_relational_table(name)?;
 
@@ -934,6 +972,14 @@ impl StorageAdapter {
                 };
 
                 self.engine.schema_catalog().register(schema)?;
+                self.wal_log_schema_upsert(name)?;
+
+                for col_name in unique_columns {
+                    let index_name = format!("uniq_{}", col_name);
+                    self.engine
+                        .create_index(name, &index_name, vec![col_name], true)?;
+                }
+                self.wal_log_schema_upsert(name)?;
 
                 Ok(())
             }
@@ -954,6 +1000,7 @@ impl StorageAdapter {
                 };
 
                 self.engine.schema_catalog().register(schema)?;
+                self.wal_log_schema_upsert(name)?;
                 Ok(())
             }
             TableType::Keyspace => {
@@ -973,6 +1020,7 @@ impl StorageAdapter {
                 };
 
                 self.engine.schema_catalog().register(schema)?;
+                self.wal_log_schema_upsert(name)?;
                 Ok(())
             }
         }
@@ -986,12 +1034,15 @@ impl StorageAdapter {
         columns: Vec<String>,
         unique: bool,
     ) -> Result<()> {
-        self.engine.create_index(table, index_name, columns, unique)
+        self.engine
+            .create_index(table, index_name, columns, unique)?;
+        self.wal_log_schema_upsert(table)
     }
 
     /// Drop a secondary index from a table
     pub fn drop_index(&self, table: &str, index_name: &str) -> Result<()> {
-        self.engine.drop_index(table, index_name)
+        self.engine.drop_index(table, index_name)?;
+        self.wal_log_schema_upsert(table)
     }
 
     /// Find rows by secondary index lookup
@@ -1007,6 +1058,13 @@ impl StorageAdapter {
     /// Get all indexes for a table
     pub fn get_indexes(&self, table: &str) -> Vec<crate::storage::schema::StoredIndex> {
         self.engine.get_indexes(table)
+    }
+
+    fn wal_log_schema_upsert(&self, table: &str) -> Result<()> {
+        if let Some(schema) = self.engine.schema_catalog().get(table) {
+            self.engine.wal_log_schema_upsert(&schema)?;
+        }
+        Ok(())
     }
 }
 
@@ -1285,7 +1343,9 @@ impl QueryStorage for StorageAdapter {
     }
 
     fn drop_table(&self, name: &str) -> Result<()> {
-        self.engine.drop_table(name)
+        self.engine.drop_table(name)?;
+        self.engine.wal_log_schema_drop(name)?;
+        Ok(())
     }
 
     fn find_by_index(
@@ -1530,5 +1590,86 @@ impl monodb_plugin::PluginStorage for StorageAdapter {
 
     fn list_tables(&self) -> anyhow::Result<Vec<(String, String)>> {
         Ok(self.list_tables())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use crate::query_engine::ast::{
+        ColumnConstraint, ColumnDef, DataType, Ident, Span, Spanned, TableType,
+    };
+    use crate::storage::engine::StorageConfig;
+
+    fn spanned_ident(name: &str) -> Spanned<Ident> {
+        Spanned::new(Ident::new(name), Span::DUMMY)
+    }
+
+    #[test]
+    fn test_unique_column_creates_index_and_describe() {
+        let dir = TempDir::new().unwrap();
+        let config = StorageConfig {
+            data_dir: dir.path().to_path_buf(),
+            buffer_pool_size: 64,
+            wal_enabled: false,
+            ..Default::default()
+        };
+
+        let engine = Arc::new(StorageEngine::new(config).unwrap());
+        let storage = StorageAdapter::new(Arc::clone(&engine));
+
+        let columns = vec![
+            ColumnDef {
+                name: spanned_ident("id"),
+                data_type: DataType::Int64,
+                constraints: vec![ColumnConstraint::PrimaryKey],
+            },
+            ColumnDef {
+                name: spanned_ident("email"),
+                data_type: DataType::String,
+                constraints: vec![ColumnConstraint::Unique],
+            },
+        ];
+
+        storage
+            .create_table_with_schema("default.users", TableType::Relational, &columns, &[])
+            .unwrap();
+
+        let indexes = engine.get_indexes("default.users");
+        assert!(indexes
+            .iter()
+            .any(|idx| idx.unique && idx.columns == vec!["email".to_string()]));
+
+        let description = storage.describe_table("default.users").unwrap();
+        let columns_val = match description {
+            Value::Object(obj) => obj.get("columns").cloned().unwrap(),
+            _ => panic!("expected object description"),
+        };
+        let columns_list = match columns_val {
+            Value::Array(cols) => cols,
+            _ => panic!("expected columns array"),
+        };
+        let email_unique = columns_list
+            .iter()
+            .find_map(|col| {
+                let Value::Object(col_obj) = col else {
+                    return None;
+                };
+                let Some(Value::String(name)) = col_obj.get("name") else {
+                    return None;
+                };
+                if name != "email" {
+                    return None;
+                }
+                match col_obj.get("is_unique") {
+                    Some(Value::Bool(val)) => Some(*val),
+                    _ => None,
+                }
+            })
+            .unwrap();
+
+        assert!(email_unique);
     }
 }

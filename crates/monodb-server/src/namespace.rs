@@ -7,6 +7,8 @@
 //! Each namespace gets its own subdirectory under the data directory.
 
 use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -394,12 +396,29 @@ impl NamespaceManager {
         // Write to file atomically
         let path = self.namespace_file();
         let temp_path = path.with_extension("bin.tmp");
-        std::fs::write(&temp_path, &buf)
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&temp_path)
             .map_err(|e| MonoError::Io(format!("Failed to write namespace file: {}", e)))?;
+        file.write_all(&buf)
+            .map_err(|e| MonoError::Io(format!("Failed to write namespace file: {}", e)))?;
+        file.sync_all()
+            .map_err(|e| MonoError::Io(format!("Failed to sync namespace file: {}", e)))?;
         std::fs::rename(&temp_path, &path)
             .map_err(|e| MonoError::Io(format!("Failed to rename namespace file: {}", e)))?;
+        Self::sync_parent_dir(&path);
 
         Ok(())
+    }
+
+    fn sync_parent_dir(path: &Path) {
+        if let Some(parent) = path.parent()
+            && let Ok(dir) = std::fs::File::open(parent)
+        {
+            let _ = dir.sync_all();
+        }
     }
 
     /// Load namespaces from disk

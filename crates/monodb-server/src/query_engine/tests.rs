@@ -253,7 +253,7 @@ mod lexer_tests {
         let input = "get from users // this is a comment\n";
         let kinds = lex_to_kinds(input);
 
-        // Comment should be skipped - we expect: get, from, users (3 keyword tokens)
+        // Comment should be skipped, we expect: get, from, users (3 keyword tokens)
         assert_eq!(kinds.len(), 3);
         assert!(
             kinds
@@ -931,7 +931,7 @@ mod fingerprint_tests {
         let q1 = parse_get("get from users where age > 25");
         let q2 = parse_get("get from users where age > 30");
 
-        // Same table, same structure - fingerprints should match
+        // Same table, same structure; fingerprints should match
         assert_eq!(q1.source.node.as_ref(), q2.source.node.as_ref());
     }
 }

@@ -709,6 +709,11 @@ where
         Ok(None)
     }
 
+    /// Check if a visible record exists for the given key.
+    pub fn exists(&self, snapshot: &Snapshot, key: &K) -> Result<bool> {
+        Ok(self.read(snapshot, key)?.is_some())
+    }
+
     /// Write a value in a transaction.
     pub fn write(&self, snapshot: &Snapshot, key: K, value: V) -> Result<()> {
         // Check for conflicts (for serializable)
@@ -774,6 +779,9 @@ where
             if record.is_visible(snapshot, &self.tx_manager) {
                 // Mark as deleted
                 record.mark_deleted(snapshot.tx_id);
+                // Track for finalize_commit
+                self.tx_manager
+                    .record_versioned_key(snapshot.tx_id, versioned_key.clone());
                 self.tree.insert(versioned_key, record)?;
                 return Ok(true);
             }

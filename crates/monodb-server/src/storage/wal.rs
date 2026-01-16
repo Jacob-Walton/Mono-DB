@@ -56,6 +56,8 @@ pub enum WalEntryType {
     TxRollback = 6,
     /// Checkpoint marker.
     Checkpoint = 7,
+    /// DDL/schema change.
+    Ddl = 8,
 }
 
 impl From<u8> for WalEntryType {
@@ -68,9 +70,45 @@ impl From<u8> for WalEntryType {
             5 => WalEntryType::TxCommit,
             6 => WalEntryType::TxRollback,
             7 => WalEntryType::Checkpoint,
+            8 => WalEntryType::Ddl,
             _ => WalEntryType::Invalid,
         }
     }
+}
+
+/// DDL operation recorded in the WAL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum WalDdlOp {
+    /// Upsert a schema entry.
+    SchemaUpsert = 1,
+    /// Drop a schema entry.
+    SchemaDrop = 2,
+    /// Create a namespace.
+    NamespaceCreate = 3,
+    /// Drop a namespace.
+    NamespaceDrop = 4,
+}
+
+impl WalDdlOp {
+    fn from_byte(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(WalDdlOp::SchemaUpsert),
+            2 => Some(WalDdlOp::SchemaDrop),
+            3 => Some(WalDdlOp::NamespaceCreate),
+            4 => Some(WalDdlOp::NamespaceDrop),
+            _ => None,
+        }
+    }
+}
+
+/// Parsed DDL payload data.
+#[derive(Debug, Clone)]
+pub enum WalDdlRecord {
+    SchemaUpsert(Vec<u8>),
+    SchemaDrop(String),
+    NamespaceCreate(String),
+    NamespaceDrop { name: String, force: bool },
 }
 
 // WAL entry header and payload
@@ -177,10 +215,12 @@ impl WalEntry {
 pub struct WalConfig {
     /// Path to WAL file.
     pub path: PathBuf,
+    /// Buffer size for WAL writes.
+    pub buffer_size: usize,
     /// Bytes to write before syncing.
-    pub sync_every_bytes: u64,
+    pub sync_every_bytes: Option<u64>,
     /// Maximum time between syncs.
-    pub sync_interval_ms: u64,
+    pub sync_interval_ms: Option<u64>,
     /// Whether to sync on commit.
     pub sync_on_commit: bool,
 }
@@ -189,8 +229,9 @@ impl Default for WalConfig {
     fn default() -> Self {
         Self {
             path: PathBuf::from("data.wal"),
-            sync_every_bytes: DEFAULT_SYNC_EVERY_BYTES,
-            sync_interval_ms: DEFAULT_SYNC_INTERVAL_MS,
+            buffer_size: 64 * 1024,
+            sync_every_bytes: Some(DEFAULT_SYNC_EVERY_BYTES),
+            sync_interval_ms: Some(DEFAULT_SYNC_INTERVAL_MS),
             sync_on_commit: true,
         }
     }
@@ -220,7 +261,7 @@ struct WalWriter {
 impl WalWriter {
     fn new(file: File, config: WalConfig) -> Self {
         Self {
-            file: BufWriter::with_capacity(64 * 1024, file),
+            file: BufWriter::with_capacity(config.buffer_size, file),
             pending_bytes: 0,
             last_sync: Instant::now(),
             config,
@@ -238,8 +279,19 @@ impl WalWriter {
     }
 
     fn maybe_sync(&mut self) -> Result<()> {
-        let should_sync = self.pending_bytes >= self.config.sync_every_bytes
-            || self.last_sync.elapsed() >= Duration::from_millis(self.config.sync_interval_ms);
+        let mut should_sync = false;
+
+        if let Some(threshold) = self.config.sync_every_bytes
+            && self.pending_bytes >= threshold
+        {
+            should_sync = true;
+        }
+
+        if let Some(interval_ms) = self.config.sync_interval_ms
+            && self.last_sync.elapsed() >= Duration::from_millis(interval_ms)
+        {
+            should_sync = true;
+        }
 
         if should_sync {
             self.sync()?;
@@ -464,13 +516,21 @@ impl Wal {
     }
 
     /// Log transaction begin.
-    pub fn log_tx_begin(&self, tx_id: u64) -> Result<u64> {
-        self.append(tx_id, WalEntryType::TxBegin, Vec::new())
+    /// Payload: tx_id (u64) + start_ts (u64)
+    pub fn log_tx_begin(&self, tx_id: u64, start_ts: u64) -> Result<u64> {
+        let mut payload = Vec::with_capacity(16);
+        payload.extend_from_slice(&tx_id.to_le_bytes());
+        payload.extend_from_slice(&start_ts.to_le_bytes());
+        self.append(tx_id, WalEntryType::TxBegin, payload)
     }
 
     /// Log transaction commit.
-    pub fn log_tx_commit(&self, tx_id: u64) -> Result<u64> {
-        let lsn = self.append(tx_id, WalEntryType::TxCommit, Vec::new())?;
+    /// Payload: tx_id (u64) + commit_ts (u64)
+    pub fn log_tx_commit(&self, tx_id: u64, commit_ts: u64) -> Result<u64> {
+        let mut payload = Vec::with_capacity(16);
+        payload.extend_from_slice(&tx_id.to_le_bytes());
+        payload.extend_from_slice(&commit_ts.to_le_bytes());
+        let lsn = self.append(tx_id, WalEntryType::TxCommit, payload)?;
 
         // Track committed transaction
         self.committed_txs.write().insert(tx_id);
@@ -485,7 +545,9 @@ impl Wal {
 
     /// Log transaction rollback.
     pub fn log_tx_rollback(&self, tx_id: u64) -> Result<u64> {
-        self.append(tx_id, WalEntryType::TxRollback, Vec::new())
+        let mut payload = Vec::with_capacity(8);
+        payload.extend_from_slice(&tx_id.to_le_bytes());
+        self.append(tx_id, WalEntryType::TxRollback, payload)
     }
 
     /// Log insert operation.
@@ -518,9 +580,54 @@ impl Wal {
         self.append(tx_id, WalEntryType::Delete, payload)
     }
 
+    /// Log delete operation with a value payload (tombstones, metadata).
+    pub fn log_delete_with_value<K: Serializable, V: Serializable>(
+        &self,
+        tx_id: u64,
+        table: &str,
+        key: &K,
+        value: &V,
+    ) -> Result<u64> {
+        let payload = Self::serialize_mutation(table, key, Some(value));
+        self.append(tx_id, WalEntryType::Delete, payload)
+    }
+
     /// Log checkpoint.
     pub fn log_checkpoint(&self) -> Result<u64> {
         self.append(0, WalEntryType::Checkpoint, Vec::new())
+    }
+
+    /// Log schema upsert.
+    pub fn log_schema_upsert(&self, schema_bytes: Vec<u8>) -> Result<u64> {
+        let mut payload = Vec::new();
+        payload.push(WalDdlOp::SchemaUpsert as u8);
+        schema_bytes.serialize(&mut payload);
+        self.append(0, WalEntryType::Ddl, payload)
+    }
+
+    /// Log schema drop.
+    pub fn log_schema_drop(&self, table: &str) -> Result<u64> {
+        let mut payload = Vec::new();
+        payload.push(WalDdlOp::SchemaDrop as u8);
+        table.to_string().serialize(&mut payload);
+        self.append(0, WalEntryType::Ddl, payload)
+    }
+
+    /// Log namespace create.
+    pub fn log_namespace_create(&self, name: &str) -> Result<u64> {
+        let mut payload = Vec::new();
+        payload.push(WalDdlOp::NamespaceCreate as u8);
+        name.to_string().serialize(&mut payload);
+        self.append(0, WalEntryType::Ddl, payload)
+    }
+
+    /// Log namespace drop.
+    pub fn log_namespace_drop(&self, name: &str, force: bool) -> Result<u64> {
+        let mut payload = Vec::new();
+        payload.push(WalDdlOp::NamespaceDrop as u8);
+        name.to_string().serialize(&mut payload);
+        payload.push(if force { 1 } else { 0 });
+        self.append(0, WalEntryType::Ddl, payload)
     }
 
     /// Serialize a mutation payload.
@@ -566,82 +673,132 @@ impl Wal {
         buf
     }
 
+    /// Parse a mutation payload into (table, key, value_blob).
+    pub fn parse_mutation_payload(payload: &[u8]) -> Result<(String, Vec<u8>, Option<Vec<u8>>)> {
+        let mut offset = 0;
+
+        let (name_len, consumed) = u32::deserialize(payload)?;
+        offset += consumed;
+
+        let name_len = name_len as usize;
+        if payload.len() < offset + name_len {
+            return Err(MonoError::Wal("Malformed WAL payload (table name)".into()));
+        }
+
+        let table = std::str::from_utf8(&payload[offset..offset + name_len])
+            .map_err(|e| MonoError::Wal(format!("Invalid table name in WAL: {}", e)))?
+            .to_string();
+        offset += name_len;
+
+        let (key, consumed) = Vec::<u8>::deserialize(&payload[offset..])?;
+        offset += consumed;
+
+        if offset >= payload.len() {
+            return Ok((table, key, None));
+        }
+
+        let has_value = payload[offset];
+        offset += 1;
+        if has_value == 0 {
+            return Ok((table, key, None));
+        }
+
+        let value_blob = payload[offset..].to_vec();
+        Ok((table, key, Some(value_blob)))
+    }
+
+    /// Parse a TxBegin payload into (tx_id, start_ts).
+    pub fn parse_tx_begin_payload(payload: &[u8], fallback_tx_id: u64) -> (u64, u64) {
+        if payload.len() >= 16 {
+            let tx_id = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+            let start_ts = u64::from_le_bytes(payload[8..16].try_into().unwrap());
+            (tx_id, start_ts)
+        } else {
+            (fallback_tx_id, fallback_tx_id)
+        }
+    }
+
+    /// Parse a TxCommit payload into (tx_id, commit_ts).
+    pub fn parse_tx_commit_payload(payload: &[u8], fallback_tx_id: u64) -> (u64, u64) {
+        if payload.len() >= 16 {
+            let tx_id = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+            let commit_ts = u64::from_le_bytes(payload[8..16].try_into().unwrap());
+            (tx_id, commit_ts)
+        } else {
+            (fallback_tx_id, fallback_tx_id)
+        }
+    }
+
+    /// Parse a TxRollback payload into tx_id.
+    pub fn parse_tx_rollback_payload(payload: &[u8], fallback_tx_id: u64) -> u64 {
+        if payload.len() >= 8 {
+            u64::from_le_bytes(payload[0..8].try_into().unwrap())
+        } else {
+            fallback_tx_id
+        }
+    }
+
+    /// Parse a DDL payload into a structured record.
+    pub fn parse_ddl_payload(payload: &[u8]) -> Result<WalDdlRecord> {
+        if payload.is_empty() {
+            return Err(MonoError::Wal("Malformed DDL payload".into()));
+        }
+
+        let op = WalDdlOp::from_byte(payload[0])
+            .ok_or_else(|| MonoError::Wal("Unknown DDL opcode".into()))?;
+        let mut offset = 1;
+
+        match op {
+            WalDdlOp::SchemaUpsert => {
+                let (bytes, consumed) = Vec::<u8>::deserialize(&payload[offset..])?;
+                offset += consumed;
+                if offset != payload.len() {
+                    return Err(MonoError::Wal("Malformed DDL payload".into()));
+                }
+                Ok(WalDdlRecord::SchemaUpsert(bytes))
+            }
+            WalDdlOp::SchemaDrop => {
+                let (name, consumed) = String::deserialize(&payload[offset..])?;
+                offset += consumed;
+                if offset != payload.len() {
+                    return Err(MonoError::Wal("Malformed DDL payload".into()));
+                }
+                Ok(WalDdlRecord::SchemaDrop(name))
+            }
+            WalDdlOp::NamespaceCreate => {
+                let (name, consumed) = String::deserialize(&payload[offset..])?;
+                offset += consumed;
+                if offset != payload.len() {
+                    return Err(MonoError::Wal("Malformed DDL payload".into()));
+                }
+                Ok(WalDdlRecord::NamespaceCreate(name))
+            }
+            WalDdlOp::NamespaceDrop => {
+                let (name, consumed) = String::deserialize(&payload[offset..])?;
+                offset += consumed;
+                let force = payload.get(offset).copied().unwrap_or(0) != 0;
+                Ok(WalDdlRecord::NamespaceDrop { name, force })
+            }
+        }
+    }
+
     /// Replay WAL entries, calling handler for each entry.
     pub fn replay<F>(&self, mut handler: F) -> Result<u64>
     where
         F: FnMut(&WalEntry) -> Result<()>,
     {
-        let file = File::open(&self.path)
-            .map_err(|e| MonoError::Wal(format!("Failed to open WAL for replay: {}", e)))?;
-
-        let mut reader = BufReader::new(file);
-        let mut header_buf = [0u8; WalEntryHeader::SIZE];
+        let entries = self.read_entries()?;
         let mut count = 0u64;
         let mut committed_txs = std::collections::HashSet::new();
 
-        // First pass: find committed transactions
-        loop {
-            match reader.read_exact(&mut header_buf) {
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(MonoError::Wal(format!("Read error: {}", e))),
-            }
-
-            let header = WalEntryHeader::from_bytes(&header_buf);
-
-            if header.entry_type == WalEntryType::Invalid {
-                break;
-            }
-
-            // Read payload
-            let mut payload = vec![0u8; header.length as usize];
-            if !payload.is_empty() {
-                reader
-                    .read_exact(&mut payload)
-                    .map_err(|e| MonoError::Wal(format!("Read payload error: {}", e)))?;
-            }
-
-            if header.entry_type == WalEntryType::TxCommit {
-                committed_txs.insert(header.tx_id);
+        for entry in &entries {
+            if entry.header.entry_type == WalEntryType::TxCommit {
+                let (tx_id, _) = Self::parse_tx_commit_payload(&entry.payload, entry.header.tx_id);
+                committed_txs.insert(tx_id);
             }
         }
 
-        // Second pass: replay only committed transactions
-        reader
-            .seek(SeekFrom::Start(0))
-            .map_err(|e| MonoError::Wal(format!("Seek error: {}", e)))?;
-
-        loop {
-            match reader.read_exact(&mut header_buf) {
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(MonoError::Wal(format!("Read error: {}", e))),
-            }
-
-            let header = WalEntryHeader::from_bytes(&header_buf);
-
-            if header.entry_type == WalEntryType::Invalid {
-                break;
-            }
-
-            // Read payload
-            let mut payload = vec![0u8; header.length as usize];
-            if !payload.is_empty() {
-                reader
-                    .read_exact(&mut payload)
-                    .map_err(|e| MonoError::Wal(format!("Read payload error: {}", e)))?;
-            }
-
-            let entry = WalEntry { header, payload };
-
-            // Verify checksum
-            if !entry.verify() {
-                return Err(MonoError::ChecksumMismatch {
-                    expected: 0, // We don't have the expected value here
-                    actual: entry.header.checksum,
-                });
-            }
-
+        for entry in entries {
             // Skip uncommitted transactions (MVCC-aware)
             let tx_id = entry.header.tx_id;
             if tx_id != 0 && !committed_txs.contains(&tx_id) {
@@ -661,6 +818,55 @@ impl Wal {
         }
 
         Ok(count)
+    }
+
+    /// Read all entries from the WAL file.
+    pub fn read_entries(&self) -> Result<Vec<WalEntry>> {
+        let file = match File::open(&self.path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(MonoError::Wal(format!("Failed to open WAL: {}", e))),
+        };
+
+        let mut reader = BufReader::new(file);
+        let mut header_buf = [0u8; WalEntryHeader::SIZE];
+        let mut entries = Vec::new();
+
+        loop {
+            match reader.read_exact(&mut header_buf) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(MonoError::Wal(format!("Read error: {}", e))),
+            }
+
+            let header = WalEntryHeader::from_bytes(&header_buf);
+            if header.entry_type == WalEntryType::Invalid {
+                break;
+            }
+
+            let mut payload = vec![0u8; header.length as usize];
+            if !payload.is_empty() {
+                match reader.read_exact(&mut payload) {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                    Err(e) => {
+                        return Err(MonoError::Wal(format!("Read payload error: {}", e)));
+                    }
+                }
+            }
+
+            let entry = WalEntry { header, payload };
+            if !entry.verify() {
+                return Err(MonoError::ChecksumMismatch {
+                    expected: 0,
+                    actual: entry.header.checksum,
+                });
+            }
+
+            entries.push(entry);
+        }
+
+        Ok(entries)
     }
 
     /// Get current LSN.
@@ -729,7 +935,7 @@ mod tests {
         let wal = Wal::open(config).unwrap();
 
         // Begin transaction
-        let lsn1 = wal.log_tx_begin(1).unwrap();
+        let lsn1 = wal.log_tx_begin(1, 1).unwrap();
         assert_eq!(lsn1, 1);
 
         // Insert
@@ -739,7 +945,7 @@ mod tests {
         assert_eq!(lsn2, 2);
 
         // Commit
-        let lsn3 = wal.log_tx_commit(1).unwrap();
+        let lsn3 = wal.log_tx_commit(1, 2).unwrap();
         assert_eq!(lsn3, 3);
 
         wal.shutdown().unwrap();
@@ -759,13 +965,13 @@ mod tests {
         {
             let wal = Wal::open(config.clone()).unwrap();
 
-            wal.log_tx_begin(1).unwrap();
+            wal.log_tx_begin(1, 1).unwrap();
             wal.log_insert(1, "users", &"k1".to_string(), &"v1".to_string())
                 .unwrap();
-            wal.log_tx_commit(1).unwrap();
+            wal.log_tx_commit(1, 2).unwrap();
 
             // Uncommitted transaction (should be skipped on replay)
-            wal.log_tx_begin(2).unwrap();
+            wal.log_tx_begin(2, 2).unwrap();
             wal.log_insert(2, "users", &"k2".to_string(), &"v2".to_string())
                 .unwrap();
             // No commit!
@@ -820,5 +1026,56 @@ mod tests {
 
         wal.sync().unwrap();
         wal.shutdown().unwrap();
+    }
+
+    #[test]
+    fn test_wal_ddl_entries() {
+        let dir = tempdir().unwrap();
+        let config = WalConfig {
+            path: dir.path().join("ddl.wal"),
+            sync_on_commit: false,
+            ..Default::default()
+        };
+
+        {
+            let wal = Wal::open(config.clone()).unwrap();
+            wal.log_schema_upsert(vec![1, 2, 3]).unwrap();
+            wal.log_schema_drop("default.users").unwrap();
+            wal.log_namespace_create("analytics").unwrap();
+            wal.log_namespace_drop("analytics", true).unwrap();
+            wal.shutdown().unwrap();
+        }
+
+        {
+            let wal = Wal::open(config).unwrap();
+            let entries = wal.read_entries().unwrap();
+            let ddl_entries: Vec<_> = entries
+                .iter()
+                .filter(|e| e.header.entry_type == WalEntryType::Ddl)
+                .collect();
+            assert_eq!(ddl_entries.len(), 4);
+
+            match Wal::parse_ddl_payload(&ddl_entries[0].payload).unwrap() {
+                WalDdlRecord::SchemaUpsert(bytes) => assert_eq!(bytes, vec![1, 2, 3]),
+                other => panic!("unexpected ddl entry: {:?}", other),
+            }
+            match Wal::parse_ddl_payload(&ddl_entries[1].payload).unwrap() {
+                WalDdlRecord::SchemaDrop(name) => assert_eq!(name, "default.users"),
+                other => panic!("unexpected ddl entry: {:?}", other),
+            }
+            match Wal::parse_ddl_payload(&ddl_entries[2].payload).unwrap() {
+                WalDdlRecord::NamespaceCreate(name) => assert_eq!(name, "analytics"),
+                other => panic!("unexpected ddl entry: {:?}", other),
+            }
+            match Wal::parse_ddl_payload(&ddl_entries[3].payload).unwrap() {
+                WalDdlRecord::NamespaceDrop { name, force } => {
+                    assert_eq!(name, "analytics");
+                    assert!(force);
+                }
+                other => panic!("unexpected ddl entry: {:?}", other),
+            }
+
+            wal.shutdown().unwrap();
+        }
     }
 }

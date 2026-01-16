@@ -1079,8 +1079,10 @@ where
             let shard_path = base_path.with_extension(format!("shard{}", i));
             let disk = Arc::new(DiskManager::open(&shard_path)?);
             let pool = Arc::new(LruBufferPool::new(disk, pool_per_shard));
-            // Each shard's metadata is at PageId(0) (first allocated page)
-            let tree = BTree::open(pool.clone(), PageId(0))?;
+            // Page 0 is reserved for disk metadata (free list), so the first
+            // B+Tree allocation starts at page 1.
+            let tree = BTree::open(pool.clone(), PageId(1))
+                .or_else(|err| BTree::open(pool.clone(), PageId(0)).map_err(|_| err))?;
 
             shards.push(Mutex::new(Shard { tree, pool }));
         }
@@ -1339,5 +1341,23 @@ mod tests {
             tree.get(&"00999".to_string()).unwrap(),
             Some("value999".to_string())
         );
+    }
+
+    #[test]
+    fn test_sharded_btree_reopen() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("table.rel");
+
+        {
+            let tree = ShardedBTree::<Vec<u8>, Vec<u8>>::new(&path, 128).unwrap();
+            tree.insert(b"key".to_vec(), b"value".to_vec()).unwrap();
+            tree.flush().unwrap();
+        }
+
+        {
+            let tree = ShardedBTree::<Vec<u8>, Vec<u8>>::open(&path, 128).unwrap();
+            let value = tree.get(&b"key".to_vec()).unwrap();
+            assert_eq!(value, Some(b"value".to_vec()));
+        }
     }
 }

@@ -3,6 +3,8 @@
 //! Provides versioned schema storage that follows MVCC semantics.
 
 use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -408,10 +410,30 @@ impl SchemaCatalog {
         bytes.extend(&crc.to_le_bytes());
         bytes.extend(&SCHEMA_FOOTER_MAGIC.to_le_bytes());
 
-        std::fs::write(&self.schema_file, bytes)
+        let temp_path = self.schema_file.with_extension("bin.tmp");
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&temp_path)
             .map_err(|e| MonoError::Io(format!("Failed to write schema file: {}", e)))?;
+        file.write_all(&bytes)
+            .map_err(|e| MonoError::Io(format!("Failed to write schema file: {}", e)))?;
+        file.sync_all()
+            .map_err(|e| MonoError::Io(format!("Failed to sync schema file: {}", e)))?;
+        std::fs::rename(&temp_path, &self.schema_file)
+            .map_err(|e| MonoError::Io(format!("Failed to rename schema file: {}", e)))?;
+        Self::sync_parent_dir(&self.schema_file);
 
         Ok(())
+    }
+
+    fn sync_parent_dir(path: &Path) {
+        if let Some(parent) = path.parent()
+            && let Ok(dir) = std::fs::File::open(parent)
+        {
+            let _ = dir.sync_all();
+        }
     }
 
     // Binary serialization helpers
@@ -684,6 +706,22 @@ impl SchemaCatalog {
         };
 
         Ok((schema, offset))
+    }
+
+    /// Encode a schema entry for WAL or snapshot storage.
+    pub(crate) fn encode_schema_entry(schema: &StoredTableSchema) -> Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        Self::serialize_schema_entry(&mut buf, schema)?;
+        Ok(buf)
+    }
+
+    /// Decode a schema entry.
+    pub(crate) fn decode_schema_entry(data: &[u8]) -> Result<StoredTableSchema> {
+        let (schema, used) = Self::deserialize_schema_entry(data)?;
+        if used != data.len() {
+            return Err(MonoError::Parse("Extra bytes in schema entry".into()));
+        }
+        Ok(schema)
     }
 
     /// Deserialize a column

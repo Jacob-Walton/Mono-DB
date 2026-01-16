@@ -431,7 +431,7 @@ impl<S: QueryStorage> Executor<S> {
             }
             groups.entry(key_bytes).or_default().push(row);
         }
-        
+
         // Handle case with no groups (global aggregate)
         if groups.is_empty() && op.group_by.is_empty() && !op.aggregates.is_empty() {
             let mut result_row = Row::new();

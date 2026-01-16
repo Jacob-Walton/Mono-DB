@@ -72,6 +72,9 @@ pub struct StorageConfig {
     pub page_size: usize,
     /// Write-ahead log configuration
     pub wal: WalConfig,
+    /// Checkpoint configuration
+    #[serde(default)]
+    pub checkpoint: CheckpointConfig,
 }
 
 impl Default for StorageConfig {
@@ -81,6 +84,28 @@ impl Default for StorageConfig {
             buffer_pool_size: 1000, // 1000 pages = ~16MB (depending on page_size)
             page_size: 16384,       // 16KB pages
             wal: WalConfig::default(),
+            checkpoint: CheckpointConfig::default(),
+        }
+    }
+}
+
+/// Periodic checkpoint configuration.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CheckpointConfig {
+    /// Enable periodic checkpoints.
+    pub enabled: bool,
+    /// Checkpoint interval in milliseconds.
+    pub interval_ms: u64,
+    /// Truncate WAL after a successful checkpoint (only when safe).
+    pub truncate_wal: bool,
+}
+
+impl Default for CheckpointConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_ms: 30_000,
+            truncate_wal: true,
         }
     }
 }

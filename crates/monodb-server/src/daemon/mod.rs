@@ -16,7 +16,7 @@ use tokio::{net::TcpListener, sync::broadcast};
 use tokio_rustls::TlsAcceptor;
 
 use crate::{
-    config::{PluginConfig, ServerConfig, StorageConfig},
+    config::{CheckpointConfig, PluginConfig, ServerConfig, StorageConfig},
     daemon::tls::load_tls_acceptor,
     network::session,
     query_engine::storage::StorageAdapter,
@@ -28,6 +28,7 @@ mod tls;
 pub struct Server {
     address: String,
     storage: Arc<StorageAdapter>,
+    checkpoint: CheckpointConfig,
     #[cfg(feature = "plugins")]
     plugin_host: Option<Arc<PluginHost>>,
     sessions: Arc<DashMap<u64, session::Session>>,
@@ -49,6 +50,10 @@ impl Server {
             buffer_pool_size: storage_config.buffer_pool_size,
             wal_enabled: true,
             wal_sync_on_commit: storage_config.wal.sync_on_write,
+            wal_buffer_size: storage_config.wal.buffer_size,
+            wal_sync_every_bytes: storage_config.wal.sync_every_bytes,
+            wal_sync_interval_ms: storage_config.wal.sync_interval_ms,
+            wal_truncate_on_checkpoint: storage_config.checkpoint.truncate_wal,
             ..Default::default()
         };
         let engine = Arc::new(StorageEngine::new(engine_config)?);
@@ -138,6 +143,7 @@ impl Server {
         Ok(Self {
             address,
             storage,
+            checkpoint: storage_config.checkpoint.clone(),
             #[cfg(feature = "plugins")]
             plugin_host,
             sessions: Arc::new(DashMap::new()),
@@ -173,6 +179,32 @@ impl Server {
                                 .await
                         {
                             tracing::warn!(error = %e, "Hot-reload task error");
+                        }
+                    }
+                });
+            }
+        }
+
+        if self.checkpoint.enabled {
+            if self.checkpoint.interval_ms == 0 {
+                tracing::warn!("Checkpointing enabled but interval_ms is 0; skipping task");
+            } else {
+                let storage = Arc::clone(&self.storage);
+                let mut shutdown_rx = self.shutdown_tx.subscribe();
+                let interval = std::time::Duration::from_millis(self.checkpoint.interval_ms);
+
+                tokio::spawn(async move {
+                    let mut ticker = tokio::time::interval(interval);
+                    loop {
+                        tokio::select! {
+                            _ = ticker.tick() => {
+                                if let Err(e) = storage.checkpoint() {
+                                    tracing::error!("Checkpoint failed: {}", e);
+                                }
+                            }
+                            _ = shutdown_rx.recv() => {
+                                break;
+                            }
                         }
                     }
                 });

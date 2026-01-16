@@ -33,5 +33,7 @@ EXPOSE 6432
 
 VOLUME ["/var/lib/monodb/data"]
 
+STOPSIGNAL SIGTERM
+
 ENTRYPOINT ["/var/lib/monodb/bin/monod"]
 CMD ["--config", "/var/lib/monodb/config.toml", "--data", "/var/lib/monodb/data"]

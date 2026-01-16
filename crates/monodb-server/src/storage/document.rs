@@ -249,6 +249,126 @@ where
         buf
     }
 
+    fn bump_revision(&self, revision: Revision) {
+        let next = revision.saturating_add(1);
+        self.next_revision.fetch_max(next, Ordering::SeqCst);
+    }
+
+    /// Prepare an insert without applying it.
+    pub fn prepare_insert(&self, key: &K, value: V) -> Result<Document<V>> {
+        if let Some(existing) = self.documents.get(key)?
+            && !existing.deleted
+        {
+            return Err(MonoError::AlreadyExists(
+                "document already exists".to_string(),
+            ));
+        }
+
+        let revision = self.next_revision.fetch_add(1, Ordering::SeqCst);
+        let timestamp = Self::now();
+        Ok(Document::new(value, revision, timestamp))
+    }
+
+    /// Prepare an update without applying it. Returns (new_doc, previous_doc).
+    pub fn prepare_update(
+        &self,
+        key: &K,
+        value: V,
+        expected_rev: Revision,
+    ) -> Result<(Document<V>, Document<V>)> {
+        let existing = self
+            .documents
+            .get(key)?
+            .ok_or_else(|| MonoError::NotFound("document not found".into()))?;
+
+        if existing.deleted {
+            return Err(MonoError::NotFound("document was deleted".into()));
+        }
+
+        if existing.revision != expected_rev {
+            return Err(MonoError::WriteConflict(format!(
+                "revision mismatch: expected {}, got {}",
+                expected_rev, existing.revision
+            )));
+        }
+
+        let new_revision = self.next_revision.fetch_add(1, Ordering::SeqCst);
+        let timestamp = Self::now();
+        let updated = existing.clone().update(value, new_revision, timestamp);
+
+        Ok((updated, existing))
+    }
+
+    /// Prepare a delete without applying it. Returns (tombstone, previous_doc).
+    pub fn prepare_delete(
+        &self,
+        key: &K,
+        expected_rev: Revision,
+    ) -> Result<(Document<V>, Document<V>)> {
+        let existing = self
+            .documents
+            .get(key)?
+            .ok_or_else(|| MonoError::NotFound("document not found".into()))?;
+
+        if existing.deleted {
+            return Err(MonoError::NotFound("document was deleted".into()));
+        }
+
+        if existing.revision != expected_rev {
+            return Err(MonoError::WriteConflict(format!(
+                "revision mismatch: expected {}, got {}",
+                expected_rev, existing.revision
+            )));
+        }
+
+        let new_revision = self.next_revision.fetch_add(1, Ordering::SeqCst);
+        let timestamp = Self::now();
+        let deleted = existing.clone().delete(new_revision, timestamp);
+
+        Ok((deleted, existing))
+    }
+
+    /// Apply an insert prepared by prepare_insert.
+    pub fn apply_prepared_insert(&self, key: K, doc: Document<V>) -> Result<()> {
+        self.bump_revision(doc.revision);
+        self.documents.insert(key, doc)?;
+        Ok(())
+    }
+
+    /// Apply an update/delete prepared with a previous document.
+    pub fn apply_prepared_update(
+        &self,
+        key: K,
+        doc: Document<V>,
+        previous: Document<V>,
+    ) -> Result<()> {
+        if let Some(ref history) = self.history
+            && !previous.deleted
+        {
+            let history_key = Self::history_key(&key, previous.revision);
+            history.insert(history_key, previous)?;
+        }
+
+        self.bump_revision(doc.revision);
+        self.documents.insert(key, doc)?;
+        Ok(())
+    }
+
+    /// Apply a WAL document write (used by recovery).
+    pub fn apply_wal_document(&self, key: K, doc: Document<V>) -> Result<()> {
+        if let Some(ref history) = self.history
+            && let Some(existing) = self.documents.get(&key)?
+            && !existing.deleted
+        {
+            let history_key = Self::history_key(&key, existing.revision);
+            history.insert(history_key, existing)?;
+        }
+
+        self.bump_revision(doc.revision);
+        self.documents.insert(key, doc)?;
+        Ok(())
+    }
+
     /// Get a document by key.
     pub fn get(&self, key: &K) -> Result<Option<VersionedDocument<V>>> {
         match self.documents.get(key)? {
@@ -268,89 +388,29 @@ where
 
     /// Insert a new document. Fails if the key already exists.
     pub fn insert(&self, key: K, value: V) -> Result<Revision> {
-        // Check if document already exists
-        if let Some(existing) = self.documents.get(&key)?
-            && !existing.deleted
-        {
-            return Err(MonoError::AlreadyExists(
-                "document already exists".to_string(),
-            ));
-        }
-
-        let revision = self.next_revision.fetch_add(1, Ordering::SeqCst);
-        let timestamp = Self::now();
-        let doc = Document::new(value, revision, timestamp);
-
-        self.documents.insert(key, doc)?;
-
+        let doc = self.prepare_insert(&key, value)?;
+        let revision = doc.revision;
+        self.apply_prepared_insert(key, doc)?;
         Ok(revision)
     }
 
     /// Update a document. Fails if the revision doesn't match.
     pub fn update(&self, key: &K, value: V, expected_rev: Revision) -> Result<Revision> {
-        let existing = self
-            .documents
-            .get(key)?
-            .ok_or_else(|| MonoError::NotFound("document not found".into()))?;
-
-        if existing.deleted {
-            return Err(MonoError::NotFound("document was deleted".into()));
-        }
-
-        if existing.revision != expected_rev {
-            return Err(MonoError::WriteConflict(format!(
-                "revision mismatch: expected {}, got {}",
-                expected_rev, existing.revision
-            )));
-        }
-
-        let new_revision = self.next_revision.fetch_add(1, Ordering::SeqCst);
-        let timestamp = Self::now();
-
-        // Save to history if enabled
-        if let Some(ref history) = self.history {
-            let history_key = Self::history_key(key, existing.revision);
-            history.insert(history_key, existing.clone())?;
-        }
-
-        // Update document
-        let updated = existing.update(value, new_revision, timestamp);
-        self.documents.insert(key.clone(), updated)?;
-
+        let (updated, existing) = self.prepare_update(key, value, expected_rev)?;
+        let new_revision = updated.revision;
+        self.apply_prepared_update(key.clone(), updated, existing)?;
         Ok(new_revision)
     }
 
     /// Delete a document. Fails if the revision doesn't match.
     pub fn delete(&self, key: &K, expected_rev: Revision) -> Result<bool> {
-        let existing = match self.documents.get(key)? {
-            Some(doc) => doc,
-            None => return Ok(false),
+        let (deleted, existing) = match self.prepare_delete(key, expected_rev) {
+            Ok(result) => result,
+            Err(MonoError::NotFound(_)) => return Ok(false),
+            Err(e) => return Err(e),
         };
 
-        if existing.deleted {
-            return Ok(false);
-        }
-
-        if existing.revision != expected_rev {
-            return Err(MonoError::WriteConflict(format!(
-                "revision mismatch: expected {}, got {}",
-                expected_rev, existing.revision
-            )));
-        }
-
-        let new_revision = self.next_revision.fetch_add(1, Ordering::SeqCst);
-        let timestamp = Self::now();
-
-        // Save to history if enabled
-        if let Some(ref history) = self.history {
-            let history_key = Self::history_key(key, existing.revision);
-            history.insert(history_key, existing.clone())?;
-        }
-
-        // Mark as deleted (tombstone)
-        let deleted = existing.delete(new_revision, timestamp);
-        self.documents.insert(key.clone(), deleted)?;
-
+        self.apply_prepared_update(key.clone(), deleted, existing)?;
         Ok(true)
     }
 
