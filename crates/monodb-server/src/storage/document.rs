@@ -467,6 +467,15 @@ where
 
         Ok(purged)
     }
+
+    /// Flush all data to disk.
+    pub fn flush(&self) -> Result<()> {
+        self.documents.flush()?;
+        if let Some(history) = &self.history {
+            history.flush()?;
+        }
+        Ok(())
+    }
 }
 
 // VersionedStore Implementation

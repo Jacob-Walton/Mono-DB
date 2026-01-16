@@ -13,7 +13,11 @@ COPY . .
 RUN cargo +nightly build --release
 
 # Runtime stage
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /var/lib/monodb
 
@@ -29,5 +33,5 @@ EXPOSE 6432
 
 VOLUME ["/var/lib/monodb/data"]
 
-ENTRYPOINT ["/var /lib/monodb/bin/monod"]
+ENTRYPOINT ["/var/lib/monodb/bin/monod"]
 CMD ["--config", "/var/lib/monodb/config.toml", "--data", "/var/lib/monodb/data"]

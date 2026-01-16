@@ -91,6 +91,9 @@ impl Server {
                     let host = Arc::new(host);
                     host.start_epoch_thread();
 
+                    // Set plugin host on storage for plugin function defaults
+                    storage.set_plugin_host(Arc::clone(&host));
+
                     // Scan for plugins
                     if plugins_dir.is_dir() {
                         match host.scan_plugins_dir(plugins_dir) {
@@ -239,6 +242,12 @@ impl Server {
 
         // Allow graceful close of active requests
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        // Flush all storage data to disk
+        tracing::info!("Flushing storage to disk...");
+        if let Err(e) = self.storage.flush() {
+            tracing::error!("Failed to flush storage: {}", e);
+        }
 
         tracing::info!("Shutdown completed");
         Ok(())

@@ -175,6 +175,29 @@ impl From<&DataType> for StoredDataType {
 }
 
 impl StoredDataType {
+    /// Estimate the size in bytes for this data type.
+    pub fn estimated_size(&self) -> usize {
+        match self {
+            StoredDataType::Int32 => 4,
+            StoredDataType::Int64 => 8,
+            StoredDataType::Float32 => 4,
+            StoredDataType::Float64 => 8,
+            StoredDataType::Bool => 1,
+            StoredDataType::String => 32, // Average string size estimate
+            StoredDataType::Bytes => 64,  // Average bytes size estimate
+            StoredDataType::DateTime => 8,
+            StoredDataType::Date => 4,
+            StoredDataType::Time => 8,
+            StoredDataType::Uuid => 16,
+            StoredDataType::ObjectId => 12,
+            StoredDataType::Json => 128, // Average JSON size estimate
+            StoredDataType::Array(inner) => 8 + inner.estimated_size() * 4, // Assume avg 4 elements
+            StoredDataType::Map(k, v) => 8 + (k.estimated_size() + v.estimated_size()) * 4,
+            StoredDataType::Reference(_) => 24, // Collection name + id
+            StoredDataType::Any => 64,
+        }
+    }
+
     /// Convert back to AST DataType
     pub fn to_ast_type(&self) -> DataType {
         use crate::query_engine::ast::Ident;

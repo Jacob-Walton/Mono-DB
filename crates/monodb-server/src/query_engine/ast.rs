@@ -852,9 +852,12 @@ pub enum BinaryOp {
     Mod, // %
 
     // Special operators
-    Contains, // has
-    Like,     // like
-    In,       // in
+    Contains,   // has, contains
+    Like,       // like (SQL-style: %pattern%)
+    StartsWith, // starts
+    EndsWith,   // ends
+    Matches,    // matches (regex)
+    In,         // in
 
     // Compound assignment (for CHANGE statements)
     PlusEq,  // +=
@@ -869,7 +872,12 @@ impl BinaryOp {
             BinaryOp::And => 2,
             BinaryOp::Eq | BinaryOp::NotEq => 3,
             BinaryOp::Lt | BinaryOp::Gt | BinaryOp::LtEq | BinaryOp::GtEq => 4,
-            BinaryOp::Contains | BinaryOp::Like | BinaryOp::In => 4,
+            BinaryOp::Contains
+            | BinaryOp::Like
+            | BinaryOp::StartsWith
+            | BinaryOp::EndsWith
+            | BinaryOp::Matches
+            | BinaryOp::In => 4,
             BinaryOp::Add | BinaryOp::Sub => 5,
             BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => 6,
             BinaryOp::PlusEq | BinaryOp::MinusEq => 1, // Lowest for assignment
@@ -888,6 +896,9 @@ impl BinaryOp {
                 | BinaryOp::GtEq
                 | BinaryOp::Contains
                 | BinaryOp::Like
+                | BinaryOp::StartsWith
+                | BinaryOp::EndsWith
+                | BinaryOp::Matches
                 | BinaryOp::In
         )
     }

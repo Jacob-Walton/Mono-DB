@@ -14,6 +14,10 @@ use parking_lot::RwLock;
 use super::page::{PAGE_SIZE, PageId};
 use super::traits::PageStore;
 
+// Free list header (stored at end of page 0): 4-byte magic + 8-byte head
+const FREE_LIST_OFFSET: usize = PAGE_SIZE - 12;
+const FREE_LIST_MAGIC: u32 = u32::from_be_bytes(*b"FREE"); // "FREE"
+
 // Disk manager configuration
 
 /// Configuration for the disk manager.
@@ -90,8 +94,8 @@ impl DiskManager {
         };
 
         // Determine next page ID from file contents
-        // Page 0 is metadata, so we start allocating from page 1
-        let next_page_id = if file_len == 0 { 1 } else { file_pages };
+        // Reserve page 0 for metadata (free list head), start user allocations at page 1
+        let next_page_id = if file_len == 0 { 1 } else { file_pages.max(1) };
 
         let manager = Self {
             path,
@@ -107,12 +111,46 @@ impl DiskManager {
         // Create initial memory mapping
         manager.remap()?;
 
+        // Load persisted free list head
+        if file_len > 0 {
+            let head = manager.load_free_list_head()?;
+            manager.free_list_head.store(head, Ordering::Release);
+        }
+
         Ok(manager)
     }
 
     /// Open with default configuration.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         Self::new(path, DiskConfig::default())
+    }
+
+    /// Load free list head from page 0.
+    fn load_free_list_head(&self) -> Result<u64> {
+        let page0 = self.read(PageId(0))?;
+        let magic = u32::from_le_bytes(
+            page0[FREE_LIST_OFFSET..FREE_LIST_OFFSET + 4]
+                .try_into()
+                .unwrap(),
+        );
+        if magic != FREE_LIST_MAGIC {
+            return Ok(0); // Not initialized, empty list
+        }
+        let head = u64::from_le_bytes(
+            page0[FREE_LIST_OFFSET + 4..FREE_LIST_OFFSET + 12]
+                .try_into()
+                .unwrap(),
+        );
+        Ok(head)
+    }
+
+    /// Save free list head to page 0.
+    fn save_free_list_head(&self, head: u64) -> Result<()> {
+        let mut page0 = self.read(PageId(0))?;
+        page0[FREE_LIST_OFFSET..FREE_LIST_OFFSET + 4]
+            .copy_from_slice(&FREE_LIST_MAGIC.to_le_bytes());
+        page0[FREE_LIST_OFFSET + 4..FREE_LIST_OFFSET + 12].copy_from_slice(&head.to_le_bytes());
+        self.write(PageId(0), &page0)
     }
 
     /// Re-create the memory mapping (after file growth).
@@ -266,13 +304,36 @@ impl DiskManager {
 
     /// Allocate a new page.
     pub fn allocate(&self) -> Result<PageId> {
-        // Check free list first
-        let free_head = self.free_list_head.load(Ordering::Acquire);
-        if free_head != 0 {
-            // TODO: Implement free list pop
-            // For now, just allocate new pages
+        // Check free list first, try to reuse a freed page
+        loop {
+            let free_head = self.free_list_head.load(Ordering::Acquire);
+            if free_head == 0 {
+                // No free pages, allocate a new one
+                break;
+            }
+
+            // Read the free page to get the next pointer
+            let free_page_id = PageId(free_head);
+            let page_data = self.read(free_page_id)?;
+            let next_free = u64::from_le_bytes(page_data[0..8].try_into().unwrap());
+
+            // Try to update the head atomically
+            if self
+                .free_list_head
+                .compare_exchange(free_head, next_free, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                // Persist the new head
+                self.save_free_list_head(next_free)?;
+                // Successfully popped from free list, zero out the page before returning
+                let zeroed = [0u8; PAGE_SIZE];
+                self.write(free_page_id, &zeroed)?;
+                return Ok(free_page_id);
+            }
+            // CAS failed, another thread modified the list, retry
         }
 
+        // No free pages available, allocate new
         let page_id = PageId(self.next_page_id.fetch_add(1, Ordering::AcqRel));
 
         // Grow file if needed
@@ -284,10 +345,33 @@ impl DiskManager {
     }
 
     /// Mark a page as free for reuse.
-    pub fn free(&self, _page_id: PageId) -> Result<()> {
-        // TODO: Implement free list push
-        // For now, pages are not reused
-        Ok(())
+    pub fn free(&self, page_id: PageId) -> Result<()> {
+        if !page_id.is_valid() || page_id.0 == 0 {
+            // Don't free invalid pages or the metadata page
+            return Ok(());
+        }
+
+        // Push onto free list
+        loop {
+            let current_head = self.free_list_head.load(Ordering::Acquire);
+
+            // Write the current head as the next pointer in the freed page
+            let mut page_data = [0u8; PAGE_SIZE];
+            page_data[0..8].copy_from_slice(&current_head.to_le_bytes());
+            self.write(page_id, &page_data)?;
+
+            // Try to update the head to point to this freed page
+            if self
+                .free_list_head
+                .compare_exchange(current_head, page_id.0, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                // Persist the new head
+                self.save_free_list_head(page_id.0)?;
+                return Ok(());
+            }
+            // CAS failed, retry
+        }
     }
 
     /// Sync all data to disk.
@@ -415,6 +499,60 @@ mod tests {
             let dm = DiskManager::open(&path).unwrap();
             let data = dm.read(PageId(1)).unwrap();
             assert_eq!(&data[0..4], b"test");
+        }
+    }
+
+    #[test]
+    fn test_free_list() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+
+        let dm = DiskManager::open(&path).unwrap();
+
+        // Allocate some pages
+        let p1 = dm.allocate().unwrap();
+        let p2 = dm.allocate().unwrap();
+        let p3 = dm.allocate().unwrap();
+
+        // Free the middle page
+        dm.free(p2).unwrap();
+
+        // Next allocation should reuse the freed page
+        let p4 = dm.allocate().unwrap();
+        assert_eq!(p4, p2);
+
+        // Free multiple pages
+        dm.free(p1).unwrap();
+        dm.free(p3).unwrap();
+
+        // Should reuse in LIFO order
+        let p5 = dm.allocate().unwrap();
+        assert_eq!(p5, p3);
+        let p6 = dm.allocate().unwrap();
+        assert_eq!(p6, p1);
+    }
+
+    #[test]
+    fn test_free_list_persistence() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+
+        let freed_page: PageId;
+
+        // Allocate and free a page
+        {
+            let dm = DiskManager::open(&path).unwrap();
+            let p1 = dm.allocate().unwrap();
+            dm.free(p1).unwrap();
+            freed_page = p1;
+            dm.sync().unwrap();
+        }
+
+        // Reopen and verify free list is preserved
+        {
+            let dm = DiskManager::open(&path).unwrap();
+            let p = dm.allocate().unwrap();
+            assert_eq!(p, freed_page);
         }
     }
 }

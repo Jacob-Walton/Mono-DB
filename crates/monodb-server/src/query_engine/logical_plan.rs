@@ -639,7 +639,10 @@ impl ScalarExpr {
                     | BinaryOp::GtEq
                     | BinaryOp::Like
                     | BinaryOp::In
-                    | BinaryOp::Contains => InferredType::Known(ValueType::Bool),
+                    | BinaryOp::Contains
+                    | BinaryOp::StartsWith
+                    | BinaryOp::EndsWith
+                    | BinaryOp::Matches => InferredType::Known(ValueType::Bool),
 
                     // Logical operators return Bool
                     BinaryOp::And | BinaryOp::Or => InferredType::Known(ValueType::Bool),
@@ -789,6 +792,9 @@ fn op_name(op: &BinaryOp) -> &'static str {
         BinaryOp::Like => "like",
         BinaryOp::In => "in",
         BinaryOp::Contains => "contains",
+        BinaryOp::StartsWith => "starts with",
+        BinaryOp::EndsWith => "ends with",
+        BinaryOp::Matches => "matches",
         BinaryOp::PlusEq => "add-assign",
         BinaryOp::MinusEq => "sub-assign",
     }

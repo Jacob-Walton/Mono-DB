@@ -203,9 +203,9 @@ impl NamespaceManager {
         Ok(())
     }
 
-    /// Drop a namespace
+    /// Remove a namespace
     /// If force is true, removes the directory even if it contains files.
-    pub fn drop(&self, name: &str, force: bool) -> Result<()> {
+    pub fn remove(&self, name: &str, force: bool) -> Result<()> {
         // Cannot drop system namespaces
         if name == "default" || name == "system" {
             return Err(MonoError::InvalidOperation(format!(
@@ -582,7 +582,7 @@ mod tests {
         manager.create("temp", None).unwrap();
         assert!(manager.exists("temp"));
 
-        manager.drop("temp", false).unwrap();
+        manager.remove("temp", false).unwrap();
         assert!(!manager.exists("temp"));
         assert!(!dir.path().join("temp").exists());
     }
@@ -592,8 +592,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let manager = NamespaceManager::new(dir.path()).unwrap();
 
-        assert!(manager.drop("default", false).is_err());
-        assert!(manager.drop("system", false).is_err());
+        assert!(manager.remove("default", false).is_err());
+        assert!(manager.remove("system", false).is_err());
     }
 
     #[test]

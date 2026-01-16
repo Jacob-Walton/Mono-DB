@@ -363,7 +363,10 @@ pub enum Response {
     TxRolledBack { tx_id: u64 },
 
     /// List of tables
-    TableList { tables: Vec<TableInfo> },
+    TableList {
+        tables: Vec<TableInfo>,
+        namespaces: Vec<String>,
+    },
 
     /// Table schema description
     TableDescription { schema: TableSchema },
@@ -783,7 +786,7 @@ impl ProtocolEncoder {
                 header.put_u8(cmd::RSP_TX_ROLLED_BACK);
                 body.put_u64_le(*tx_id);
             }
-            Response::TableList { tables } => {
+            Response::TableList { tables, namespaces } => {
                 header.put_u8(cmd::RSP_TABLE_LIST);
                 body.put_u32_le(tables.len() as u32);
                 for table in tables {
@@ -791,6 +794,11 @@ impl ProtocolEncoder {
                     put_opt_string(&mut body, &table.schema);
                     put_opt_u64(&mut body, &table.row_count);
                     put_opt_u64(&mut body, &table.size_bytes);
+                }
+                // Include all namespaces (even if empty)
+                body.put_u32_le(namespaces.len() as u32);
+                for ns in namespaces {
+                    put_string(&mut body, ns);
                 }
             }
             Response::TableDescription { schema } => {
@@ -1159,7 +1167,18 @@ impl ProtocolDecoder {
                         size_bytes,
                     });
                 }
-                Response::TableList { tables }
+                // Read namespaces if present
+                let namespaces = if cursor.has_remaining() {
+                    let ns_count = get_u32_le(&mut cursor)? as usize;
+                    let mut ns = Vec::with_capacity(ns_count);
+                    for _ in 0..ns_count {
+                        ns.push(get_string(&mut cursor)?);
+                    }
+                    ns
+                } else {
+                    Vec::new()
+                };
+                Response::TableList { tables, namespaces }
             }
             cmd::RSP_TABLE_DESCRIPTION => {
                 let name = get_string(&mut cursor)?;

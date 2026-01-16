@@ -1,6 +1,5 @@
 //! Query result types for MonoDB client
 
-use indexmap::IndexMap;
 use monodb_common::{
     MonoError, Result, Value,
     protocol::{QueryOutcome, Response, TableInfo},
@@ -58,41 +57,6 @@ impl QueryResult {
                 "Unexpected response: {:?}",
                 other
             ))),
-        }
-    }
-
-    /// Create a QueryResult from a TableList response.
-    pub(crate) fn from_tables(tables: Vec<TableInfo>) -> Self {
-        // Convert table list to array of row values
-        let data: Vec<Value> = tables
-            .into_iter()
-            .map(|t| {
-                let mut row = IndexMap::new();
-                row.insert("name".to_string(), Value::String(t.name));
-                if let Some(schema) = t.schema {
-                    row.insert("schema".to_string(), Value::String(schema));
-                }
-                if let Some(count) = t.row_count {
-                    row.insert("row_count".to_string(), Value::Int64(count as i64));
-                }
-                if let Some(size) = t.size_bytes {
-                    row.insert("size_bytes".to_string(), Value::Int64(size as i64));
-                }
-                Value::Row(row)
-            })
-            .collect();
-
-        Self {
-            outcome: Outcome::Rows {
-                data,
-                columns: Some(vec![
-                    "name".into(),
-                    "schema".into(),
-                    "row_count".into(),
-                    "size_bytes".into(),
-                ]),
-            },
-            elapsed_ms: 0,
         }
     }
 
@@ -308,4 +272,13 @@ impl<T: FromValue> FromValue for Option<T> {
             _ => T::from_value(value).map(Some),
         }
     }
+}
+
+/// Result of listing tables.
+#[derive(Debug, Clone)]
+pub struct TableListResult {
+    /// Tables with their info
+    pub tables: Vec<TableInfo>,
+    /// All namespaces (including empty ones)
+    pub namespaces: Vec<String>,
 }

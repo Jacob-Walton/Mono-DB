@@ -16,9 +16,11 @@ use dashmap::DashMap;
 use monodb_common::{MonoError, Result};
 use parking_lot::{Mutex, RwLock};
 
-use super::btree::BTree;
-use super::buffer::LruBufferPool;
+use super::btree::ShardedBTree;
+use super::page::PageId;
 use super::traits::{IsolationLevel, Serializable, Timestamp, TxId};
+
+use std::path::Path;
 
 // MVCC Record
 #[derive(Debug, Clone)]
@@ -597,18 +599,20 @@ fn gc_worker(manager: Arc<TransactionManager>, receiver: Receiver<GcTask>, inter
     }
 }
 
-// MVCC Table
+/// MVCC Table
 /// Stores multiple versions of each row, with visibility determined by
 /// transaction snapshots.
+///
+/// Uses a [`ShardedBTree`] for high-concurrency write performance.
 pub struct MvccTable<K, V>
 where
     K: Ord + Clone + Serializable + Send + Sync,
     V: Clone + Serializable + Send + Sync,
 {
-    /// The underlying B+Tree storing versioned records.
+    /// The underlying sharded B+Tree storing versioned records.
     /// Key: (original_key, version_ts)
     /// Value: [`MvccRecord<V>`]
-    tree: BTree<Vec<u8>, MvccRecord<V>>,
+    tree: ShardedBTree<Vec<u8>, MvccRecord<V>>,
     /// Transaction manager.
     tx_manager: Arc<TransactionManager>,
     /// Phantom data for K type parameter.
@@ -620,10 +624,16 @@ where
     K: Ord + Clone + Serializable + Send + Sync,
     V: Clone + Serializable + Send + Sync,
 {
-    /// Create a new MVCC table.
-    pub fn new(pool: Arc<LruBufferPool>, tx_manager: Arc<TransactionManager>) -> Result<Self> {
+    /// Create a new MVCC table with sharded storage.
+    ///
+    /// Creates NUM_SHARDS separate B+Tree files at `base_path.shard0`, etc.
+    pub fn new(
+        base_path: impl AsRef<Path>,
+        pool_size: usize,
+        tx_manager: Arc<TransactionManager>,
+    ) -> Result<Self> {
         Ok(Self {
-            tree: BTree::new(pool)?,
+            tree: ShardedBTree::new(base_path, pool_size)?,
             tx_manager,
             _phantom: PhantomData,
         })
@@ -631,20 +641,26 @@ where
 
     /// Open an existing MVCC table from disk.
     pub fn open(
-        pool: Arc<LruBufferPool>,
+        base_path: impl AsRef<Path>,
+        pool_size: usize,
         tx_manager: Arc<TransactionManager>,
-        meta_page_id: super::page::PageId,
     ) -> Result<Self> {
         Ok(Self {
-            tree: BTree::open(pool, meta_page_id)?,
+            tree: ShardedBTree::open(base_path, pool_size)?,
             tx_manager,
             _phantom: PhantomData,
         })
     }
 
-    /// Get the metadata page ID for persistence.
-    pub fn meta_page_id(&self) -> super::page::PageId {
+    /// Get the first shard's metadata page ID (for backwards compatibility).
+    pub fn meta_page_id(&self) -> PageId {
         self.tree.meta_page_id()
+    }
+
+    /// Get the approximate number of entries in the table.
+    /// Note: This counts all versions, not just visible ones.
+    pub fn len(&self) -> usize {
+        self.tree.len()
     }
 
     /// Create a versioned key from a key and version timestamp.
@@ -881,6 +897,11 @@ where
         }
 
         Ok(results)
+    }
+
+    /// Flush all data to disk.
+    pub fn flush(&self) -> Result<()> {
+        self.tree.flush()
     }
 }
 

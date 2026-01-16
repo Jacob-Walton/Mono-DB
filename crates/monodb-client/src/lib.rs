@@ -31,7 +31,7 @@ use monodb_common::Result;
 
 pub use connection::Connection;
 pub use pool::{ConnectionPool, PoolConfig};
-pub use results::{FromValue, QueryResult, Row};
+pub use results::{FromValue, QueryResult, Row, TableListResult};
 
 mod connection;
 mod pool;
@@ -121,7 +121,7 @@ impl Client {
     }
 
     /// List all tables.
-    pub async fn list_tables(&self) -> Result<QueryResult> {
+    pub async fn list_tables(&self) -> Result<TableListResult> {
         let mut conn = self.pool.get().await?;
         let result = conn.list_tables().await?;
         self.pool.return_connection(conn);

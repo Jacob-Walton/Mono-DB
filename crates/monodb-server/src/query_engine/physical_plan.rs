@@ -8,7 +8,6 @@
 
 use crate::query_engine::ast::Ident;
 use crate::query_engine::logical_plan::{AggregateFunction, JoinType, ScalarExpr, SortKey};
-use monodb_common::Value;
 
 // Physical Plan Nodes
 #[derive(Debug, Clone)]
@@ -311,7 +310,8 @@ pub struct MergeJoinOp {
 #[derive(Debug, Clone)]
 pub struct ValuesOp {
     pub columns: Vec<Ident>,
-    pub rows: Vec<Vec<Value>>,
+    /// Each row contains expressions that will be evaluated at execution time.
+    pub rows: Vec<Vec<ScalarExpr>>,
 }
 
 // Mutation Operators

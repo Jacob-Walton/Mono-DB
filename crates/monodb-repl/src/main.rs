@@ -360,12 +360,11 @@ impl Repl {
 
     fn format_tables(
         &self,
-        result: &monodb_client::QueryResult,
+        result: &monodb_client::TableListResult,
         elapsed: Duration,
         all_namespaces: bool,
     ) {
-        let rows = result.rows();
-        if rows.is_empty() {
+        if result.tables.is_empty() && result.namespaces.is_empty() {
             println!("{}", "(no tables)".dimmed());
             println!("{}", format!("({:.2?})", elapsed).dimmed());
             println!();
@@ -375,18 +374,14 @@ impl Repl {
         // Group tables by namespace
         let mut namespaces: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
 
-        for row in &rows {
-            let full_name = row
-                .get("name")
-                .and_then(|v| v.as_string())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "?".to_string());
+        // Initialize all namespaces
+        for ns in &result.namespaces {
+            namespaces.entry(ns.clone()).or_default();
+        }
 
-            let kind = row
-                .get("schema")
-                .and_then(|v| v.as_string())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "?".to_string());
+        for table_info in &result.tables {
+            let full_name = &table_info.name;
+            let kind = table_info.schema.as_deref().unwrap_or("?");
 
             // Parse namespace.table format
             let (namespace, table) = if let Some(dot_pos) = full_name.find('.') {
@@ -395,10 +390,13 @@ impl Repl {
                     full_name[dot_pos + 1..].to_string(),
                 )
             } else {
-                ("default".to_string(), full_name)
+                ("default".to_string(), full_name.clone())
             };
 
-            namespaces.entry(namespace).or_default().push((table, kind));
+            namespaces
+                .entry(namespace)
+                .or_default()
+                .push((table, kind.to_string()));
         }
 
         let mut total_count = 0;
@@ -407,9 +405,13 @@ impl Repl {
             // Show all namespaces
             for (ns, tables) in &namespaces {
                 self.print_namespace_header(ns);
-                for (table, kind) in tables {
-                    self.print_table_entry(table, kind);
-                    total_count += 1;
+                if tables.is_empty() {
+                    println!("    {}", "(empty)".dimmed());
+                } else {
+                    for (table, kind) in tables {
+                        self.print_table_entry(table, kind);
+                        total_count += 1;
+                    }
                 }
                 println!();
             }

@@ -18,7 +18,7 @@ use tokio::net::TcpStream;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_rustls::{TlsConnector, client::TlsStream};
 
-use crate::results::QueryResult;
+use crate::results::{QueryResult, TableListResult};
 
 /// Stream type that can be either plain TCP or TLS-wrapped.
 enum Stream {
@@ -200,13 +200,15 @@ impl Connection {
     }
 
     /// List all tables.
-    pub async fn list_tables(&mut self) -> Result<QueryResult> {
+    pub async fn list_tables(&mut self) -> Result<TableListResult> {
         let request = Request::List;
         let response = self.send_request(request).await?;
 
-        // Convert TableList response to QueryResult format
+        // Convert TableList response to TableListResult
         match response {
-            Response::TableList { tables } => Ok(QueryResult::from_tables(tables)),
+            Response::TableList { tables, namespaces } => {
+                Ok(TableListResult { tables, namespaces })
+            }
             Response::Error { message, .. } => Err(MonoError::Execution(message)),
             _ => Err(MonoError::Network("Unexpected response".into())),
         }

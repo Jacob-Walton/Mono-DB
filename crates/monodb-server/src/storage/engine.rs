@@ -287,13 +287,13 @@ impl StorageEngine {
                         .namespace_manager
                         .table_path(namespace, table_name, "rel");
 
-                    // Only load if file exists
-                    if path.exists() {
-                        let pool = self.get_or_create_pool(&path)?;
+                    // Check if first shard file exists
+                    let shard0_path = path.with_extension("shard0");
+                    if shard0_path.exists() {
                         let table = Arc::new(MvccTable::open(
-                            pool,
+                            &path,
+                            self.config.buffer_pool_size,
                             self.tx_manager.clone(),
-                            meta_page_id,
                         )?);
                         self.mvcc_tables.insert(name.clone(), table);
 
@@ -788,8 +788,19 @@ impl StorageEngine {
             )));
         }
 
-        // Rollback in transaction manager
-        // Records created by this transaction will be invisible due to aborted_txs tracking
+        // Physically remove records written by this transaction from all MVCC tables
+        // This ensures they won't reappear after restart
+        for table in self.mvcc_tables.iter() {
+            if let Err(e) = table.finalize_rollback(tx_id) {
+                tracing::warn!(
+                    "Failed to finalize rollback for table {}: {}",
+                    table.key(),
+                    e
+                );
+            }
+        }
+
+        // Rollback in transaction manager (marks tx as aborted for visibility)
         self.tx_manager.rollback(tx_id)?;
 
         // Log to WAL
@@ -848,9 +859,12 @@ impl StorageEngine {
         let path = self
             .namespace_manager
             .table_path(namespace, table_name, "rel");
-        let pool = self.get_or_create_pool(&path)?;
 
-        let table = Arc::new(MvccTable::new(pool, self.tx_manager.clone())?);
+        let table = Arc::new(MvccTable::new(
+            &path,
+            self.config.buffer_pool_size,
+            self.tx_manager.clone(),
+        )?);
         let meta_page_id = table.meta_page_id().0;
         self.mvcc_tables.insert(qualified_name.clone(), table);
 
@@ -1026,6 +1040,37 @@ impl StorageEngine {
         Ok(())
     }
 
+    /// Drop a namespace and all its tables.
+    /// If force is true, drops even if namespace has tables.
+    pub fn drop_namespace(&self, name: &str, force: bool) -> Result<()> {
+        // First, find all tables in this namespace
+        let tables_in_ns = self.list_tables_in_namespace(name);
+
+        if !tables_in_ns.is_empty() && !force {
+            return Err(MonoError::InvalidOperation(format!(
+                "namespace '{}' contains {} table(s), use FORCE to drop anyway",
+                name,
+                tables_in_ns.len()
+            )));
+        }
+
+        // Drop all tables in the namespace
+        for table_info in tables_in_ns {
+            // Drop table cleans up: schema catalog, in-memory stores, files
+            if let Err(e) = self.drop_table(&table_info.name) {
+                tracing::warn!(
+                    "Failed to drop table {} during namespace drop: {}",
+                    table_info.name,
+                    e
+                );
+                // Continue dropping other tables
+            }
+        }
+
+        // Now drop the namespace itself
+        self.namespace_manager.remove(name, force)
+    }
+
     /// Rename a table/store/keyspace.
     pub fn rename_table(&self, old_name: &str, new_name: &str) -> Result<()> {
         let old_qualified = self.qualify_table_name(old_name);
@@ -1140,6 +1185,28 @@ impl StorageEngine {
     pub fn get_table_info(&self, name: &str) -> Option<TableInfo> {
         let qualified = self.qualify_table_name(name);
         self.tables.read().get(&qualified).cloned()
+    }
+
+    /// Get table statistics (row count) for query planning.
+    pub fn get_table_row_count(&self, name: &str) -> Option<u64> {
+        let qualified = self.qualify_table_name(name);
+
+        // Check relational tables
+        if let Some(table) = self.mvcc_tables.get(&qualified) {
+            return Some(table.value().len() as u64);
+        }
+
+        // Check document stores
+        if let Some(store) = self.document_stores.get(&qualified) {
+            return store.value().count().ok().map(|c| c as u64);
+        }
+
+        // Check keyspaces
+        if let Some(ks) = self.keyspaces.get(&qualified) {
+            return Some(ks.value().len() as u64);
+        }
+
+        None
     }
 
     /// Qualify a table name with default namespace if not already qualified.
@@ -1481,8 +1548,24 @@ impl StorageEngine {
 
     /// Flush all buffers to disk.
     pub fn flush(&self) -> Result<()> {
+        // Flush standalone buffer pools
         for pool in self.buffer_pools.iter() {
             pool.flush_all()?;
+        }
+
+        // Flush MVCC tables
+        for entry in self.mvcc_tables.iter() {
+            entry.value().flush()?;
+        }
+
+        // Flush document stores
+        for entry in self.document_stores.iter() {
+            entry.value().flush()?;
+        }
+
+        // Flush keyspaces
+        for entry in self.keyspaces.iter() {
+            entry.value().flush()?;
         }
 
         if let Some(wal) = &self.wal {

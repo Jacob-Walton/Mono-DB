@@ -603,6 +603,14 @@ where
     ) -> Result<Self> {
         Ok(Keyspace::Disk(DiskKeyspace::open(pool, meta_page_id)?))
     }
+
+    /// Flush to disk.
+    pub fn flush(&self) -> Result<()> {
+        match self {
+            Keyspace::Memory(_) => Ok(()), // Memory keyspaces don't need flushing
+            Keyspace::Disk(ks) => ks.flush(),
+        }
+    }
 }
 
 // Tests

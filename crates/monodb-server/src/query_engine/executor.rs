@@ -196,7 +196,7 @@ impl<S: QueryStorage> Executor<S> {
             PhysicalPlan::HashAggregate(op) => self.exec_hash_aggregate(op, tx_id, ctx),
             PhysicalPlan::NestedLoopJoin(op) => self.exec_nested_loop_join(op, tx_id, ctx),
             PhysicalPlan::HashJoin(op) => self.exec_hash_join(op, tx_id, ctx),
-            PhysicalPlan::Values(op) => self.exec_values(op),
+            PhysicalPlan::Values(op) => self.exec_values(op, ctx),
             PhysicalPlan::Empty => Ok(QueryResult::empty()),
             PhysicalPlan::Insert(op) => self.exec_insert(op, tx_id, ctx),
             PhysicalPlan::Update(op) => self.exec_update(op, tx_id, ctx),
@@ -430,6 +430,16 @@ impl<S: QueryStorage> Executor<S> {
                 key_bytes.extend(format!("{:?}|", val).as_bytes());
             }
             groups.entry(key_bytes).or_default().push(row);
+        }
+        
+        // Handle case with no groups (global aggregate)
+        if groups.is_empty() && op.group_by.is_empty() && !op.aggregates.is_empty() {
+            let mut result_row = Row::new();
+            for agg in &op.aggregates {
+                let val = self.compute_aggregate(&agg.function, &agg.args, &[], ctx)?;
+                result_row.insert(agg.output_name.as_str(), val);
+            }
+            return Ok(QueryResult::from_rows(vec![result_row]));
         }
 
         // Compute aggregates for each group
@@ -723,25 +733,31 @@ impl<S: QueryStorage> Executor<S> {
         )
     }
 
-    fn exec_values(&self, op: &ValuesOp) -> Result<QueryResult> {
-        let rows = op
+    fn exec_values(&self, op: &ValuesOp, ctx: &ExecutionContext) -> Result<QueryResult> {
+        // Create an empty row for evaluating expressions (VALUES doesn't have input rows)
+        let empty_row = Row::new();
+
+        let rows: Result<Vec<Row>> = op
             .rows
             .iter()
-            .map(|vals| {
+            .map(|exprs| {
                 let mut row = Row::new();
-                for (i, val) in vals.iter().enumerate() {
+                for (i, expr) in exprs.iter().enumerate() {
                     let col_name = op
                         .columns
                         .get(i)
                         .map(|c| c.as_str().to_string())
                         .unwrap_or_else(|| format!("col{}", i));
-                    row.insert(col_name, val.clone());
+                    // Evaluate the expression to get the actual value
+                    // This handles constants, parameters ($1, $2), and any other expressions
+                    let value = self.eval_expr(expr, &empty_row, ctx)?;
+                    row.insert(col_name, value);
                 }
-                row
+                Ok(row)
             })
             .collect();
 
-        Ok(QueryResult::from_rows(rows))
+        Ok(QueryResult::from_rows(rows?))
     }
 
     fn exec_insert(
@@ -965,6 +981,30 @@ fn eval_binary_op(left: &Value, op: BinaryOp, right: &Value) -> Result<Value> {
 
         BinaryOp::Like => match (left, right) {
             (Value::String(s), Value::String(pattern)) => Ok(Value::Bool(like_match(s, pattern))),
+            _ => Ok(Value::Bool(false)),
+        },
+
+        BinaryOp::StartsWith => match (left, right) {
+            (Value::String(s), Value::String(prefix)) => Ok(Value::Bool(
+                s.to_lowercase().starts_with(&prefix.to_lowercase()),
+            )),
+            _ => Ok(Value::Bool(false)),
+        },
+
+        BinaryOp::EndsWith => match (left, right) {
+            (Value::String(s), Value::String(suffix)) => Ok(Value::Bool(
+                s.to_lowercase().ends_with(&suffix.to_lowercase()),
+            )),
+            _ => Ok(Value::Bool(false)),
+        },
+
+        BinaryOp::Matches => match (left, right) {
+            (Value::String(s), Value::String(pattern)) => {
+                match regex::Regex::new(pattern) {
+                    Ok(re) => Ok(Value::Bool(re.is_match(s))),
+                    Err(_) => Ok(Value::Bool(false)), // Invalid regex returns false
+                }
+            }
             _ => Ok(Value::Bool(false)),
         },
 

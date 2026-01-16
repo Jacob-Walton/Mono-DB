@@ -75,6 +75,14 @@ fn generate_keywords() {
     map.entry(b"has", "TokenKind::Keyword");
     map.entry(b"and", "TokenKind::Keyword");
     map.entry(b"or", "TokenKind::Keyword");
+    map.entry(b"not", "TokenKind::Keyword");
+
+    // Pattern matching
+    map.entry(b"like", "TokenKind::Keyword"); // SQL-style pattern: name like "%john%"
+    map.entry(b"starts", "TokenKind::Keyword"); // starts with: name starts "john"
+    map.entry(b"ends", "TokenKind::Keyword"); // ends with: name ends "son"
+    map.entry(b"contains", "TokenKind::Keyword"); // alias for has: name contains "john"
+    map.entry(b"matches", "TokenKind::Keyword"); // regex: name matches "^[A-Z]"
 
     // Transaction control (MVCC)
     map.entry(b"begin", "TokenKind::Keyword");
@@ -93,6 +101,7 @@ fn generate_keywords() {
     map.entry(b"index", "TokenKind::Keyword");
     map.entry(b"on", "TokenKind::Keyword");
     map.entry(b"drop", "TokenKind::Keyword");
+    map.entry(b"force", "TokenKind::Keyword");
 
     // Schema inspection
     map.entry(b"describe", "TokenKind::Keyword");

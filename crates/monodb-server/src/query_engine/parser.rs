@@ -255,6 +255,28 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parse a table name that may be qualified (namespace.table) and return as single Ident.
+    /// This allows table names like "myapp.users" to be parsed as a single identifier.
+    fn parse_table_name(&mut self) -> ParseResult<Spanned<Ident>> {
+        let start_span = self.current_span();
+        let first = self.expect_identifier()?;
+
+        // Check for dot followed by another identifier (namespace.table)
+        if self.check(TokenKind::Dot) {
+            self.advance(); // consume dot
+            let second = self.expect_identifier()?;
+            let end_span = second.span;
+            // Combine into single identifier: "namespace.table"
+            let qualified_name = format!("{}.{}", first.node.as_str(), second.node.as_str());
+            Ok(Spanned::new(
+                Ident::new(qualified_name),
+                start_span.merge(end_span),
+            ))
+        } else {
+            Ok(first)
+        }
+    }
+
     fn next_slot(&mut self) -> u32 {
         let id = self.next_slot_id;
         self.next_slot_id += 1;
@@ -400,7 +422,7 @@ impl<'a> Parser<'a> {
         };
 
         self.expect_keyword("from")?;
-        let source = self.expect_identifier()?;
+        let source = self.parse_table_name()?;
 
         let mut filter = None;
         let mut order_by = None;
@@ -488,7 +510,7 @@ impl<'a> Parser<'a> {
 
     fn parse_describe(&mut self) -> ParseResult<QueryStatement> {
         self.expect_keyword("describe")?;
-        let table = self.expect_identifier()?;
+        let table = self.parse_table_name()?;
         Ok(QueryStatement::Describe(DescribeQuery { table }))
     }
 
@@ -497,7 +519,7 @@ impl<'a> Parser<'a> {
         if self.check_keyword("from") {
             self.advance();
         }
-        let table = self.expect_identifier()?;
+        let table = self.parse_table_name()?;
         Ok(QueryStatement::Count(CountQuery {
             table,
             filter: None,
@@ -517,7 +539,7 @@ impl<'a> Parser<'a> {
     fn parse_put(&mut self) -> ParseResult<MutationStatement> {
         self.expect_keyword("put")?;
         self.expect_keyword("into")?;
-        let target = self.expect_identifier()?;
+        let target = self.parse_table_name()?;
 
         let mut assignments = Vec::new();
 
@@ -571,14 +593,14 @@ impl<'a> Parser<'a> {
         }
 
         // Otherwise it's a mutation
-        let target = self.expect_identifier()?;
+        let target = self.parse_table_name()?;
         self.parse_change_mutation(target)
     }
 
     /// Parse ALTER TABLE: change table <name> ...
     fn parse_change_table(&mut self) -> ParseResult<DdlStatement> {
         self.expect_keyword("table")?;
-        let table = self.expect_identifier()?;
+        let table = self.parse_table_name()?;
 
         // Check for inline "rename to" syntax: change table users rename to app_users
         if self.check_keyword("rename") {
@@ -911,7 +933,7 @@ impl<'a> Parser<'a> {
     fn parse_remove(&mut self) -> ParseResult<MutationStatement> {
         self.expect_keyword("remove")?;
         self.expect_keyword("from")?;
-        let target = self.expect_identifier()?;
+        let target = self.parse_table_name()?;
 
         let filter = if self.check_keyword("where") {
             self.parse_where_clause()?
@@ -938,7 +960,7 @@ impl<'a> Parser<'a> {
         }
 
         self.expect_keyword("table")?;
-        let name = self.expect_identifier()?;
+        let name = self.parse_table_name()?;
 
         self.skip_newlines();
         self.expect(TokenKind::Indent)?;
@@ -1028,7 +1050,7 @@ impl<'a> Parser<'a> {
         self.expect_keyword("index")?;
         let name = self.expect_identifier()?;
         self.expect_keyword("on")?;
-        let table = self.expect_identifier()?;
+        let table = self.parse_table_name()?;
 
         self.expect(TokenKind::LeftParen)?;
         let mut columns = Vec::new();
@@ -1090,7 +1112,7 @@ impl<'a> Parser<'a> {
             self.expect_keyword("index")?;
             let name = self.expect_identifier()?;
             self.expect_keyword("on")?;
-            let table = self.expect_identifier()?;
+            let table = self.parse_table_name()?;
 
             Ok(DdlStatement::DropIndex(DropIndexDdl {
                 name,
@@ -1099,7 +1121,7 @@ impl<'a> Parser<'a> {
             }))
         } else if self.check_keyword("table") {
             self.expect_keyword("table")?;
-            let name = self.expect_identifier()?;
+            let name = self.parse_table_name()?;
 
             Ok(DdlStatement::DropTable(DropTableDdl {
                 name,
@@ -1318,6 +1340,19 @@ impl<'a> Parser<'a> {
                 Some(TokenKind::Keyword) if self.check_keyword("and") => (BinaryOp::And, 3, 4),
                 Some(TokenKind::Keyword) if self.check_keyword("or") => (BinaryOp::Or, 1, 2),
                 Some(TokenKind::Keyword) if self.check_keyword("has") => (BinaryOp::Contains, 7, 8),
+                Some(TokenKind::Keyword) if self.check_keyword("contains") => {
+                    (BinaryOp::Contains, 7, 8)
+                }
+                Some(TokenKind::Keyword) if self.check_keyword("like") => (BinaryOp::Like, 7, 8),
+                Some(TokenKind::Keyword) if self.check_keyword("starts") => {
+                    (BinaryOp::StartsWith, 7, 8)
+                }
+                Some(TokenKind::Keyword) if self.check_keyword("ends") => {
+                    (BinaryOp::EndsWith, 7, 8)
+                }
+                Some(TokenKind::Keyword) if self.check_keyword("matches") => {
+                    (BinaryOp::Matches, 7, 8)
+                }
                 _ => break,
             };
 
@@ -1412,6 +1447,66 @@ impl<'a> Parser<'a> {
                 }
             }
 
+            // Handle keywords that can also be function names (uuid, now, etc.)
+            Some(TokenKind::Keyword) => {
+                let kw_span = self.current_span();
+                let text = {
+                    let token = self.current().unwrap();
+                    self.token_string(token)
+                };
+                self.advance();
+
+                // Check if this is a function call (keyword followed by '(')
+                if self.check(TokenKind::LeftParen) {
+                    self.advance(); // consume '('
+                    let args = self.parse_function_args()?;
+                    self.expect(TokenKind::RightParen)?;
+
+                    let end_span = self.previous_span();
+                    let full_span = Span::new(kw_span.start, end_span.end);
+
+                    Ok(Spanned::new(
+                        Expr::FunctionCall {
+                            name: Spanned::new(Ident::new(&text), kw_span),
+                            args,
+                        },
+                        full_span,
+                    ))
+                } else {
+                    // Handle keyword literals (true, false, null)
+                    match text.to_lowercase().as_str() {
+                        "true" => Ok(Spanned::new(
+                            Expr::Literal(LiteralSlot {
+                                value: LiteralValue::Bool(true),
+                                slot_id: self.next_slot(),
+                            }),
+                            kw_span,
+                        )),
+                        "false" => Ok(Spanned::new(
+                            Expr::Literal(LiteralSlot {
+                                value: LiteralValue::Bool(false),
+                                slot_id: self.next_slot(),
+                            }),
+                            kw_span,
+                        )),
+                        "null" => Ok(Spanned::new(
+                            Expr::Literal(LiteralSlot {
+                                value: LiteralValue::Null,
+                                slot_id: self.next_slot(),
+                            }),
+                            kw_span,
+                        )),
+                        _ => {
+                            // Treat as column reference for other keywords
+                            Ok(Spanned::new(
+                                Expr::Column(ColumnRef::simple(Ident::new(&text))),
+                                kw_span,
+                            ))
+                        }
+                    }
+                }
+            }
+
             Some(TokenKind::Variable) => {
                 let text = {
                     let token = self.current().unwrap();
@@ -1445,61 +1540,6 @@ impl<'a> Parser<'a> {
                     Expr::Param(ParamRef::Named(Ident::new(param_name))),
                     span,
                 ))
-            }
-
-            Some(TokenKind::Keyword) => {
-                if self.check_keyword("true") {
-                    self.advance();
-                    let slot_id = self.next_slot();
-                    Ok(Spanned::new(
-                        Expr::Literal(LiteralSlot {
-                            value: LiteralValue::Bool(true),
-                            slot_id,
-                        }),
-                        span,
-                    ))
-                } else if self.check_keyword("false") {
-                    self.advance();
-                    let slot_id = self.next_slot();
-                    Ok(Spanned::new(
-                        Expr::Literal(LiteralSlot {
-                            value: LiteralValue::Bool(false),
-                            slot_id,
-                        }),
-                        span,
-                    ))
-                } else if self.check_keyword("null") {
-                    self.advance();
-                    let slot_id = self.next_slot();
-                    Ok(Spanned::new(
-                        Expr::Literal(LiteralSlot {
-                            value: LiteralValue::Null,
-                            slot_id,
-                        }),
-                        span,
-                    ))
-                } else if self.check_keyword("now") {
-                    self.advance();
-                    if self.check(TokenKind::LeftParen) {
-                        self.advance();
-                        self.expect(TokenKind::RightParen)?;
-                    }
-                    Ok(Spanned::new(
-                        Expr::FunctionCall {
-                            name: Spanned::new(Ident::new("now"), span),
-                            args: Vec::new(),
-                        },
-                        span,
-                    ))
-                } else {
-                    // Treat as identifier
-                    let name = {
-                        let token = self.current().unwrap();
-                        self.token_string(token)
-                    };
-                    self.advance();
-                    Ok(Spanned::new(Expr::Column(ColumnRef::simple(name)), span))
-                }
             }
 
             Some(TokenKind::LeftBracket) => self.parse_array(),

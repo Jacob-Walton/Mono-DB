@@ -10,6 +10,8 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 use monodb_common::{MonoError, Result, Value};
 
+#[cfg(feature = "plugins")]
+use crate::query_engine::ast::{Expr, Spanned};
 use crate::storage::engine::{StorageEngine, TableInfo};
 
 // Row Types
@@ -184,11 +186,28 @@ pub trait QueryStorage: Send + Sync {
 /// Bridges QueryStorage to the actual StorageEngine.
 pub struct StorageAdapter {
     engine: Arc<StorageEngine>,
+    #[cfg(feature = "plugins")]
+    plugin_host: parking_lot::RwLock<Option<Arc<monodb_plugin::PluginHost>>>,
 }
 
 impl StorageAdapter {
     pub fn new(engine: Arc<StorageEngine>) -> Self {
-        Self { engine }
+        Self {
+            engine,
+            #[cfg(feature = "plugins")]
+            plugin_host: parking_lot::RwLock::new(None),
+        }
+    }
+
+    /// Set the plugin host reference
+    #[cfg(feature = "plugins")]
+    pub fn set_plugin_host(&self, host: Arc<monodb_plugin::PluginHost>) {
+        *self.plugin_host.write() = Some(host);
+    }
+
+    /// Flush all data to disk.
+    pub fn flush(&self) -> Result<()> {
+        self.engine.flush()
     }
 
     /// Encode a key value to bytes using the native binary format.
@@ -213,6 +232,67 @@ impl StorageAdapter {
         }
     }
 
+    // Marker strings for dynamic defaults (evaluated at insert time)
+    const DEFAULT_UUID_MARKER: &'static str = "__default_fn:uuid";
+    const DEFAULT_NOW_MARKER: &'static str = "__default_fn:now";
+    const DEFAULT_PLUGIN_PREFIX: &'static str = "__default_fn:plugin:";
+
+    /// Evaluate a stored default value, generating fresh values for dynamic defaults.
+    #[cfg(feature = "plugins")]
+    fn evaluate_default(&self, default: &Value) -> Value {
+        // Check if this is a dynamic default marker
+        if let Value::String(s) = default {
+            match s.as_str() {
+                Self::DEFAULT_UUID_MARKER => {
+                    return Value::Uuid(uuid::Uuid::new_v4());
+                }
+                Self::DEFAULT_NOW_MARKER => {
+                    let now = chrono::Utc::now();
+                    return Value::DateTime(
+                        now.with_timezone(&chrono::FixedOffset::east_opt(0).unwrap()),
+                    );
+                }
+                _ if s.starts_with(Self::DEFAULT_PLUGIN_PREFIX) => {
+                    // Extract function name and call plugin
+                    let func_name = &s[Self::DEFAULT_PLUGIN_PREFIX.len()..];
+                    if let Some(host) = self.plugin_host.read().as_ref() {
+                        let perms = monodb_plugin::PluginPermissions::read_only();
+                        if let Ok(value) = host.call_function(func_name, vec![], perms) {
+                            return value;
+                        }
+                    }
+                    // Fall back to null if plugin call fails
+                    return Value::Null;
+                }
+                _ => {}
+            }
+        }
+        // Not a marker, return as-is
+        default.clone()
+    }
+
+    /// Evaluate a stored default value, generating fresh values for dynamic defaults.
+    #[cfg(not(feature = "plugins"))]
+    fn evaluate_default(&self, default: &Value) -> Value {
+        // Check if this is a dynamic default marker
+        if let Value::String(s) = default {
+            match s.as_str() {
+                Self::DEFAULT_UUID_MARKER => {
+                    return Value::Uuid(uuid::Uuid::new_v4());
+                }
+                Self::DEFAULT_NOW_MARKER => {
+                    let now = chrono::Utc::now();
+                    return Value::DateTime(
+                        now.with_timezone(&chrono::FixedOffset::east_opt(0).unwrap()),
+                    );
+                }
+                _ => {}
+            }
+        }
+        // Not a marker, return as-is
+        default.clone()
+    }
+
     /// Evaluate a constant expression to a Value (for default values).
     fn eval_constant_expr(expr: &crate::query_engine::ast::Expr) -> Option<Value> {
         use crate::query_engine::ast::{Expr, LiteralValue};
@@ -229,14 +309,15 @@ impl StorageAdapter {
             Expr::FunctionCall { name, args: _ } => {
                 let func_name = name.node.as_str().to_lowercase();
                 match func_name.as_str() {
+                    // Store markers for dynamic defaults
                     "now" | "current_timestamp" => {
-                        let now = chrono::Utc::now();
-                        Some(Value::DateTime(
-                            now.with_timezone(&chrono::FixedOffset::east_opt(0).unwrap()),
-                        ))
+                        Some(Value::String(Self::DEFAULT_NOW_MARKER.to_string()))
                     }
-                    "uuid" | "gen_random_uuid" => Some(Value::Uuid(uuid::Uuid::new_v4())),
-                    _ => None,
+                    "uuid" | "gen_random_uuid" => {
+                        Some(Value::String(Self::DEFAULT_UUID_MARKER.to_string()))
+                    }
+                    // For other functions, check if it's a plugin function
+                    other => Self::check_plugin_function(other),
                 }
             }
             Expr::Column(col_ref) => {
@@ -277,6 +358,21 @@ impl StorageAdapter {
         }
     }
 
+    /// Check if a function name is a registered plugin function
+    #[cfg(feature = "plugins")]
+    fn check_plugin_function(name: &str) -> Option<Value> {
+        Some(Value::String(format!(
+            "{}{}",
+            Self::DEFAULT_PLUGIN_PREFIX,
+            name
+        )))
+    }
+
+    #[cfg(not(feature = "plugins"))]
+    fn check_plugin_function(_name: &str) -> Option<Value> {
+        None
+    }
+
     fn extract_key(row: &Row) -> Result<Value> {
         row.get("_id")
             .or_else(|| row.get("id"))
@@ -299,6 +395,11 @@ impl StorageAdapter {
                 (t.name, table_type.to_string())
             })
             .collect()
+    }
+
+    /// List all namespace names
+    pub fn list_namespaces(&self) -> Vec<String> {
+        self.engine.namespace_manager().names()
     }
 
     /// Describe a table's schema
@@ -337,7 +438,16 @@ impl StorageAdapter {
                         if let Some(ref default) = col.default {
                             // Format default value for display
                             let default_str = match default {
-                                Value::String(s) => format!("\"{}\"", s),
+                                Value::String(s) => {
+                                    // Check for dynamic default markers
+                                    if s == Self::DEFAULT_UUID_MARKER {
+                                        "uuid()".to_string()
+                                    } else if s == Self::DEFAULT_NOW_MARKER {
+                                        "now()".to_string()
+                                    } else {
+                                        format!("\"{}\"", s)
+                                    }
+                                }
                                 Value::Null => "null".to_string(),
                                 Value::Bool(b) => b.to_string(),
                                 Value::Int32(i) => i.to_string(),
@@ -432,9 +542,9 @@ impl StorageAdapter {
         self.engine.namespace_manager().create(name, None)
     }
 
-    /// Drop a namespace
+    /// Drop a namespace and all its tables
     pub fn drop_namespace(&self, name: &str, force: bool) -> Result<()> {
-        self.engine.namespace_manager().drop(name, force)
+        self.engine.drop_namespace(name, force)
     }
 
     /// Add columns to an existing table
@@ -553,12 +663,119 @@ impl StorageAdapter {
 
     /// Drop columns from an existing table
     pub fn drop_columns(&self, table: &str, columns: &[String]) -> Result<()> {
-        self.engine.schema_catalog().drop_columns(table, columns)
+        // First get the schema to find the primary key
+        let schema = self
+            .engine
+            .schema_catalog()
+            .get(table)
+            .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", table)))?;
+
+        // Only relational tables support column drops
+        if schema.table_type != crate::storage::schema::StoredTableType::Relation {
+            return Err(MonoError::InvalidOperation(
+                "Can only drop columns from relational tables".into(),
+            ));
+        }
+
+        // Update the schema first
+        self.engine.schema_catalog().drop_columns(table, columns)?;
+
+        // Now update existing rows to remove the dropped columns
+        let tx_id = self.engine.begin_transaction()?;
+        match self.engine.mvcc_scan(tx_id, table) {
+            Ok(rows) => {
+                for (key_bytes, value_bytes) in rows {
+                    // Decode the row
+                    if let Ok(mut row) = Self::decode_row(&value_bytes) {
+                        // Remove the dropped columns
+                        let mut modified = false;
+                        for col in columns {
+                            if row.columns.shift_remove(col).is_some() {
+                                modified = true;
+                            }
+                        }
+
+                        // If modified, write back the row
+                        if modified {
+                            let new_value = Self::encode_row(&row);
+                            if let Err(e) =
+                                self.engine.mvcc_write(tx_id, table, key_bytes, new_value)
+                            {
+                                let _ = self.engine.rollback(tx_id);
+                                return Err(e);
+                            }
+                        }
+                    }
+                }
+                self.engine.commit(tx_id)?;
+            }
+            Err(e) => {
+                let _ = self.engine.rollback(tx_id);
+                return Err(e);
+            }
+        }
+
+        Ok(())
     }
 
     /// Rename columns in an existing table
     pub fn rename_columns(&self, table: &str, renames: &[(String, String)]) -> Result<()> {
-        self.engine.schema_catalog().rename_columns(table, renames)
+        // First get the schema to verify it's a relational table
+        let schema = self
+            .engine
+            .schema_catalog()
+            .get(table)
+            .ok_or_else(|| MonoError::NotFound(format!("Table '{}' not found", table)))?;
+
+        // Only relational tables support column renames
+        if schema.table_type != crate::storage::schema::StoredTableType::Relation {
+            return Err(MonoError::InvalidOperation(
+                "Can only rename columns in relational tables".into(),
+            ));
+        }
+
+        // Update the schema first
+        self.engine
+            .schema_catalog()
+            .rename_columns(table, renames)?;
+
+        // Now update existing rows to rename the columns
+        let tx_id = self.engine.begin_transaction()?;
+        match self.engine.mvcc_scan(tx_id, table) {
+            Ok(rows) => {
+                for (key_bytes, value_bytes) in rows {
+                    // Decode the row
+                    if let Ok(mut row) = Self::decode_row(&value_bytes) {
+                        // Rename the columns
+                        let mut modified = false;
+                        for (old_name, new_name) in renames {
+                            if let Some(value) = row.columns.shift_remove(old_name) {
+                                row.columns.insert(new_name.clone(), value);
+                                modified = true;
+                            }
+                        }
+
+                        // If modified, write back the row
+                        if modified {
+                            let new_value = Self::encode_row(&row);
+                            if let Err(e) =
+                                self.engine.mvcc_write(tx_id, table, key_bytes, new_value)
+                            {
+                                let _ = self.engine.rollback(tx_id);
+                                return Err(e);
+                            }
+                        }
+                    }
+                }
+                self.engine.commit(tx_id)?;
+            }
+            Err(e) => {
+                let _ = self.engine.rollback(tx_id);
+                return Err(e);
+            }
+        }
+
+        Ok(())
     }
 
     /// Rename a table
@@ -585,6 +802,36 @@ impl StorageAdapter {
     }
 
     /// Evaluate a default expression to a Value (public wrapper for network layer)
+    #[cfg(feature = "plugins")]
+    pub fn eval_default_expr(
+        &self,
+        expr: &Spanned<Expr>,
+    ) -> Result<Value> {
+        if let Some(value) = Self::eval_constant_expr(&expr.node) {
+            // If it's a plugin function marker, verify the function exists
+            if let Value::String(s) = &value
+                && let Some(func_name) = s.strip_prefix(Self::DEFAULT_PLUGIN_PREFIX)
+            {
+                if let Some(host) = self.plugin_host.read().as_ref()
+                    && host.has_function(func_name)
+                {
+                    return Ok(value);
+                }
+                return Err(MonoError::InvalidOperation(format!(
+                    "Unknown function '{}' (no plugin provides this function)",
+                    func_name
+                )));
+            }
+            Ok(value)
+        } else {
+            Err(MonoError::InvalidOperation(
+                "Cannot evaluate expression as constant default value".into(),
+            ))
+        }
+    }
+
+    /// Evaluate a default expression to a Value (public wrapper for network layer)
+    #[cfg(not(feature = "plugins"))]
     pub fn eval_default_expr(
         &self,
         expr: &crate::query_engine::ast::Spanned<crate::query_engine::ast::Expr>,
@@ -612,7 +859,7 @@ impl StorageAdapter {
         match table_type {
             TableType::Relational => {
                 // Convert columns
-                let stored_columns: Vec<StoredColumnSchema> = columns
+                let stored_columns: Result<Vec<StoredColumnSchema>> = columns
                     .iter()
                     .map(|col| {
                         // Check constraints
@@ -624,46 +871,29 @@ impl StorageAdapter {
                         });
                         let default_val = col.constraints.iter().find_map(|c| {
                             if let crate::query_engine::ast::ColumnConstraint::Default(expr) = c {
-                                // Try to evaluate default value
-                                // For now, only support literals
-                                if let crate::query_engine::ast::Expr::Literal(lit_slot) =
-                                    &expr.node
-                                {
-                                    // Convert LiteralValue to Value
-                                    Some(match &lit_slot.value {
-                                        crate::query_engine::ast::LiteralValue::Null => Value::Null,
-                                        crate::query_engine::ast::LiteralValue::Bool(b) => {
-                                            Value::Bool(*b)
-                                        }
-                                        crate::query_engine::ast::LiteralValue::Int64(n) => {
-                                            Value::Int64(*n)
-                                        }
-                                        crate::query_engine::ast::LiteralValue::Float64(f) => {
-                                            Value::Float64(*f)
-                                        }
-                                        crate::query_engine::ast::LiteralValue::String(s) => {
-                                            Value::String(s.to_string())
-                                        }
-                                        crate::query_engine::ast::LiteralValue::Bytes(b) => {
-                                            Value::Binary(b.to_vec())
-                                        }
-                                    })
-                                } else {
-                                    None
-                                }
+                                Some(expr)
                             } else {
                                 None
                             }
                         });
 
-                        StoredColumnSchema {
+                        // Evaluate default expression if present
+                        let default = if let Some(expr) = default_val {
+                            Some(self.eval_default_expr(expr)?)
+                        } else {
+                            None
+                        };
+
+                        Ok(StoredColumnSchema {
                             name: col.name.node.as_str().to_string(),
                             data_type: StoredDataType::from(&col.data_type),
                             nullable: !is_primary && !is_not_null,
-                            default: default_val,
-                        }
+                            default,
+                        })
                     })
                     .collect();
+
+                let stored_columns = stored_columns?;
 
                 // Extract primary key columns
                 let mut primary_keys = Vec::new();
@@ -909,7 +1139,9 @@ impl QueryStorage for StorageAdapter {
             for col in &schema.columns {
                 if !row.columns.contains_key(&col.name) {
                     if let Some(default) = &col.default {
-                        row.insert(col.name.clone(), default.clone());
+                        // Check if this is a dynamic default marker
+                        let value = self.evaluate_default(default);
+                        row.insert(col.name.clone(), value);
                     } else if !col.nullable {
                         // Required field missing without default
                         return Err(MonoError::InvalidOperation(format!(

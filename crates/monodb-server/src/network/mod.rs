@@ -218,7 +218,8 @@ async fn handle_request(
                     size_bytes: None,
                 })
                 .collect();
-            Ok(Response::TableList { tables })
+            let namespaces = storage.list_namespaces();
+            Ok(Response::TableList { tables, namespaces })
         }
 
         _ => {

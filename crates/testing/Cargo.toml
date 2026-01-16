@@ -10,4 +10,4 @@ repository.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 monodb-common = { path = "../monodb-common" }
-wasmtime = "40.0.0"
+monodb-client = { path = "../monodb-client" }

@@ -9,7 +9,7 @@
 //! and cost-based optimization for join ordering and access method selection.
 
 use crate::query_engine::ast::{
-    self, BinaryOp, Expr, GetQuery, Ident, LiteralValue, QueryStatement, Statement,
+    self, BinaryOp, Expr, GetQuery, Ident, LiteralValue, QueryStatement, Statement, UnaryOp,
 };
 use crate::query_engine::logical_plan::{
     AggregateFunction, AggregateNode, DeleteNode, FilterNode, InsertNode, JoinNode, LimitNode,
@@ -586,25 +586,11 @@ impl<C: Catalog> QueryPlanner<C> {
     fn plan_values(&self, values: &ValuesNode) -> Result<PhysicalPlan> {
         use crate::query_engine::physical_plan::ValuesOp;
 
-        // Convert ScalarExpr rows to Value rows by evaluating constants
-        let rows: Result<Vec<Vec<Value>>> = values
-            .rows
-            .iter()
-            .map(|row| {
-                row.iter()
-                    .map(|expr| match expr {
-                        ScalarExpr::Constant(v) => Ok(v.clone()),
-                        _ => Err(MonoError::InvalidOperation(
-                            "Non-constant values not supported in VALUES".into(),
-                        )),
-                    })
-                    .collect()
-            })
-            .collect();
-
+        // Pass through ScalarExpr rows directly, they will be evaluated at execution time
+        // This allows parameterized queries ($1, $2, etc.) to work with INSERT/VALUES
         Ok(PhysicalPlan::Values(ValuesOp {
             columns: values.columns.clone(),
-            rows: rows?,
+            rows: values.rows.clone(),
         }))
     }
 
@@ -747,19 +733,257 @@ pub fn default_optimization_rules() -> Vec<Box<dyn OptimizationRule>> {
 /// Constant folding: evaluate constant expressions at plan time.
 struct ConstantFoldingRule;
 
+impl ConstantFoldingRule {
+    /// Recursively fold constants in an expression.
+    fn fold_expr(&self, expr: ScalarExpr) -> ScalarExpr {
+        match expr {
+            ScalarExpr::BinaryOp { left, op, right } => {
+                let left = self.fold_expr(*left);
+                let right = self.fold_expr(*right);
+
+                // Try to evaluate if both sides are constants
+                if let (ScalarExpr::Constant(l), ScalarExpr::Constant(r)) = (&left, &right)
+                    && let Some(result) = self.eval_binary(l, &op, r)
+                {
+                    return ScalarExpr::Constant(result);
+                }
+
+                // Logical simplifications
+                match op {
+                    BinaryOp::And => {
+                        // false AND x -> false
+                        if matches!(&left, ScalarExpr::Constant(Value::Bool(false))) {
+                            return ScalarExpr::Constant(Value::Bool(false));
+                        }
+                        if matches!(&right, ScalarExpr::Constant(Value::Bool(false))) {
+                            return ScalarExpr::Constant(Value::Bool(false));
+                        }
+                        // true AND x -> x
+                        if matches!(&left, ScalarExpr::Constant(Value::Bool(true))) {
+                            return right;
+                        }
+                        if matches!(&right, ScalarExpr::Constant(Value::Bool(true))) {
+                            return left;
+                        }
+                    }
+                    BinaryOp::Or => {
+                        // true OR x -> true
+                        if matches!(&left, ScalarExpr::Constant(Value::Bool(true))) {
+                            return ScalarExpr::Constant(Value::Bool(true));
+                        }
+                        if matches!(&right, ScalarExpr::Constant(Value::Bool(true))) {
+                            return ScalarExpr::Constant(Value::Bool(true));
+                        }
+                        // false OR x -> x
+                        if matches!(&left, ScalarExpr::Constant(Value::Bool(false))) {
+                            return right;
+                        }
+                        if matches!(&right, ScalarExpr::Constant(Value::Bool(false))) {
+                            return left;
+                        }
+                    }
+                    _ => {}
+                }
+
+                ScalarExpr::BinaryOp {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                }
+            }
+            ScalarExpr::UnaryOp { op, operand } => {
+                let operand = self.fold_expr(*operand);
+                if let ScalarExpr::Constant(v) = &operand
+                    && let Some(result) = self.eval_unary(&op, v)
+                {
+                    return ScalarExpr::Constant(result);
+                }
+                ScalarExpr::UnaryOp {
+                    op,
+                    operand: Box::new(operand),
+                }
+            }
+            ScalarExpr::FunctionCall { name, args } => ScalarExpr::FunctionCall {
+                name,
+                args: args.into_iter().map(|a| self.fold_expr(a)).collect(),
+            },
+            ScalarExpr::Case {
+                operand,
+                when_clauses,
+                else_result,
+            } => ScalarExpr::Case {
+                operand: operand.map(|o| Box::new(self.fold_expr(*o))),
+                when_clauses: when_clauses
+                    .into_iter()
+                    .map(|(w, t)| (self.fold_expr(w), self.fold_expr(t)))
+                    .collect(),
+                else_result: else_result.map(|e| Box::new(self.fold_expr(*e))),
+            },
+            ScalarExpr::Array(items) => {
+                ScalarExpr::Array(items.into_iter().map(|i| self.fold_expr(i)).collect())
+            }
+            ScalarExpr::Object(fields) => ScalarExpr::Object(
+                fields
+                    .into_iter()
+                    .map(|(k, v)| (k, self.fold_expr(v)))
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+
+    /// Evaluate a binary operation on constants.
+    fn eval_binary(&self, left: &Value, op: &BinaryOp, right: &Value) -> Option<Value> {
+        match op {
+            // Arithmetic
+            BinaryOp::Add => match (left, right) {
+                (Value::Int64(a), Value::Int64(b)) => Some(Value::Int64(a + b)),
+                (Value::Float64(a), Value::Float64(b)) => Some(Value::Float64(a + b)),
+                (Value::Int64(a), Value::Float64(b)) => Some(Value::Float64(*a as f64 + b)),
+                (Value::Float64(a), Value::Int64(b)) => Some(Value::Float64(a + *b as f64)),
+                (Value::String(a), Value::String(b)) => Some(Value::String(format!("{}{}", a, b))),
+                _ => None,
+            },
+            BinaryOp::Sub => match (left, right) {
+                (Value::Int64(a), Value::Int64(b)) => Some(Value::Int64(a - b)),
+                (Value::Float64(a), Value::Float64(b)) => Some(Value::Float64(a - b)),
+                _ => None,
+            },
+            BinaryOp::Mul => match (left, right) {
+                (Value::Int64(a), Value::Int64(b)) => Some(Value::Int64(a * b)),
+                (Value::Float64(a), Value::Float64(b)) => Some(Value::Float64(a * b)),
+                _ => None,
+            },
+            BinaryOp::Div => match (left, right) {
+                (Value::Int64(a), Value::Int64(b)) if *b != 0 => Some(Value::Int64(a / b)),
+                (Value::Float64(a), Value::Float64(b)) if *b != 0.0 => Some(Value::Float64(a / b)),
+                _ => None,
+            },
+            BinaryOp::Mod => match (left, right) {
+                (Value::Int64(a), Value::Int64(b)) if *b != 0 => Some(Value::Int64(a % b)),
+                _ => None,
+            },
+            // Comparison
+            BinaryOp::Eq => Some(Value::Bool(left == right)),
+            BinaryOp::NotEq => Some(Value::Bool(left != right)),
+            BinaryOp::Lt => self
+                .compare_values(left, right)
+                .map(|o| Value::Bool(o.is_lt())),
+            BinaryOp::Gt => self
+                .compare_values(left, right)
+                .map(|o| Value::Bool(o.is_gt())),
+            BinaryOp::LtEq => self
+                .compare_values(left, right)
+                .map(|o| Value::Bool(o.is_le())),
+            BinaryOp::GtEq => self
+                .compare_values(left, right)
+                .map(|o| Value::Bool(o.is_ge())),
+            // Logical
+            BinaryOp::And => match (left, right) {
+                (Value::Bool(a), Value::Bool(b)) => Some(Value::Bool(*a && *b)),
+                _ => None,
+            },
+            BinaryOp::Or => match (left, right) {
+                (Value::Bool(a), Value::Bool(b)) => Some(Value::Bool(*a || *b)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Compare two values.
+    fn compare_values(&self, left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
+        match (left, right) {
+            (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b)),
+            (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b),
+            (Value::String(a), Value::String(b)) => Some(a.cmp(b)),
+            (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
+            _ => None,
+        }
+    }
+
+    /// Evaluate a unary operation on a constant.
+    fn eval_unary(&self, op: &UnaryOp, value: &Value) -> Option<Value> {
+        match op {
+            UnaryOp::Not => match value {
+                Value::Bool(b) => Some(Value::Bool(!b)),
+                _ => None,
+            },
+            UnaryOp::Neg => match value {
+                Value::Int64(n) => Some(Value::Int64(-n)),
+                Value::Float64(f) => Some(Value::Float64(-f)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Apply constant folding to all expressions in a plan node.
+    fn fold_plan(&self, plan: LogicalPlan) -> LogicalPlan {
+        match plan {
+            LogicalPlan::Filter(FilterNode { input, predicate }) => {
+                let folded_pred = self.fold_expr(predicate);
+                // If predicate folds to true, eliminate filter
+                if matches!(&folded_pred, ScalarExpr::Constant(Value::Bool(true))) {
+                    return self.fold_plan(*input);
+                }
+                // If predicate folds to false, return empty
+                if matches!(&folded_pred, ScalarExpr::Constant(Value::Bool(false))) {
+                    return LogicalPlan::Empty;
+                }
+                LogicalPlan::Filter(FilterNode {
+                    input: Box::new(self.fold_plan(*input)),
+                    predicate: folded_pred,
+                })
+            }
+            LogicalPlan::Project(ProjectNode { input, expressions }) => {
+                LogicalPlan::Project(ProjectNode {
+                    input: Box::new(self.fold_plan(*input)),
+                    expressions: expressions
+                        .into_iter()
+                        .map(|(name, expr)| (name, self.fold_expr(expr)))
+                        .collect(),
+                })
+            }
+            LogicalPlan::Sort(SortNode { input, order_by }) => LogicalPlan::Sort(SortNode {
+                input: Box::new(self.fold_plan(*input)),
+                order_by: order_by
+                    .into_iter()
+                    .map(|sk| SortKey {
+                        expr: self.fold_expr(sk.expr),
+                        ..sk
+                    })
+                    .collect(),
+            }),
+            LogicalPlan::Limit(LimitNode { input, count }) => LogicalPlan::Limit(LimitNode {
+                input: Box::new(self.fold_plan(*input)),
+                count,
+            }),
+            LogicalPlan::Offset(OffsetNode { input, count }) => LogicalPlan::Offset(OffsetNode {
+                input: Box::new(self.fold_plan(*input)),
+                count,
+            }),
+            LogicalPlan::Aggregate(AggregateNode {
+                input,
+                group_by,
+                aggregates,
+            }) => LogicalPlan::Aggregate(AggregateNode {
+                input: Box::new(self.fold_plan(*input)),
+                group_by: group_by.into_iter().map(|e| self.fold_expr(e)).collect(),
+                aggregates,
+            }),
+            other => other,
+        }
+    }
+}
+
 impl OptimizationRule for ConstantFoldingRule {
     fn name(&self) -> &'static str {
         "constant_folding"
     }
 
     fn apply(&self, plan: LogicalPlan, _catalog: &dyn Catalog) -> LogicalPlan {
-        // TODO: Implement constant folding
-        // Examples:
-        // - 1 + 2 → 3
-        // - true AND x → x
-        // - false AND x → false
-        // - x = x → true (for non-null x)
-        plan
+        self.fold_plan(plan)
     }
 }
 
@@ -850,15 +1074,108 @@ impl OptimizationRule for FilterMergeRule {
 /// Limit pushdown: optimize top-N queries.
 struct LimitPushdownRule;
 
+impl LimitPushdownRule {
+    /// Try to extract a constant limit value from a ScalarExpr.
+    fn get_const_limit(expr: &ScalarExpr) -> Option<i64> {
+        match expr {
+            ScalarExpr::Constant(Value::Int64(n)) => Some(*n),
+            ScalarExpr::Constant(Value::Int32(n)) => Some(*n as i64),
+            _ => None,
+        }
+    }
+
+    /// Recursively apply limit pushdown.
+    fn push_limit(&self, plan: LogicalPlan, limit: Option<ScalarExpr>) -> LogicalPlan {
+        match plan {
+            // Limit(Limit(x, a), b) -> Limit(x, min(a, b)) if both are constants
+            LogicalPlan::Limit(LimitNode { input, count }) => {
+                let new_limit = match (&limit, Self::get_const_limit(&count)) {
+                    (Some(outer), Some(inner)) => {
+                        if let Some(outer_val) = Self::get_const_limit(outer) {
+                            Some(ScalarExpr::Constant(Value::Int64(outer_val.min(inner))))
+                        } else {
+                            Some(count) // Keep inner if outer isn't constant
+                        }
+                    }
+                    (None, _) => Some(count),
+                    (Some(_), None) => limit, // Keep outer if inner isn't constant
+                };
+                self.push_limit(*input, new_limit)
+            }
+            // Limit can be pushed through Project (doesn't change row count)
+            LogicalPlan::Project(ProjectNode { input, expressions }) => {
+                let pushed = self.push_limit(*input, limit);
+                LogicalPlan::Project(ProjectNode {
+                    input: Box::new(pushed),
+                    expressions,
+                })
+            }
+            // Limit(Sort(x)), keep limit above sort for top-N optimization
+            LogicalPlan::Sort(SortNode { input, order_by }) => {
+                let pushed = self.push_limit(*input, None);
+                let sorted = LogicalPlan::Sort(SortNode {
+                    input: Box::new(pushed),
+                    order_by,
+                });
+                if let Some(l) = limit {
+                    LogicalPlan::Limit(LimitNode {
+                        input: Box::new(sorted),
+                        count: l,
+                    })
+                } else {
+                    sorted
+                }
+            }
+            // For scan, apply limit at this level
+            LogicalPlan::Scan(scan) => {
+                let result = LogicalPlan::Scan(scan);
+                if let Some(l) = limit {
+                    LogicalPlan::Limit(LimitNode {
+                        input: Box::new(result),
+                        count: l,
+                    })
+                } else {
+                    result
+                }
+            }
+            // Filter, don't push limit through
+            LogicalPlan::Filter(FilterNode { input, predicate }) => {
+                let pushed = self.push_limit(*input, None);
+                let filtered = LogicalPlan::Filter(FilterNode {
+                    input: Box::new(pushed),
+                    predicate,
+                });
+                if let Some(l) = limit {
+                    LogicalPlan::Limit(LimitNode {
+                        input: Box::new(filtered),
+                        count: l,
+                    })
+                } else {
+                    filtered
+                }
+            }
+            // For other nodes, apply limit at current level
+            other => {
+                if let Some(l) = limit {
+                    LogicalPlan::Limit(LimitNode {
+                        input: Box::new(other),
+                        count: l,
+                    })
+                } else {
+                    other
+                }
+            }
+        }
+    }
+}
+
 impl OptimizationRule for LimitPushdownRule {
     fn name(&self) -> &'static str {
         "limit_pushdown"
     }
 
     fn apply(&self, plan: LogicalPlan, _catalog: &dyn Catalog) -> LogicalPlan {
-        // TODO: Push limit through compatible operators
-        // Limit(Sort(x)) can be optimized to keep only top-N during sort
-        plan
+        self.push_limit(plan, None)
     }
 }
 
@@ -874,11 +1191,132 @@ fn literal_to_value(lit: &LiteralValue) -> Value {
     }
 }
 
-/// Simple plan equality check (for optimization convergence).
+/// Structural equality check for logical plans.
 fn plans_equal(a: &LogicalPlan, b: &LogicalPlan) -> bool {
-    // This is a simplified check
-    // TODO: Structural equality check
-    std::mem::discriminant(a) == std::mem::discriminant(b)
+    match (a, b) {
+        (LogicalPlan::Scan(a), LogicalPlan::Scan(b)) => {
+            a.table == b.table
+                && a.alias == b.alias
+                && a.required_columns == b.required_columns
+                && a.pushdown_predicates.len() == b.pushdown_predicates.len()
+                && a.pushdown_predicates
+                    .iter()
+                    .zip(&b.pushdown_predicates)
+                    .all(|(x, y)| exprs_equal(x, y))
+        }
+        (LogicalPlan::Filter(a), LogicalPlan::Filter(b)) => {
+            plans_equal(&a.input, &b.input) && exprs_equal(&a.predicate, &b.predicate)
+        }
+        (LogicalPlan::Project(a), LogicalPlan::Project(b)) => {
+            plans_equal(&a.input, &b.input)
+                && a.expressions.len() == b.expressions.len()
+                && a.expressions
+                    .iter()
+                    .zip(&b.expressions)
+                    .all(|((n1, e1), (n2, e2))| n1 == n2 && exprs_equal(e1, e2))
+        }
+        (LogicalPlan::Sort(a), LogicalPlan::Sort(b)) => {
+            plans_equal(&a.input, &b.input)
+                && a.order_by.len() == b.order_by.len()
+                && a.order_by.iter().zip(&b.order_by).all(|(x, y)| {
+                    exprs_equal(&x.expr, &y.expr)
+                        && x.direction == y.direction
+                        && x.nulls_first == y.nulls_first
+                })
+        }
+        (LogicalPlan::Limit(a), LogicalPlan::Limit(b)) => {
+            exprs_equal(&a.count, &b.count) && plans_equal(&a.input, &b.input)
+        }
+        (LogicalPlan::Offset(a), LogicalPlan::Offset(b)) => {
+            exprs_equal(&a.count, &b.count) && plans_equal(&a.input, &b.input)
+        }
+        (LogicalPlan::Aggregate(a), LogicalPlan::Aggregate(b)) => {
+            plans_equal(&a.input, &b.input)
+                && a.group_by.len() == b.group_by.len()
+                && a.group_by
+                    .iter()
+                    .zip(&b.group_by)
+                    .all(|(x, y)| exprs_equal(x, y))
+                && a.aggregates.len() == b.aggregates.len()
+        }
+        (LogicalPlan::Join(a), LogicalPlan::Join(b)) => {
+            plans_equal(&a.left, &b.left)
+                && plans_equal(&a.right, &b.right)
+                && a.join_type == b.join_type
+                && match (&a.condition, &b.condition) {
+                    (Some(x), Some(y)) => exprs_equal(x, y),
+                    (None, None) => true,
+                    _ => false,
+                }
+        }
+        (LogicalPlan::Values(a), LogicalPlan::Values(b)) => {
+            a.columns == b.columns
+                && a.rows.len() == b.rows.len()
+                && a.rows.iter().zip(&b.rows).all(|(r1, r2)| {
+                    r1.len() == r2.len() && r1.iter().zip(r2).all(|(e1, e2)| exprs_equal(e1, e2))
+                })
+        }
+        (LogicalPlan::Empty, LogicalPlan::Empty) => true,
+        (LogicalPlan::Insert(a), LogicalPlan::Insert(b)) => {
+            a.table == b.table && a.columns == b.columns && plans_equal(&a.source, &b.source)
+        }
+        (LogicalPlan::Update(a), LogicalPlan::Update(b)) => {
+            a.table == b.table
+                && a.assignments.len() == b.assignments.len()
+                && a.assignments
+                    .iter()
+                    .zip(&b.assignments)
+                    .all(|((n1, e1), (n2, e2))| n1 == n2 && exprs_equal(e1, e2))
+        }
+        (LogicalPlan::Delete(a), LogicalPlan::Delete(b)) => a.table == b.table,
+        _ => false,
+    }
+}
+
+/// Check if two scalar expressions are structurally equal.
+fn exprs_equal(a: &ScalarExpr, b: &ScalarExpr) -> bool {
+    match (a, b) {
+        (ScalarExpr::Column(a), ScalarExpr::Column(b)) => a == b,
+        (ScalarExpr::Constant(a), ScalarExpr::Constant(b)) => a == b,
+        (ScalarExpr::Param(a), ScalarExpr::Param(b)) => a == b,
+        (
+            ScalarExpr::BinaryOp {
+                left: l1,
+                op: o1,
+                right: r1,
+            },
+            ScalarExpr::BinaryOp {
+                left: l2,
+                op: o2,
+                right: r2,
+            },
+        ) => o1 == o2 && exprs_equal(l1, l2) && exprs_equal(r1, r2),
+        (
+            ScalarExpr::UnaryOp {
+                op: o1,
+                operand: e1,
+            },
+            ScalarExpr::UnaryOp {
+                op: o2,
+                operand: e2,
+            },
+        ) => o1 == o2 && exprs_equal(e1, e2),
+        (
+            ScalarExpr::FunctionCall { name: n1, args: a1 },
+            ScalarExpr::FunctionCall { name: n2, args: a2 },
+        ) => n1 == n2 && a1.len() == a2.len() && a1.iter().zip(a2).all(|(x, y)| exprs_equal(x, y)),
+        (ScalarExpr::Array(a), ScalarExpr::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| exprs_equal(x, y))
+        }
+        (ScalarExpr::Object(a), ScalarExpr::Object(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b)
+                    .all(|((k1, v1), (k2, v2))| k1 == k2 && exprs_equal(v1, v2))
+        }
+        (ScalarExpr::AggregateRef { index: a }, ScalarExpr::AggregateRef { index: b }) => a == b,
+        _ => false,
+    }
 }
 
 // Empty Catalog (for testing)
@@ -904,12 +1342,27 @@ impl Catalog for EmptyCatalog {
 /// persisted table schemas.
 pub struct StorageCatalog {
     schema_catalog: Arc<crate::storage::SchemaCatalog>,
+    engine: Option<Arc<crate::storage::StorageEngine>>,
 }
 
 impl StorageCatalog {
     /// Create a new storage catalog backed by the given schema catalog.
     pub fn new(schema_catalog: Arc<crate::storage::SchemaCatalog>) -> Self {
-        Self { schema_catalog }
+        Self {
+            schema_catalog,
+            engine: None,
+        }
+    }
+
+    /// Create a storage catalog with access to the storage engine for statistics.
+    pub fn with_engine(
+        schema_catalog: Arc<crate::storage::SchemaCatalog>,
+        engine: Arc<crate::storage::StorageEngine>,
+    ) -> Self {
+        Self {
+            schema_catalog,
+            engine: Some(engine),
+        }
     }
 }
 
@@ -937,14 +1390,62 @@ impl Catalog for StorageCatalog {
         }))
     }
 
-    fn get_indexes(&self, _table: &str) -> Vec<IndexInfo> {
-        // TODO: Implement index metadata storage
-        Vec::new()
+    fn get_indexes(&self, table: &str) -> Vec<IndexInfo> {
+        let Some(stored) = self.schema_catalog.get(table) else {
+            return Vec::new();
+        };
+
+        stored
+            .indexes
+            .iter()
+            .map(|idx| IndexInfo {
+                name: idx.name.clone(),
+                columns: idx.columns.clone(),
+                unique: idx.unique,
+                index_type: match idx.index_type {
+                    crate::storage::schema::StoredIndexType::BTree => IndexType::BTree,
+                    crate::storage::schema::StoredIndexType::Hash => IndexType::Hash,
+                    _ => IndexType::BTree, // Default for FullText/Spatial
+                },
+            })
+            .collect()
     }
 
-    fn get_table_stats(&self, _table: &str) -> Option<TableStats> {
-        // TODO: Implement statistics collection
-        None
+    fn get_table_stats(&self, table: &str) -> Option<TableStats> {
+        let stored = self.schema_catalog.get(table)?;
+
+        // Estimate row size from column types
+        let avg_row_size: usize = stored
+            .columns
+            .iter()
+            .map(|col| col.data_type.estimated_size())
+            .sum();
+
+        // Get actual row count from engine if available
+        let row_count = self
+            .engine
+            .as_ref()
+            .and_then(|e| e.get_table_row_count(table))
+            .unwrap_or(0);
+
+        // Estimate page count from row count and row size
+        const PAGE_SIZE: usize = 16384;
+        let rows_per_page = if avg_row_size > 0 {
+            PAGE_SIZE / avg_row_size
+        } else {
+            100
+        };
+        let page_count = if rows_per_page > 0 {
+            (row_count as usize).div_ceil(rows_per_page)
+        } else {
+            0
+        };
+
+        Some(TableStats {
+            row_count,
+            avg_row_size,
+            page_count: page_count as u64,
+        })
     }
 }
 

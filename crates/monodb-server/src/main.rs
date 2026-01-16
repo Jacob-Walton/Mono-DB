@@ -169,6 +169,9 @@ async fn main() -> anyhow::Result<()> {
     // Run server until shutdown
     server.run().await?;
 
+    // Perform graceful shutdown (flush storage, etc.)
+    server.shutdown().await?;
+
     tracing::info!("MonoDB Server stopped");
     Ok(())
 }
