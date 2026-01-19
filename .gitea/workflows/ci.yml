@@ -57,9 +57,6 @@ jobs:
           key: yarn-${{ runner.os }}-${{ hashFiles('yarn.lock', 'package.json') }}
           restore-keys: |
             yarn-${{ runner.os }}-
-            
-      - name: Install Yarn
-        run: npm install -g yarn
         
       - name: Install JS Dependencies
         run: yarn install --frozen-lockfile
