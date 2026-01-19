@@ -5,8 +5,7 @@
 use bytes::BytesMut;
 use monodb_common::{
     MonoError, Result, Value,
-    permissions::BuiltinRole,
-    protocol::{ErrorCode, ProtocolDecoder, ProtocolEncoder, QueryOutcome, Request, Response},
+    protocol::{AuthMethod, ErrorCode, ProtocolDecoder, ProtocolEncoder, QueryOutcome, Request, Response},
 };
 
 use std::sync::Arc;
@@ -18,6 +17,7 @@ use tokio::{
     sync::broadcast,
 };
 
+use crate::auth::AuthManager;
 use crate::query_engine::ast::{ControlStatement, DdlStatement, MutationStatement, QueryStatement};
 use crate::query_engine::planner::{EmptyCatalog, QueryPlanner};
 use crate::query_engine::storage::StorageAdapter;
@@ -31,6 +31,7 @@ pub async fn handle_connection<S>(
     mut stream: S,
     sessions: Arc<DashMap<u64, Session>>,
     storage: Arc<StorageAdapter>,
+    auth_manager: Arc<AuthManager>,
     mut shutdown_rx: broadcast::Receiver<()>,
     encoder: Arc<ProtocolEncoder>,
     decoder: Arc<ProtocolDecoder>,
@@ -65,6 +66,7 @@ where
                                 &sessions,
                                 session_id,
                                 &storage,
+                                &auth_manager,
                                 request
                             ).await?;
 
@@ -101,6 +103,7 @@ async fn handle_request(
     sessions: &Arc<DashMap<u64, Session>>,
     session_id: u64,
     storage: &Arc<StorageAdapter>,
+    auth_manager: &Arc<AuthManager>,
     request: Request,
 ) -> Result<Response> {
     let start = Instant::now();
@@ -109,6 +112,28 @@ async fn handle_request(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+
+    // Check if auth is required and session is not authenticated
+    // Allow Hello, Authenticate, and Ping without authentication
+    let requires_auth = auth_manager.is_auth_required();
+    let is_authenticated = sessions
+        .get(&session_id)
+        .map(|s| s.authenticated)
+        .unwrap_or(false);
+
+    // Requests that are allowed without authentication
+    let auth_exempt = matches!(
+        &request,
+        Request::Hello { .. } | Request::Authenticate { .. } | Request::Ping | Request::Disconnect
+    );
+
+    if requires_auth && !is_authenticated && !auth_exempt {
+        return Ok(Response::Error {
+            code: ErrorCode::Unauthorized.to_u16(),
+            message: "Authentication required".into(),
+            details: None,
+        });
+    }
 
     match request {
         Request::Hello {
@@ -119,28 +144,74 @@ async fn handle_request(
 
             Ok(Response::Welcome {
                 server_version: env!("CARGO_PKG_VERSION").to_string(),
-                server_capabilities: vec!["transactions".into(), "queries".into()],
+                server_capabilities: vec!["transactions".into(), "queries".into(), "auth".into()],
                 server_timestamp: current_time,
             })
         }
 
         Request::Authenticate { method } => {
-            tracing::debug!("Authenticate with method: {method:?}");
+            tracing::debug!("Authenticate with method: {:?}", std::mem::discriminant(&method));
 
-            let user_id = uuid::Uuid::new_v4().to_string();
+            match method {
+                AuthMethod::Password { username, password } => {
+                    match auth_manager.authenticate_password(&username, &password) {
+                        Ok(auth_result) => {
+                            // Update session state
+                            if let Some(mut sess) = sessions.get_mut(&session_id) {
+                                sess.authenticated = true;
+                                sess.user_id = auth_result.user.id.clone();
+                                sess.permissions = auth_result.permissions.clone();
+                            }
 
-            if let Some(mut sess) = sessions.get_mut(&session_id) {
-                sess.authenticated = true;
-                sess.user_id = user_id.clone();
+                            let expires_at = auth_result.token.as_ref().map(|t| t.expires_at as u64);
+                            let token = auth_result.token.as_ref().map(|t| t.token.clone());
+
+                            Ok(Response::AuthSuccess {
+                                session_id,
+                                user_id: auth_result.user.id,
+                                permissions: auth_result.permissions,
+                                expires_at,
+                                token,
+                            })
+                        }
+                        Err(_) => Ok(Response::AuthFailed {
+                            reason: "Invalid username or password".into(),
+                            retry_after: None,
+                        }),
+                    }
+                }
+                AuthMethod::Token { token } => {
+                    match auth_manager.authenticate_token(&token) {
+                        Ok(auth_result) => {
+                            // Update session state
+                            if let Some(mut sess) = sessions.get_mut(&session_id) {
+                                sess.authenticated = true;
+                                sess.user_id = auth_result.user.id.clone();
+                                sess.permissions = auth_result.permissions.clone();
+                            }
+
+                            Ok(Response::AuthSuccess {
+                                session_id,
+                                user_id: auth_result.user.id,
+                                permissions: auth_result.permissions,
+                                expires_at: None,
+                                token: None,
+                            })
+                        }
+                        Err(e) => Ok(Response::AuthFailed {
+                            reason: e.to_string(),
+                            retry_after: None,
+                        }),
+                    }
+                }
+                AuthMethod::Certificate => {
+                    // Certificate auth not yet implemented
+                    Ok(Response::AuthFailed {
+                        reason: "Certificate authentication not supported".into(),
+                        retry_after: None,
+                    })
+                }
             }
-
-            let permissions = BuiltinRole::Root.permissions(Some("default"));
-            Ok(Response::AuthSuccess {
-                session_id,
-                user_id,
-                expires_at: None,
-                permissions,
-            })
         }
 
         Request::Ping => Ok(Response::Pong {
@@ -308,8 +379,7 @@ async fn handle_query(
         }
 
         // Handle USE statements as they affect session namespace
-        if let Statement::Control(crate::query_engine::ast::ControlStatement::Use(use_stmt)) = &stmt
-        {
+        if let Statement::Control(ControlStatement::Use(use_stmt)) = &stmt {
             let namespace = use_stmt.namespace.node.to_string();
             if let Some(mut sess) = sessions.get_mut(&session_id) {
                 sess.current_namespace = namespace.clone();
@@ -407,6 +477,13 @@ async fn execute_statement(
             // Check if it's a COUNT query
             let (row_count, columns) = match query {
                 QueryStatement::Count(_) => (1, Some(vec!["count".into()])),
+                QueryStatement::Get(get) => {
+                    let cols = get
+                        .projection
+                        .as_ref()
+                        .map(|proj| proj.iter().map(|c| c.node.full_path()).collect::<Vec<_>>());
+                    (data.len() as u64, cols)
+                }
                 _ => (data.len() as u64, None),
             };
 

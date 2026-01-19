@@ -10,7 +10,10 @@ use std::time::Duration;
 use bytes::BytesMut;
 use monodb_common::{
     MonoError, Result, Value,
-    protocol::{ProtocolDecoder, ProtocolEncoder, Request, Response},
+    protocol::{
+        AuthMethod, IsolationLevel, ProtocolDecoder, ProtocolEncoder, Request, Response,
+        ServerStats, Statement, TableSchema,
+    },
 };
 use rustls::pki_types::{CertificateDer, ServerName};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -18,7 +21,7 @@ use tokio::net::TcpStream;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_rustls::{TlsConnector, client::TlsStream};
 
-use crate::results::{QueryResult, TableListResult};
+use crate::results::{AuthResult, QueryResult, TableListResult};
 
 /// Stream type that can be either plain TCP or TLS-wrapped.
 enum Stream {
@@ -223,6 +226,198 @@ impl Connection {
             Response::Pong { timestamp } => Ok(timestamp),
             Response::Error { message, .. } => Err(MonoError::Network(message)),
             _ => Err(MonoError::Network("Unexpected ping response".into())),
+        }
+    }
+
+    /// Authenticate with username and password.
+    ///
+    /// On success, returns an `AuthResult` containing the session token
+    /// which can be used for session resumption via `authenticate_token`.
+    pub async fn authenticate_password(
+        &mut self,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Result<AuthResult> {
+        let request = Request::Authenticate {
+            method: AuthMethod::Password {
+                username: username.into(),
+                password: password.into(),
+            },
+        };
+
+        let response = self.send_request(request).await?;
+        AuthResult::from_response(response)
+    }
+
+    /// Authenticate with a session token.
+    ///
+    /// Use this to resume a previous session without re-entering credentials.
+    /// Tokens are obtained from a successful `authenticate_password` call.
+    pub async fn authenticate_token(&mut self, token: impl Into<String>) -> Result<AuthResult> {
+        let request = Request::Authenticate {
+            method: AuthMethod::Token {
+                token: token.into(),
+            },
+        };
+
+        let response = self.send_request(request).await?;
+        AuthResult::from_response(response)
+    }
+
+    /// Begin a transaction.
+    pub async fn begin_transaction(&mut self, read_only: bool) -> Result<u64> {
+        let request = Request::TxBegin {
+            isolation: IsolationLevel::ReadCommitted,
+            read_only,
+        };
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::TxStarted { tx_id, .. } => Ok(tx_id),
+            Response::Error { message, .. } => Err(MonoError::Transaction(message)),
+            _ => Err(MonoError::Network("Unexpected response".into())),
+        }
+    }
+
+    /// Commit a transaction.
+    pub async fn commit(&mut self, tx_id: u64) -> Result<()> {
+        let request = Request::TxCommit { tx_id };
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::TxCommitted { .. } | Response::Ok => Ok(()),
+            Response::Error { message, .. } => Err(MonoError::Transaction(message)),
+            _ => Err(MonoError::Network("Unexpected response".into())),
+        }
+    }
+
+    /// Rollback a transaction.
+    pub async fn rollback(&mut self, tx_id: u64) -> Result<()> {
+        let request = Request::TxRollback { tx_id };
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::TxRolledBack { .. } | Response::Ok => Ok(()),
+            Response::Error { message, .. } => Err(MonoError::Transaction(message)),
+            _ => Err(MonoError::Network("Unexpected response".into())),
+        }
+    }
+
+    /// Describe a table's schema.
+    pub async fn describe_table(&mut self, table: impl Into<String>) -> Result<TableSchema> {
+        let request = Request::Describe {
+            target: table.into(),
+        };
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::TableDescription { schema } => Ok(schema),
+            Response::Error { message, .. } => Err(MonoError::Execution(message)),
+            _ => Err(MonoError::Network("Unexpected response".into())),
+        }
+    }
+
+    /// Get server statistics.
+    pub async fn stats(&mut self, detailed: bool) -> Result<ServerStats> {
+        let request = Request::Stats { detailed };
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::StatsResult { stats } => Ok(stats),
+            Response::Error { message, .. } => Err(MonoError::Execution(message)),
+            _ => Err(MonoError::Network("Unexpected response".into())),
+        }
+    }
+
+    /// Switch to a namespace.
+    pub async fn use_namespace(&mut self, namespace: impl Into<String>) -> Result<()> {
+        let request = Request::UseNamespace {
+            namespace: namespace.into(),
+        };
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::NamespaceSwitched { .. } | Response::Ok => Ok(()),
+            Response::Error { message, .. } => Err(MonoError::Execution(message)),
+            _ => Err(MonoError::Network("Unexpected response".into())),
+        }
+    }
+
+    /// Create a new namespace.
+    pub async fn create_namespace(
+        &mut self,
+        name: impl Into<String>,
+        description: Option<String>,
+    ) -> Result<()> {
+        let request = Request::CreateNamespace {
+            name: name.into(),
+            description,
+        };
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::NamespaceCreated { .. } | Response::Ok => Ok(()),
+            Response::Error { message, .. } => Err(MonoError::Execution(message)),
+            _ => Err(MonoError::Network("Unexpected response".into())),
+        }
+    }
+
+    /// Drop a namespace.
+    pub async fn drop_namespace(&mut self, name: impl Into<String>, force: bool) -> Result<()> {
+        let request = Request::DropNamespace {
+            name: name.into(),
+            force,
+        };
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::NamespaceDropped { .. } | Response::Ok => Ok(()),
+            Response::Error { message, .. } => Err(MonoError::Execution(message)),
+            _ => Err(MonoError::Network("Unexpected response".into())),
+        }
+    }
+
+    /// List all namespaces.
+    pub async fn list_namespaces(&mut self) -> Result<Vec<String>> {
+        let request = Request::ListNamespaces;
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::NamespaceList { namespaces } => {
+                Ok(namespaces.into_iter().map(|ns| ns.name).collect())
+            }
+            Response::Error { message, .. } => Err(MonoError::Execution(message)),
+            _ => Err(MonoError::Network("Unexpected response".into())),
+        }
+    }
+
+    /// Execute a batch of queries.
+    pub async fn batch(&mut self, queries: Vec<String>) -> Result<Vec<QueryResult>> {
+        let statements = queries
+            .into_iter()
+            .map(|q| Statement {
+                query: q,
+                params: vec![],
+            })
+            .collect();
+        let request = Request::Batch { statements };
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::BatchResults { results, .. } => {
+                // Convert each QueryOutcome to QueryResult
+                results
+                    .into_iter()
+                    .map(|outcome| {
+                        QueryResult::from_response(Response::QueryResult {
+                            result: outcome,
+                            elapsed_ms: 0,
+                        })
+                    })
+                    .collect()
+            }
+            Response::Error { message, .. } => Err(MonoError::Execution(message)),
+            _ => Err(MonoError::Network("Unexpected response".into())),
         }
     }
 }

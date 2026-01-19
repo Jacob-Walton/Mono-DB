@@ -298,6 +298,7 @@ impl From<&crate::MonoError> for ErrorCode {
             crate::MonoError::Transaction(_) => ErrorCode::TransactionError,
             crate::MonoError::WriteConflict(_) => ErrorCode::WriteConflict,
             crate::MonoError::Config(_) => ErrorCode::ConfigError,
+            crate::MonoError::AuthenticationFailed(_) => ErrorCode::Unauthorized,
             #[cfg(feature = "tls")]
             crate::MonoError::TlsCertLoad { .. }
             | crate::MonoError::TlsKeyLoad { .. }
@@ -330,6 +331,8 @@ pub enum Response {
         user_id: String,
         permissions: PermissionSet,
         expires_at: Option<u64>,
+        /// Session token for resumption (only returned on password auth)
+        token: Option<String>,
     },
 
     /// Authentication failed
@@ -731,12 +734,14 @@ impl ProtocolEncoder {
                 user_id,
                 permissions,
                 expires_at,
+                token,
             } => {
                 header.put_u8(cmd::RSP_AUTH_SUCCESS);
                 body.put_u64_le(*session_id);
                 put_string(&mut body, user_id);
                 permissions.encode(&mut body);
                 put_opt_u64(&mut body, expires_at);
+                put_opt_string(&mut body, token);
             }
             Response::AuthFailed {
                 reason,
@@ -1096,11 +1101,18 @@ impl ProtocolDecoder {
                 let user_id = get_string(&mut cursor)?;
                 let permissions = PermissionSet::decode(&mut cursor)?;
                 let expires_at = get_opt_u64(&mut cursor)?;
+                // Token is optional for backwards compatibility
+                let token = if cursor.has_remaining() {
+                    get_opt_string(&mut cursor)?
+                } else {
+                    None
+                };
                 Response::AuthSuccess {
                     session_id,
                     user_id,
                     permissions,
                     expires_at,
+                    token,
                 }
             }
             cmd::RSP_AUTH_FAILED => {
@@ -1599,6 +1611,8 @@ pub(crate) fn get_value_array(cursor: &mut &[u8]) -> Result<Vec<Value>> {
 
 #[cfg(test)]
 mod tests {
+    use crate::permissions::{Action, Permission, Resource};
+
     use super::*;
 
     #[test]
@@ -1688,5 +1702,541 @@ mod tests {
         // Only provide partial data
         let mut buf = BytesMut::from(&encoded[..5]);
         assert!(decoder.decode_request(&mut buf).unwrap().is_none());
+    }
+
+    fn roundtrip_request(req: Request) {
+        let encoder = ProtocolEncoder::new();
+        let decoder = ProtocolDecoder::new();
+        let encoded = encoder.encode_request_with_correlation(&req, 99).unwrap();
+        let mut buf = BytesMut::from(&encoded[..]);
+        let (decoded, corr_id) = decoder.decode_request(&mut buf).unwrap().unwrap();
+        assert_eq!(decoded, req);
+        assert_eq!(corr_id, 99);
+    }
+
+    fn roundtrip_response(resp: Response) {
+        let encoder = ProtocolEncoder::new();
+        let decoder = ProtocolDecoder::new();
+        let encoded = encoder.encode_response(&resp, 7).unwrap();
+        let mut buf = BytesMut::from(&encoded[..]);
+        let (decoded, corr_id) = decoder.decode_response(&mut buf).unwrap().unwrap();
+        assert_eq!(decoded, resp);
+        assert_eq!(corr_id, 7);
+    }
+
+    #[test]
+    fn test_request_roundtrip_variants() {
+        roundtrip_request(Request::Authenticate {
+            method: AuthMethod::Password {
+                username: "user".into(),
+                password: "pass".into(),
+            },
+        });
+        roundtrip_request(Request::Authenticate {
+            method: AuthMethod::Token {
+                token: "token".into(),
+            },
+        });
+        roundtrip_request(Request::Authenticate {
+            method: AuthMethod::Certificate,
+        });
+        roundtrip_request(Request::Disconnect);
+        roundtrip_request(Request::Ping);
+        roundtrip_request(Request::Batch {
+            statements: vec![
+                Statement {
+                    query: "get from users".into(),
+                    params: vec![Value::Int32(1)],
+                },
+                Statement {
+                    query: "get from posts".into(),
+                    params: vec![],
+                },
+            ],
+        });
+        roundtrip_request(Request::TxBegin {
+            isolation: IsolationLevel::Serializable,
+            read_only: true,
+        });
+        roundtrip_request(Request::TxCommit { tx_id: 42 });
+        roundtrip_request(Request::TxRollback { tx_id: 7 });
+        roundtrip_request(Request::Describe {
+            target: "users".into(),
+        });
+        roundtrip_request(Request::List);
+        roundtrip_request(Request::Stats { detailed: true });
+        roundtrip_request(Request::UseNamespace {
+            namespace: "default".into(),
+        });
+        roundtrip_request(Request::CreateNamespace {
+            name: "analytics".into(),
+            description: Some("desc".into()),
+        });
+        roundtrip_request(Request::CreateNamespace {
+            name: "empty".into(),
+            description: None,
+        });
+        roundtrip_request(Request::DropNamespace {
+            name: "analytics".into(),
+            force: true,
+        });
+        roundtrip_request(Request::ListNamespaces);
+    }
+
+    #[test]
+    fn test_encoder_correlation_id() {
+        let encoder = ProtocolEncoder::new();
+        let first = encoder.next_correlation_id();
+        let second = encoder.next_correlation_id();
+        assert_eq!(second, first + 1);
+
+        let req = Request::Ping;
+        let encoded = encoder.encode_request(&req).unwrap();
+        let mut buf = BytesMut::from(&encoded[..]);
+        let (_decoded, corr_id) = ProtocolDecoder::new()
+            .decode_request(&mut buf)
+            .unwrap()
+            .unwrap();
+        assert_eq!(corr_id, second + 1);
+    }
+
+    #[test]
+    fn test_response_roundtrip_variants() {
+        let mut permissions = PermissionSet::new();
+        permissions.add(Permission::new(Resource::Cluster, Action::All));
+
+        roundtrip_response(Response::Welcome {
+            server_version: "0.1.0".into(),
+            server_capabilities: vec!["transactions".into()],
+            server_timestamp: 123,
+        });
+        roundtrip_response(Response::AuthSuccess {
+            session_id: 1,
+            user_id: "user".into(),
+            permissions: permissions.clone(),
+            expires_at: Some(999),
+            token: Some("test-token-123".into()),
+        });
+        roundtrip_response(Response::AuthFailed {
+            reason: "bad creds".into(),
+            retry_after: Some(3),
+        });
+        roundtrip_response(Response::Pong { timestamp: 10 });
+        roundtrip_response(Response::BatchResults {
+            results: vec![
+                QueryOutcome::Executed,
+                QueryOutcome::Inserted {
+                    rows_inserted: 1,
+                    generated_ids: None,
+                },
+            ],
+            elapsed_ms: 5,
+        });
+        roundtrip_response(Response::TxStarted {
+            tx_id: 1,
+            read_timestamp: 2,
+        });
+        roundtrip_response(Response::TxCommitted {
+            tx_id: 1,
+            commit_timestamp: 2,
+        });
+        roundtrip_response(Response::TxRolledBack { tx_id: 9 });
+        roundtrip_response(Response::TableList {
+            tables: vec![TableInfo {
+                name: "users".into(),
+                schema: Some("relational".into()),
+                row_count: Some(10),
+                size_bytes: Some(2048),
+            }],
+            namespaces: vec!["default".into()],
+        });
+        roundtrip_response(Response::TableDescription {
+            schema: TableSchema {
+                name: "users".into(),
+                columns: vec![ColumnInfo {
+                    name: "id".into(),
+                    data_type: "int64".into(),
+                    nullable: false,
+                    default_value: Some(Value::Int32(1)),
+                }],
+                indexes: vec![IndexInfo {
+                    name: "idx_users_id".into(),
+                    columns: vec!["id".into()],
+                    unique: true,
+                }],
+            },
+        });
+        roundtrip_response(Response::StatsResult {
+            stats: ServerStats {
+                uptime_seconds: 1,
+                active_connections: 2,
+                total_queries: 3,
+                cache_hit_rate: 0.5,
+                storage: Some(StorageStats {
+                    total_size_bytes: 10,
+                    document_count: 2,
+                    table_count: 1,
+                    keyspace_entries: 4,
+                }),
+            },
+        });
+        roundtrip_response(Response::StatsResult {
+            stats: ServerStats {
+                uptime_seconds: 1,
+                active_connections: 2,
+                total_queries: 3,
+                cache_hit_rate: 0.5,
+                storage: None,
+            },
+        });
+        roundtrip_response(Response::Ok);
+        roundtrip_response(Response::NamespaceList {
+            namespaces: vec![NamespaceInfo {
+                name: "default".into(),
+                description: Some("desc".into()),
+                table_count: 2,
+                size_bytes: Some(100),
+            }],
+        });
+        roundtrip_response(Response::NamespaceSwitched {
+            namespace: "analytics".into(),
+        });
+        roundtrip_response(Response::NamespaceCreated {
+            namespace: "analytics".into(),
+        });
+        roundtrip_response(Response::NamespaceDropped {
+            namespace: "analytics".into(),
+        });
+
+        roundtrip_response(Response::Error {
+            code: 1234,
+            message: "oops".into(),
+            details: None,
+        });
+    }
+
+    #[test]
+    fn test_query_outcome_roundtrip() {
+        let outcomes = vec![
+            QueryOutcome::Rows {
+                data: vec![Value::Int32(1)],
+                row_count: 1,
+                columns: Some(vec!["id".into()]),
+                has_more: true,
+            },
+            QueryOutcome::Inserted {
+                rows_inserted: 2,
+                generated_ids: Some(vec![Value::Int32(1), Value::Int32(2)]),
+            },
+            QueryOutcome::Updated { rows_updated: 3 },
+            QueryOutcome::Deleted { rows_deleted: 4 },
+            QueryOutcome::Created {
+                object_type: "table".into(),
+                object_name: "users".into(),
+            },
+            QueryOutcome::Dropped {
+                object_type: "table".into(),
+                object_name: "users".into(),
+            },
+            QueryOutcome::Executed,
+        ];
+
+        for outcome in outcomes {
+            let mut buf = BytesMut::new();
+            encode_query_outcome(&mut buf, &outcome);
+            let mut cursor = &buf[..];
+            let decoded = decode_query_outcome(&mut cursor).unwrap();
+            assert_eq!(decoded, outcome);
+        }
+    }
+
+    #[test]
+    fn test_error_code_mappings() {
+        assert_eq!(ErrorCode::ParseError.to_u16(), 1001);
+        assert_eq!(ErrorCode::ParseError.as_str(), "parse_error");
+        assert_eq!(ErrorCode::from(1001u16), ErrorCode::ParseError);
+        assert_eq!(ErrorCode::from(9998u16), ErrorCode::InternalError);
+        assert_eq!(
+            ErrorCode::from(&MonoError::NotFound("x".into())),
+            ErrorCode::NotFound
+        );
+        assert_eq!(
+            ErrorCode::from(&MonoError::ChecksumMismatch {
+                expected: 1,
+                actual: 2
+            }),
+            ErrorCode::ChecksumError
+        );
+        assert_eq!(
+            ErrorCode::from(&MonoError::WriteConflict("x".into())),
+            ErrorCode::WriteConflict
+        );
+        assert_eq!(format!("{}", ErrorCode::ParseError), "parse_error (1001)");
+    }
+
+    #[test]
+    fn test_primitive_helpers_roundtrip() {
+        let mut buf = BytesMut::new();
+        put_string(&mut buf, "hello");
+        let mut cursor = &buf[..];
+        assert_eq!(get_string(&mut cursor).unwrap(), "hello");
+
+        let mut buf = BytesMut::new();
+        put_opt_string(&mut buf, &Some("a".into()));
+        let mut cursor = &buf[..];
+        assert_eq!(get_opt_string(&mut cursor).unwrap(), Some("a".into()));
+
+        let mut buf = BytesMut::new();
+        put_opt_string(&mut buf, &None);
+        let mut cursor = &buf[..];
+        assert_eq!(get_opt_string(&mut cursor).unwrap(), None);
+
+        let mut buf = BytesMut::new();
+        put_opt_u64(&mut buf, &Some(42));
+        let mut cursor = &buf[..];
+        assert_eq!(get_opt_u64(&mut cursor).unwrap(), Some(42));
+
+        let mut buf = BytesMut::new();
+        put_opt_u64(&mut buf, &None);
+        let mut cursor = &buf[..];
+        assert_eq!(get_opt_u64(&mut cursor).unwrap(), None);
+
+        let values = vec![Value::Int32(1), Value::String("x".into())];
+        let mut buf = BytesMut::new();
+        put_value_array(&mut buf, &values);
+        let mut cursor = &buf[..];
+        assert_eq!(get_value_array(&mut cursor).unwrap(), values);
+
+        let mut buf = BytesMut::new();
+        put_opt_value(&mut buf, &Some(Value::Int32(7)));
+        let mut cursor = &buf[..];
+        assert_eq!(get_opt_value(&mut cursor).unwrap(), Some(Value::Int32(7)));
+
+        let mut buf = BytesMut::new();
+        put_opt_value(&mut buf, &None);
+        let mut cursor = &buf[..];
+        assert_eq!(get_opt_value(&mut cursor).unwrap(), None);
+
+        let mut buf = BytesMut::new();
+        put_string_array(&mut buf, &["a".to_string(), "b".to_string()]);
+        let mut cursor = &buf[..];
+        assert_eq!(get_string_array(&mut cursor).unwrap(), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_primitive_helpers_errors() {
+        let mut cursor: &[u8] = &[];
+        let err = get_u8(&mut cursor).unwrap_err();
+        assert!(matches!(err, MonoError::Network(_)));
+
+        let mut cursor: &[u8] = &[1, 0, 0];
+        let err = get_u32_le(&mut cursor).unwrap_err();
+        assert!(matches!(err, MonoError::Network(_)));
+
+        let mut cursor: &[u8] = &[1, 0, 0, 0];
+        let err = get_string(&mut cursor).unwrap_err();
+        assert!(matches!(err, MonoError::Network(_)));
+
+        let mut cursor: &[u8] = &[2, 0, 0, 0, 0xff, 0xff];
+        let err = get_string(&mut cursor).unwrap_err();
+        assert!(matches!(err, MonoError::Network(_)));
+
+        let mut cursor: &[u8] = &[1, 4, 0, 0, 0, 1, 2];
+        let err = get_opt_value(&mut cursor).unwrap_err();
+        assert!(matches!(err, MonoError::Network(_)));
+
+        let mut cursor: &[u8] = &[1, 0, 0, 0, 5, 0, 0, 0];
+        let err = get_value_array(&mut cursor).unwrap_err();
+        assert!(matches!(err, MonoError::Network(_)));
+
+        let mut cursor: &[u8] = &[2, 0, 0, 0, 0xff, 0xff];
+        let err = get_string(&mut cursor).unwrap_err();
+        assert!(matches!(err, MonoError::Network(_)));
+
+        let mut cursor: &[u8] = &[1, 1, 0, 0, 0, 0xff];
+        let err = get_opt_value(&mut cursor).unwrap_err();
+        assert!(matches!(err, MonoError::Parse(_)));
+    }
+
+    #[test]
+    fn test_decoder_error_paths() {
+        let encoder = ProtocolEncoder::new();
+        let req = Request::Ping;
+        let mut bytes = encoder
+            .encode_request_with_correlation(&req, 1)
+            .unwrap()
+            .to_vec();
+        bytes[4] = VERSION + 1;
+        let mut buf = BytesMut::from(&bytes[..]);
+        assert!(matches!(
+            ProtocolDecoder::new().decode_request(&mut buf).unwrap_err(),
+            MonoError::Network(_)
+        ));
+
+        let mut bytes = encoder
+            .encode_request_with_correlation(&req, 1)
+            .unwrap()
+            .to_vec();
+        bytes[5] = cmd::KIND_RESPONSE;
+        let mut buf = BytesMut::from(&bytes[..]);
+        assert!(matches!(
+            ProtocolDecoder::new().decode_request(&mut buf).unwrap_err(),
+            MonoError::Network(_)
+        ));
+
+        let mut bytes = encoder
+            .encode_request_with_correlation(&req, 1)
+            .unwrap()
+            .to_vec();
+        bytes[6] = 0xFF;
+        let mut buf = BytesMut::from(&bytes[..]);
+        assert!(matches!(
+            ProtocolDecoder::new().decode_request(&mut buf).unwrap_err(),
+            MonoError::Network(_)
+        ));
+
+        let req = Request::Authenticate {
+            method: AuthMethod::Certificate,
+        };
+        let mut bytes = encoder
+            .encode_request_with_correlation(&req, 1)
+            .unwrap()
+            .to_vec();
+        bytes[12] = 0xFF;
+        let mut buf = BytesMut::from(&bytes[..]);
+        assert!(matches!(
+            ProtocolDecoder::new().decode_request(&mut buf).unwrap_err(),
+            MonoError::Network(_)
+        ));
+
+        let req = Request::TxBegin {
+            isolation: IsolationLevel::ReadCommitted,
+            read_only: false,
+        };
+        let mut bytes = encoder
+            .encode_request_with_correlation(&req, 1)
+            .unwrap()
+            .to_vec();
+        bytes[12] = 0xFF;
+        let mut buf = BytesMut::from(&bytes[..]);
+        assert!(matches!(
+            ProtocolDecoder::new().decode_request(&mut buf).unwrap_err(),
+            MonoError::Network(_)
+        ));
+
+        let resp = Response::Ok;
+        let mut bytes = encoder.encode_response(&resp, 1).unwrap().to_vec();
+        bytes[4] = VERSION + 1;
+        let mut buf = BytesMut::from(&bytes[..]);
+        assert!(matches!(
+            ProtocolDecoder::new()
+                .decode_response(&mut buf)
+                .unwrap_err(),
+            MonoError::Network(_)
+        ));
+
+        let mut bytes = encoder.encode_response(&resp, 1).unwrap().to_vec();
+        bytes[5] = cmd::KIND_REQUEST;
+        let mut buf = BytesMut::from(&bytes[..]);
+        assert!(matches!(
+            ProtocolDecoder::new()
+                .decode_response(&mut buf)
+                .unwrap_err(),
+            MonoError::Network(_)
+        ));
+
+        let mut bytes = encoder.encode_response(&resp, 1).unwrap().to_vec();
+        bytes[6] = 0xFF;
+        let mut buf = BytesMut::from(&bytes[..]);
+        assert!(matches!(
+            ProtocolDecoder::new()
+                .decode_response(&mut buf)
+                .unwrap_err(),
+            MonoError::Network(_)
+        ));
+    }
+
+    #[test]
+    fn test_incomplete_response_frame() {
+        let encoder = ProtocolEncoder::new();
+        let resp = Response::Ok;
+        let encoded = encoder.encode_response(&resp, 1).unwrap();
+        let mut buf = BytesMut::from(&encoded[..6]);
+        assert!(
+            ProtocolDecoder::new()
+                .decode_response(&mut buf)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_incomplete_request_header() {
+        let mut buf = BytesMut::from(&[1u8, 2, 3][..]);
+        assert!(
+            ProtocolDecoder::new()
+                .decode_request(&mut buf)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_error_code_more_mappings() {
+        assert_eq!(
+            ErrorCode::from(&MonoError::Config("cfg".into())),
+            ErrorCode::ConfigError
+        );
+        assert_eq!(
+            ErrorCode::from(&MonoError::Transaction("tx".into())),
+            ErrorCode::TransactionError
+        );
+        assert_eq!(
+            ErrorCode::from(&MonoError::AlreadyExists("x".into())),
+            ErrorCode::AlreadyExists
+        );
+    }
+
+    #[test]
+    fn test_decode_query_outcome_unknown_tag() {
+        let mut cursor: &[u8] = &[0xFF];
+        let err = decode_query_outcome(&mut cursor).unwrap_err();
+        assert!(matches!(err, MonoError::Network(_)));
+    }
+
+    #[test]
+    fn test_table_list_legacy_without_namespaces() {
+        let mut body = BytesMut::new();
+        body.put_u32_le(1);
+        put_string(&mut body, "users");
+        put_opt_string(&mut body, &Some("relational".into()));
+        put_opt_u64(&mut body, &Some(10));
+        put_opt_u64(&mut body, &Some(64));
+
+        let mut header = BytesMut::with_capacity(8);
+        header.put_u8(VERSION);
+        header.put_u8(cmd::KIND_RESPONSE);
+        header.put_u8(cmd::RSP_TABLE_LIST);
+        header.put_u8(0);
+        header.put_u32_le(5);
+
+        let frame_len = header.len() + body.len();
+        let mut buf = BytesMut::new();
+        buf.put_u32_le(frame_len as u32);
+        buf.put_slice(&header);
+        buf.put_slice(&body);
+
+        let mut buf = BytesMut::from(&buf[..]);
+        let (resp, _corr_id) = ProtocolDecoder::new()
+            .decode_response(&mut buf)
+            .unwrap()
+            .unwrap();
+        match resp {
+            Response::TableList { tables, namespaces } => {
+                assert_eq!(tables.len(), 1);
+                assert!(namespaces.is_empty());
+            }
+            other => panic!("unexpected response: {:?}", other),
+        }
     }
 }

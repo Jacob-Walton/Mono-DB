@@ -77,6 +77,17 @@ interval_ms = 30000
 # Truncate WAL after a successful checkpoint (only when safe).
 truncate_wal = true
 
+# Authentication configuration
+[auth]
+# Enable/disable authentication (default: false)
+# When disabled, all connections have root-level permissions.
+# When enabled, clients must authenticate to execute queries.
+enabled = false
+
+# Session token expiry time in seconds (default: 86400 = 24 hours)
+# Tokens are used for session resumption after password authentication.
+token_expiry_secs = 86400
+
 # Plugin system configuration
 [plugins]
 # Enable/disable plugins

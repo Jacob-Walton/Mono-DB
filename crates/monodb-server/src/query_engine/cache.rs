@@ -489,6 +489,8 @@ mod tests {
         // Two queries with same structure but different literals should have same fingerprint
         let stmt1 = Statement::Query(QueryStatement::Get(GetQuery {
             source: Spanned::dummy(Ident::new("users")),
+            source_alias: None,
+            joins: Vec::new(),
             filter: None,
             projection: None,
             order_by: None,
@@ -498,6 +500,8 @@ mod tests {
 
         let stmt2 = Statement::Query(QueryStatement::Get(GetQuery {
             source: Spanned::dummy(Ident::new("users")),
+            source_alias: None,
+            joins: Vec::new(),
             filter: None,
             projection: None,
             order_by: None,
@@ -519,6 +523,8 @@ mod tests {
 
         let stmt = Statement::Query(QueryStatement::Get(GetQuery {
             source: Spanned::dummy(Ident::new("test")),
+            source_alias: None,
+            joins: Vec::new(),
             filter: None,
             projection: None,
             order_by: None,

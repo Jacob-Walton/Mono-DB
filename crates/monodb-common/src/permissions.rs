@@ -881,4 +881,236 @@ mod tests {
             Action::Delete
         ));
     }
+
+    #[test]
+    fn test_action_parse_and_display() {
+        assert_eq!("read".parse::<Action>().unwrap(), Action::Select);
+        assert_eq!("write".parse::<Action>().unwrap(), Action::Insert);
+        assert_eq!(
+            "manage_users".parse::<Action>().unwrap(),
+            Action::ManageUsers
+        );
+        assert_eq!(
+            "begin_tx".parse::<Action>().unwrap(),
+            Action::BeginTransaction
+        );
+        assert_eq!("*".parse::<Action>().unwrap(), Action::All);
+        assert_eq!(Action::BeginTransaction.to_string(), "begin_tx");
+        let err = "nope".parse::<Action>().unwrap_err();
+        assert!(matches!(err, MonoError::Parse(_)));
+    }
+
+    #[test]
+    fn test_resource_matches() {
+        let ns_users = Resource::Collection {
+            namespace: "ns".into(),
+            name: "users".into(),
+        };
+        assert!(Resource::Cluster.matches(&ns_users));
+        assert!(Resource::AllNamespaces.matches(&ns_users));
+        assert!(Resource::AllCollectionsGlobal.matches(&ns_users));
+        assert!(
+            Resource::AllCollections {
+                namespace: "ns".into()
+            }
+            .matches(&ns_users)
+        );
+        assert!(Resource::Namespace { name: "ns".into() }.matches(&ns_users));
+        assert!(
+            !Resource::Namespace {
+                name: "other".into()
+            }
+            .matches(&ns_users)
+        );
+    }
+
+    #[test]
+    fn test_resource_parse_and_decode_errors() {
+        let err = "bad:format".parse::<Resource>().unwrap_err();
+        assert!(matches!(err, MonoError::Parse(_)));
+
+        let mut buf = BytesMut::new();
+        buf.put_u8(0xFF);
+        let mut cursor = &buf[..];
+        let err = Resource::decode(&mut cursor).unwrap_err();
+        assert!(matches!(err, MonoError::Parse(_)));
+    }
+
+    #[test]
+    fn test_action_from_byte_error() {
+        let err = Action::from_byte(0x99).unwrap_err();
+        assert!(matches!(err, MonoError::Parse(_)));
+    }
+
+    #[test]
+    fn test_permission_allows_with_action_all() {
+        let perm = Permission::new(Resource::Cluster, Action::All);
+        assert!(perm.allows(&Resource::Namespace { name: "db".into() }, Action::Select));
+    }
+
+    #[test]
+    fn test_permission_parse_and_display_errors() {
+        let err = "badformat".parse::<Permission>().unwrap_err();
+        assert!(matches!(err, MonoError::Parse(_)));
+    }
+
+    #[test]
+    fn test_permission_set_add_remove_merge() {
+        let perm = Permission::new(Resource::Cluster, Action::Stats);
+        let mut set = PermissionSet::new();
+        set.add(perm.clone());
+        set.add(perm.clone());
+        assert_eq!(set.permissions().len(), 1);
+        set.remove(&perm);
+        assert!(set.permissions().is_empty());
+
+        let mut left = PermissionSet::new();
+        let mut right = PermissionSet::new();
+        left.add(Permission::new(Resource::Cluster, Action::Stats));
+        right.add(Permission::new(Resource::Cluster, Action::Stats));
+        right.add(Permission::new(Resource::Cluster, Action::List));
+        left.merge(&right);
+        assert_eq!(left.permissions().len(), 2);
+
+        let arr = left.to_string_array();
+        let parsed = PermissionSet::from_string_array(&arr).unwrap();
+        assert_eq!(parsed, left);
+    }
+
+    #[test]
+    fn test_permission_set_with_permissions() {
+        let perms = vec![Permission::new(Resource::Cluster, Action::List)];
+        let set = PermissionSet::with_permissions(perms.clone());
+        assert_eq!(set.permissions(), perms.as_slice());
+    }
+
+    #[test]
+    fn test_permission_set_from_string_array_error() {
+        let err = PermissionSet::from_string_array(&["bad".to_string()]).unwrap_err();
+        assert!(matches!(err, MonoError::Parse(_)));
+    }
+
+    #[test]
+    fn test_permission_set_encode_decode_roundtrip() {
+        let mut set = PermissionSet::new();
+        set.add(Permission::new(
+            Resource::AllCollections {
+                namespace: "ns".into(),
+            },
+            Action::Select,
+        ));
+        let mut buf = BytesMut::new();
+        set.encode(&mut buf);
+        let mut cursor = &buf[..];
+        let decoded = PermissionSet::decode(&mut cursor).unwrap();
+        assert_eq!(decoded, set);
+    }
+
+    #[test]
+    fn test_builtin_role_parse_display() {
+        assert_eq!(
+            "dbAdmin".parse::<BuiltinRole>().unwrap(),
+            BuiltinRole::DbAdmin
+        );
+        assert_eq!(BuiltinRole::DbAdmin.to_string(), "dbAdmin");
+        let err = "nope".parse::<BuiltinRole>().unwrap_err();
+        assert!(matches!(err, MonoError::Parse(_)));
+    }
+
+    #[test]
+    fn test_builtin_role_permissions_more() {
+        let read_write = BuiltinRole::ReadWrite.permissions(Some("db"));
+        assert!(read_write.allows(
+            &Resource::Collection {
+                namespace: "db".into(),
+                name: "users".into()
+            },
+            Action::Insert
+        ));
+        assert!(read_write.allows(
+            &Resource::Collection {
+                namespace: "db".into(),
+                name: "users".into()
+            },
+            Action::Update
+        ));
+
+        let user_admin = BuiltinRole::UserAdmin.permissions(Some("db"));
+        assert!(user_admin.allows(
+            &Resource::Namespace { name: "db".into() },
+            Action::ManageUsers
+        ));
+
+        let owner = BuiltinRole::DbOwner.permissions(Some("db"));
+        assert!(owner.allows(
+            &Resource::Collection {
+                namespace: "db".into(),
+                name: "users".into()
+            },
+            Action::Delete
+        ));
+        assert!(owner.allows(&Resource::Namespace { name: "db".into() }, Action::Create));
+
+        let cluster_monitor = BuiltinRole::ClusterMonitor.permissions(None);
+        assert!(cluster_monitor.allows(&Resource::Cluster, Action::Stats));
+        assert!(cluster_monitor.allows(&Resource::AllNamespaces, Action::List));
+
+        let cluster_admin = BuiltinRole::ClusterAdmin.permissions(None);
+        assert!(cluster_admin.allows(&Resource::Cluster, Action::All));
+
+        let read_global = BuiltinRole::Read.permissions(None);
+        assert!(read_global.allows(
+            &Resource::Collection {
+                namespace: "db".into(),
+                name: "users".into()
+            },
+            Action::Select
+        ));
+    }
+
+    #[test]
+    fn test_resource_parse_variants() {
+        assert_eq!("cluster".parse::<Resource>().unwrap(), Resource::Cluster);
+        assert_eq!("ns:*".parse::<Resource>().unwrap(), Resource::AllNamespaces);
+        assert_eq!(
+            "ns:db".parse::<Resource>().unwrap(),
+            Resource::Namespace { name: "db".into() }
+        );
+        assert_eq!(
+            "ns:*:col:*".parse::<Resource>().unwrap(),
+            Resource::AllCollectionsGlobal
+        );
+        assert_eq!(
+            "ns:db:col:*".parse::<Resource>().unwrap(),
+            Resource::AllCollections {
+                namespace: "db".into()
+            }
+        );
+        assert_eq!(
+            "ns:db:col:users".parse::<Resource>().unwrap(),
+            Resource::Collection {
+                namespace: "db".into(),
+                name: "users".into()
+            }
+        );
+    }
+    #[test]
+    fn test_role_encode_decode() {
+        let mut role = Role::new("writer", Some("db".into()));
+        role.add_permission(Permission::new(
+            Resource::AllCollections {
+                namespace: "db".into(),
+            },
+            Action::Insert,
+        ));
+        role.add_inherit("reader");
+        role.add_inherit("reader");
+
+        let mut buf = BytesMut::new();
+        role.encode(&mut buf);
+        let mut cursor = &buf[..];
+        let decoded = Role::decode(&mut cursor).unwrap();
+        assert_eq!(decoded, role);
+        assert_eq!(decoded.inherits.len(), 1);
+    }
 }

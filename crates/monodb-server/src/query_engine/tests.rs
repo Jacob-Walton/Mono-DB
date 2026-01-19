@@ -100,6 +100,12 @@ mod lexer_tests {
             "skip",
             "asc",
             "desc",
+            "join",
+            "inner",
+            "left",
+            "right",
+            "full",
+            "cross",
             "table",
             "fields",
             "as",
@@ -283,8 +289,23 @@ mod parser_query_tests {
 
         let proj = q.projection.unwrap();
         assert_eq!(proj.len(), 2);
-        assert_eq!(proj[0].node.as_ref(), "name");
-        assert_eq!(proj[1].node.as_ref(), "email");
+        assert_eq!(proj[0].node.column.as_ref(), "name");
+        assert!(proj[0].node.path.is_empty());
+        assert_eq!(proj[1].node.column.as_ref(), "email");
+        assert!(proj[1].node.path.is_empty());
+    }
+
+    #[test]
+    fn get_with_dotted_projection() {
+        let q = parse_get("get profile.name, profile.email from users");
+        let proj = q.projection.unwrap();
+        assert_eq!(proj.len(), 2);
+        assert_eq!(proj[0].node.column.as_ref(), "profile");
+        assert_eq!(proj[0].node.path.len(), 1);
+        assert_eq!(proj[0].node.path[0].as_ref(), "name");
+        assert_eq!(proj[1].node.column.as_ref(), "profile");
+        assert_eq!(proj[1].node.path.len(), 1);
+        assert_eq!(proj[1].node.path[0].as_ref(), "email");
     }
 
     #[test]
@@ -335,6 +356,45 @@ mod parser_query_tests {
         assert!(q.order_by.is_some());
         assert!(q.limit.is_some());
         assert!(q.offset.is_some());
+    }
+
+    #[test]
+    fn get_with_source_alias() {
+        let q = parse_get("get from users as u");
+        assert_eq!(q.source_alias.unwrap().node.as_ref(), "u");
+    }
+
+    #[test]
+    fn get_with_inner_join() {
+        let q = parse_get("get from users join posts on users.id = posts.user_id");
+        assert_eq!(q.joins.len(), 1);
+        let join = &q.joins[0];
+        assert!(matches!(join.join_type, JoinType::Inner));
+        assert_eq!(join.table.node.as_ref(), "posts");
+        assert!(join.condition.is_some());
+    }
+
+    #[test]
+    fn get_with_left_join_alias() {
+        let q = parse_get("get from users left join posts as p on users.id = p.user_id");
+        let join = &q.joins[0];
+        assert!(matches!(join.join_type, JoinType::Left));
+        assert_eq!(join.alias.as_ref().unwrap().node.as_ref(), "p");
+    }
+
+    #[test]
+    fn get_with_cross_join() {
+        let q = parse_get("get from users cross join posts");
+        let join = &q.joins[0];
+        assert!(matches!(join.join_type, JoinType::Cross));
+        assert!(join.condition.is_none());
+    }
+
+    #[test]
+    fn get_with_multiline_join_and_on() {
+        let q = parse_get("get from users\n  join posts\n  on users.id = posts.user_id\n");
+        assert_eq!(q.joins.len(), 1);
+        assert!(q.joins[0].condition.is_some());
     }
 
     #[test]

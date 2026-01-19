@@ -239,10 +239,14 @@ pub enum QueryStatement {
 pub struct GetQuery {
     /// Source table/collection
     pub source: Spanned<Ident>,
+    /// Optional alias for the source table
+    pub source_alias: Option<Spanned<Ident>>,
+    /// Optional JOIN clauses
+    pub joins: Vec<JoinClause>,
     /// Optional filter expression (WHERE clause)
     pub filter: Option<Spanned<Expr>>,
     /// Optional column projection (SELECT specific fields)
-    pub projection: Option<Vec<Spanned<Ident>>>,
+    pub projection: Option<Vec<Spanned<ColumnRef>>>,
     /// Optional ordering (ORDER BY clause)
     pub order_by: Option<Vec<OrderByClause>>,
     /// Optional limit (TAKE/LIMIT clause)
@@ -269,6 +273,25 @@ pub struct DescribeQuery {
 pub struct OrderByClause {
     pub field: Spanned<Ident>,
     pub direction: SortDirection,
+}
+
+/// JOIN clause for GET queries.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct JoinClause {
+    pub join_type: JoinType,
+    pub table: Spanned<Ident>,
+    pub alias: Option<Spanned<Ident>>,
+    pub condition: Option<Spanned<Expr>>,
+}
+
+/// JOIN types supported in GET queries.
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub enum JoinType {
+    Inner,
+    Left,
+    Right,
+    Full,
+    Cross,
 }
 
 /// Sort direction for ORDER BY.

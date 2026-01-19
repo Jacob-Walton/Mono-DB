@@ -138,6 +138,8 @@ impl PlanCost {
 #[derive(Debug, Clone)]
 pub struct SeqScanOp {
     pub table: Ident,
+    /// Optional alias for qualifying output rows
+    pub alias: Option<Ident>,
     /// Optional filter predicate to evaluate during scan
     pub filter: Option<ScalarExpr>,
     /// Columns to output (None = all columns)
@@ -150,6 +152,8 @@ pub struct SeqScanOp {
 #[derive(Debug, Clone)]
 pub struct IndexScanOp {
     pub table: Ident,
+    /// Optional alias for qualifying output rows
+    pub alias: Option<Ident>,
     pub index_name: Ident,
     pub scan_type: IndexScanType,
     /// For point lookups
@@ -183,6 +187,8 @@ pub enum IndexScanType {
 #[derive(Debug, Clone)]
 pub struct PkLookupOp {
     pub table: Ident,
+    /// Optional alias for qualifying output rows
+    pub alias: Option<Ident>,
     /// The primary key value to look up
     pub key: ScalarExpr,
     /// Columns to output

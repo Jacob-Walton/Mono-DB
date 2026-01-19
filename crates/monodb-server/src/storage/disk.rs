@@ -16,7 +16,7 @@ use super::traits::PageStore;
 
 // Free list header (stored at end of page 0): 4-byte magic + 8-byte head
 const FREE_LIST_OFFSET: usize = PAGE_SIZE - 12;
-const FREE_LIST_MAGIC: u32 = u32::from_be_bytes(*b"FREE"); // "FREE"
+const FREE_LIST_MAGIC: u32 = u32::from_be_bytes(*b"FREE");
 
 // Disk manager configuration
 

@@ -10,10 +10,10 @@ use super::ast::{
     AlterTableDdl, AlterTableOperation, Assignment, BinaryOp, ChangeMutation, ColumnAlterAction,
     ColumnAlteration, ColumnConstraint, ColumnDef, ColumnRef, ControlStatement, CountQuery,
     CreateIndexDdl, CreateNamespaceDdl, CreateTableDdl, DataType, DdlStatement, DescribeQuery,
-    DropIndexDdl, DropNamespaceDdl, DropTableDdl, Expr, GetQuery, Ident, LimitValue, LiteralSlot,
-    LiteralValue, MutationStatement, OrderByClause, ParamRef, PutMutation, QualifiedIdent,
-    QueryStatement, RemoveMutation, SortDirection, Span, Spanned, Statement, TableProperty,
-    TableType, TransactionStatement, UseStatement,
+    DropIndexDdl, DropNamespaceDdl, DropTableDdl, Expr, GetQuery, Ident, JoinClause, JoinType,
+    LimitValue, LiteralSlot, LiteralValue, MutationStatement, OrderByClause, ParamRef, PutMutation,
+    QualifiedIdent, QueryStatement, RemoveMutation, SortDirection, Span, Spanned, Statement,
+    TableProperty, TableType, TransactionStatement, UseStatement,
 };
 use super::lexer::{Token, TokenKind};
 
@@ -277,6 +277,23 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parse a column reference with optional dot path segments.
+    fn parse_column_ref(&mut self) -> ParseResult<Spanned<ColumnRef>> {
+        let start_span = self.current_span();
+        let first = self.expect_identifier()?;
+        let mut col = ColumnRef::simple(first.node);
+        let mut end_span = first.span;
+
+        while self.check(TokenKind::Dot) {
+            self.advance();
+            let segment = self.expect_identifier()?;
+            end_span = segment.span;
+            col.path.push(segment.node);
+        }
+
+        Ok(Spanned::new(col, start_span.merge(end_span)))
+    }
+
     fn next_slot(&mut self) -> u32 {
         let id = self.next_slot_id;
         self.next_slot_id += 1;
@@ -411,10 +428,10 @@ impl<'a> Parser<'a> {
         // Parse optional field list before 'from'
         let projection = if !self.check_keyword("from") {
             let mut fields = Vec::new();
-            fields.push(self.expect_identifier()?);
+            fields.push(self.parse_column_ref()?);
             while self.check(TokenKind::Comma) {
                 self.advance();
-                fields.push(self.expect_identifier()?);
+                fields.push(self.parse_column_ref()?);
             }
             Some(fields)
         } else {
@@ -423,14 +440,27 @@ impl<'a> Parser<'a> {
 
         self.expect_keyword("from")?;
         let source = self.parse_table_name()?;
+        let source_alias = if self.check_keyword("as") {
+            self.advance();
+            Some(self.expect_identifier()?)
+        } else {
+            None
+        };
+
+        let mut joins = Vec::new();
 
         let mut filter = None;
         let mut order_by = None;
         let mut limit = None;
         let mut offset = None;
 
+        // Parse inline clauses until newline
         while !self.is_at_end() && !self.check(TokenKind::Newline) {
-            if self.check_keyword("where") {
+            if self.is_join_start() {
+                joins.push(self.parse_join_clause()?);
+            } else if self.check_keyword("on") {
+                self.parse_join_on_clause(&mut joins[..])?;
+            } else if self.check_keyword("where") {
                 filter = Some(self.parse_where_clause()?);
             } else if self.check_keyword("order") {
                 order_by = Some(self.parse_order_by_clause()?);
@@ -443,14 +473,133 @@ impl<'a> Parser<'a> {
             }
         }
 
+        // Parse indented clause block (multi-line)
+        if self.check(TokenKind::Newline) {
+            self.skip_newlines();
+            if self.check(TokenKind::Indent) {
+                self.advance();
+                while !self.check(TokenKind::Dedent) && !self.is_at_end() {
+                    self.skip_newlines();
+                    if self.check(TokenKind::Dedent) {
+                        break;
+                    }
+
+                    if self.is_join_start() {
+                        joins.push(self.parse_join_clause()?);
+                    } else if self.check_keyword("on") {
+                        self.parse_join_on_clause(&mut joins[..])?;
+                    } else if self.check_keyword("where") {
+                        filter = Some(self.parse_where_clause()?);
+                    } else if self.check_keyword("order") {
+                        order_by = Some(self.parse_order_by_clause()?);
+                    } else if self.check_keyword("take") {
+                        limit = Some(self.parse_take_clause()?);
+                    } else if self.check_keyword("skip") {
+                        offset = Some(self.parse_skip_clause()?);
+                    } else {
+                        break;
+                    }
+
+                    self.skip_newlines();
+                }
+                self.expect(TokenKind::Dedent)?;
+            }
+        }
+
+        for join in &joins {
+            if join.join_type != JoinType::Cross && join.condition.is_none() {
+                return Err(self
+                    .error("join requires an ON condition")
+                    .with_note("use 'on <condition>' after join"));
+            }
+        }
+
         Ok(QueryStatement::Get(GetQuery {
             source,
+            source_alias,
+            joins,
             filter,
             projection,
             order_by,
             limit,
             offset,
         }))
+    }
+
+    fn is_join_start(&self) -> bool {
+        self.check_keyword("join")
+            || self.check_keyword("inner")
+            || self.check_keyword("left")
+            || self.check_keyword("right")
+            || self.check_keyword("full")
+            || self.check_keyword("cross")
+    }
+
+    fn parse_join_clause(&mut self) -> ParseResult<JoinClause> {
+        let join_type = if self.check_keyword("inner") {
+            self.advance();
+            JoinType::Inner
+        } else if self.check_keyword("left") {
+            self.advance();
+            JoinType::Left
+        } else if self.check_keyword("right") {
+            self.advance();
+            JoinType::Right
+        } else if self.check_keyword("full") {
+            self.advance();
+            JoinType::Full
+        } else if self.check_keyword("cross") {
+            self.advance();
+            JoinType::Cross
+        } else {
+            JoinType::Inner
+        };
+
+        if self.check_keyword("join") {
+            self.advance();
+        } else {
+            self.expect_keyword("join")?;
+        }
+
+        let table = self.parse_table_name()?;
+        let alias = if self.check_keyword("as") {
+            self.advance();
+            Some(self.expect_identifier()?)
+        } else {
+            None
+        };
+
+        let condition = if self.check_keyword("on") {
+            self.advance();
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+
+        Ok(JoinClause {
+            join_type,
+            table,
+            alias,
+            condition,
+        })
+    }
+
+    fn parse_join_on_clause(&mut self, joins: &mut [JoinClause]) -> ParseResult<()> {
+        if joins.is_empty() {
+            return Err(self
+                .error("ON clause must follow a JOIN")
+                .with_note("use 'join <table>' before 'on'"));
+        }
+
+        let join = joins.last_mut().expect("join list checked as non-empty");
+
+        if join.condition.is_some() {
+            return Err(self.error("JOIN already has an ON condition"));
+        }
+
+        self.expect_keyword("on")?;
+        join.condition = Some(self.parse_expr()?);
+        Ok(())
     }
 
     fn parse_order_by_clause(&mut self) -> ParseResult<Vec<OrderByClause>> {

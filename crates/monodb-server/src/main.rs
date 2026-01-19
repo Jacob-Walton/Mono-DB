@@ -2,6 +2,7 @@ use tracing_subscriber::{EnvFilter, Registry, layer::SubscriberExt, util::Subscr
 
 use crate::{config::Config, daemon::Server};
 
+mod auth;
 mod config;
 mod daemon;
 mod namespace;
@@ -69,7 +70,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::debug!("Current Working Directory: {}", cwd.display());
     }
 
-    let server = Server::new(config.server, config.storage, config.plugins).await?;
+    let server = Server::new(config.server, config.storage, config.plugins, config.auth).await?;
 
     tracing::info!("MonoDB Server starting on {}", server.address());
 

@@ -1054,17 +1054,81 @@ impl StorageEngine {
             }
         }
 
-        // Clean up file
-        if !info.path.as_os_str().is_empty() {
-            let _ = std::fs::remove_file(&info.path);
-            self.buffer_pools.remove(&info.path);
-            self.disk_managers.remove(&info.path);
+        self.secondary_indexes.remove(&qualified);
+
+        match info.storage_type {
+            StorageType::Relational => self.remove_relational_files(&info.path),
+            _ => self.remove_table_file(&info.path),
         }
 
         // Remove from schema catalog
         self.schema_catalog.remove(&qualified)?;
 
         Ok(())
+    }
+
+    fn remove_table_file(&self, path: &Path) {
+        if path.as_os_str().is_empty() {
+            return;
+        }
+
+        if let Err(e) = std::fs::remove_file(path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!("Failed to remove table file {:?}: {}", path, e);
+        }
+
+        self.buffer_pools.remove(path);
+        self.disk_managers.remove(path);
+    }
+
+    fn remove_relational_files(&self, base_path: &Path) {
+        if base_path.as_os_str().is_empty() {
+            return;
+        }
+
+        self.remove_table_file(base_path);
+
+        let stem = match base_path.file_stem().and_then(|s| s.to_str()) {
+            Some(stem) => stem,
+            None => return,
+        };
+
+        let parent = match base_path.parent() {
+            Some(parent) => parent,
+            None => return,
+        };
+
+        let entries = match std::fs::read_dir(parent) {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::warn!("Failed to read table directory {:?}: {}", parent, e);
+                return;
+            }
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
+            if !is_file {
+                continue;
+            }
+
+            if path.file_stem().and_then(|s| s.to_str()) != Some(stem) {
+                continue;
+            }
+
+            let ext = match path.extension().and_then(|e| e.to_str()) {
+                Some(ext) => ext,
+                None => continue,
+            };
+
+            if !ext.starts_with("shard") {
+                continue;
+            }
+
+            self.remove_table_file(&path);
+        }
     }
 
     /// Drop a namespace and all its tables.
@@ -2196,12 +2260,13 @@ impl StorageStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use tempfile::TempDir;
     use crate::query_engine::ast::{
         ColumnConstraint, ColumnDef, DataType, Ident, Span, Spanned, TableType,
     };
     use crate::query_engine::storage::StorageAdapter;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use tempfile::TempDir;
 
     fn test_config() -> (StorageConfig, TempDir) {
         let dir = TempDir::new().unwrap();
@@ -2212,6 +2277,40 @@ mod tests {
             ..Default::default()
         };
         (config, dir)
+    }
+
+    fn list_shard_paths(base_path: &Path) -> Vec<PathBuf> {
+        let mut shards = Vec::new();
+        let stem = match base_path.file_stem().and_then(|s| s.to_str()) {
+            Some(stem) => stem,
+            None => return shards,
+        };
+        let parent = match base_path.parent() {
+            Some(parent) => parent,
+            None => return shards,
+        };
+        let entries = match std::fs::read_dir(parent) {
+            Ok(entries) => entries,
+            Err(_) => return shards,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
+            if !is_file {
+                continue;
+            }
+            if path.file_stem().and_then(|s| s.to_str()) != Some(stem) {
+                continue;
+            }
+            let ext = match path.extension().and_then(|e| e.to_str()) {
+                Some(ext) => ext,
+                None => continue,
+            };
+            if ext.starts_with("shard") {
+                shards.push(path);
+            }
+        }
+        shards
     }
 
     #[test]
@@ -2415,6 +2514,37 @@ mod tests {
 
         engine.drop_table("temp").unwrap();
         assert!(engine.get_table_info("temp").is_none());
+    }
+
+    #[test]
+    fn test_engine_drop_table_removes_relational_files() {
+        let (config, _dir) = test_config();
+        let engine = StorageEngine::new(config).unwrap();
+
+        engine.create_relational_table("users").unwrap();
+        let info = engine.get_table_info("users").unwrap();
+        let base_path = info.path.clone();
+
+        let tx = engine.begin_transaction().unwrap();
+        engine
+            .mvcc_write(tx, "users", b"user:1".to_vec(), b"alice".to_vec())
+            .unwrap();
+        engine.commit(tx).unwrap();
+
+        let shards_before = list_shard_paths(&base_path);
+        assert!(!shards_before.is_empty());
+
+        engine.drop_table("users").unwrap();
+        assert!(engine.get_table_info("users").is_none());
+
+        let shards_after = list_shard_paths(&base_path);
+        assert!(shards_after.is_empty());
+
+        engine.create_relational_table("users").unwrap();
+        let tx = engine.begin_transaction().unwrap();
+        let rows = engine.mvcc_scan(tx, "users").unwrap();
+        engine.commit(tx).unwrap();
+        assert!(rows.is_empty());
     }
 
     #[test]

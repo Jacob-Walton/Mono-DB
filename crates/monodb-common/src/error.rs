@@ -58,6 +58,9 @@ pub enum MonoError {
     #[error("Write conflict: {0}")]
     WriteConflict(String),
 
+    #[error("Authentication failed: {0}")]
+    AuthenticationFailed(String),
+
     // Storage-specific errors
     #[error("Data corruption in {location}: {details}")]
     Corruption { location: String, details: String },
@@ -145,6 +148,7 @@ impl MonoError {
             MonoError::Transaction(msg) => msg.clone(),
             MonoError::Config(msg) => msg.clone(),
             MonoError::WriteConflict(msg) => msg.clone(),
+            MonoError::AuthenticationFailed(msg) => msg.clone(),
             MonoError::Corruption { details, .. } => details.clone(),
             MonoError::Wal(msg) => msg.clone(),
             MonoError::ChecksumMismatch { expected, actual } => {
@@ -183,6 +187,7 @@ impl MonoError {
             MonoError::Transaction(_) => "transaction_error",
             MonoError::Config(_) => "config_error",
             MonoError::WriteConflict(_) => "write_conflict",
+            MonoError::AuthenticationFailed(_) => "authentication_failed",
             MonoError::Corruption { .. } => "corruption",
             MonoError::Wal(_) => "wal_error",
             MonoError::ChecksumMismatch { .. } => "checksum_mismatch",
@@ -212,5 +217,156 @@ impl MonoError {
 impl From<std::io::Error> for MonoError {
     fn from(err: std::io::Error) -> Self {
         MonoError::Io(err.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_message_and_kind() {
+        let err = MonoError::Io("io".into());
+        assert_eq!(err.message(), "io");
+        assert_eq!(err.kind(), "io_error");
+
+        let err = MonoError::TypeError {
+            expected: "int".into(),
+            actual: "string".into(),
+        };
+        assert_eq!(err.message(), "int");
+        assert_eq!(err.kind(), "type_error");
+
+        let err = MonoError::ChecksumMismatch {
+            expected: 1,
+            actual: 2,
+        };
+        assert_eq!(err.message(), "expected 0x00000001, got 0x00000002");
+        assert_eq!(err.kind(), "checksum_mismatch");
+
+        let err = MonoError::PageNotFound(5);
+        assert_eq!(err.message(), "page 5");
+        assert_eq!(err.kind(), "page_not_found");
+
+        let err = MonoError::PageFull;
+        assert_eq!(err.message(), "page full");
+        assert_eq!(err.kind(), "page_full");
+
+        let err = MonoError::BufferPoolExhausted(3);
+        assert_eq!(err.message(), "3 pages in use");
+        assert_eq!(err.kind(), "buffer_pool_exhausted");
+
+        let err = MonoError::QuotaExceeded {
+            namespace: "db".into(),
+            limit: 10,
+            used: 5,
+            requested: 2,
+        };
+        assert_eq!(err.message(), "db");
+        assert_eq!(err.kind(), "quota_exceeded");
+
+        let err = MonoError::Deadlock(vec![1, 2]);
+        assert_eq!(err.message(), "[1, 2]");
+        assert_eq!(err.kind(), "deadlock");
+    }
+
+    #[test]
+    fn test_error_from_io() {
+        let io_err = std::io::Error::other("oops");
+        let err: MonoError = io_err.into();
+        assert!(matches!(err, MonoError::Io(msg) if msg.contains("oops")));
+    }
+
+    #[test]
+    fn test_error_variants_message_kind() {
+        let variants = vec![
+            (MonoError::Storage("storage".into()), "storage_error"),
+            (MonoError::Parse("parse".into()), "parse_error"),
+            (MonoError::Execution("exec".into()), "execution_error"),
+            (MonoError::Network("net".into()), "network_error"),
+            (
+                MonoError::TypeError {
+                    expected: "int".into(),
+                    actual: "string".into(),
+                },
+                "type_error",
+            ),
+            (MonoError::NotFound("missing".into()), "not_found"),
+            (MonoError::AlreadyExists("exists".into()), "already_exists"),
+            (
+                MonoError::InvalidOperation("invalid".into()),
+                "invalid_operation",
+            ),
+            (MonoError::Transaction("tx".into()), "transaction_error"),
+            (MonoError::Config("cfg".into()), "config_error"),
+            (
+                MonoError::WriteConflict("conflict".into()),
+                "write_conflict",
+            ),
+            (
+                MonoError::Corruption {
+                    location: "page".into(),
+                    details: "bad".into(),
+                },
+                "corruption",
+            ),
+            (MonoError::Wal("wal".into()), "wal_error"),
+            (
+                MonoError::ChecksumMismatch {
+                    expected: 1,
+                    actual: 2,
+                },
+                "checksum_mismatch",
+            ),
+            (MonoError::PageNotFound(1), "page_not_found"),
+            (MonoError::PageFull, "page_full"),
+            (MonoError::BufferPoolExhausted(1), "buffer_pool_exhausted"),
+            (MonoError::IndexCorrupted("idx".into()), "index_corrupted"),
+            (MonoError::DiskFull { needed: 100 }, "disk_full"),
+            (
+                MonoError::QuotaExceeded {
+                    namespace: "db".into(),
+                    limit: 10,
+                    used: 9,
+                    requested: 2,
+                },
+                "quota_exceeded",
+            ),
+            (
+                MonoError::SchemaMismatch {
+                    expected: "a".into(),
+                    actual: "b".into(),
+                },
+                "schema_mismatch",
+            ),
+            (MonoError::LockTimeout("lock".into()), "lock_timeout"),
+            (MonoError::Deadlock(vec![1, 2, 3]), "deadlock"),
+        ];
+
+        for (err, kind) in variants {
+            let _ = err.message();
+            assert_eq!(err.kind(), kind);
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_error_tls_kinds() {
+        let err = MonoError::TlsConfig(rustls::Error::General("bad".into()));
+        assert_eq!(err.kind(), "tls_config_error");
+
+        let err = MonoError::TlsCertLoad {
+            path: std::path::PathBuf::from("cert.pem"),
+            source: rustls::pki_types::pem::Error::NoItemsFound,
+        };
+        assert_eq!(err.kind(), "tls_cert_load_error");
+        assert_eq!(err.message(), "no items found");
+
+        let err = MonoError::TlsKeyLoad {
+            path: std::path::PathBuf::from("key.pem"),
+            source: rustls::pki_types::pem::Error::NoItemsFound,
+        };
+        assert_eq!(err.kind(), "tls_key_load_error");
+        assert_eq!(err.message(), "no items found");
     }
 }

@@ -226,6 +226,13 @@ impl<S: QueryStorage> Executor<S> {
         let table = ctx.qualify_table(op.table.as_str());
         let mut rows = self.storage.scan(tx_id, &table, &config)?;
 
+        if let Some(ref alias) = op.alias {
+            rows = rows
+                .into_iter()
+                .map(|row| wrap_row_with_alias(row, alias.as_str()))
+                .collect();
+        }
+
         // Apply filter if present
         if let Some(ref pred) = op.filter {
             rows.retain(|row| {
@@ -247,7 +254,14 @@ impl<S: QueryStorage> Executor<S> {
         let key = self.eval_expr(&op.key, &Row::new(), ctx)?;
         let table = ctx.qualify_table(op.table.as_str());
         match self.storage.read(tx_id, &table, &key)? {
-            Some(row) => Ok(QueryResult::from_rows(vec![row])),
+            Some(row) => {
+                let row = if let Some(ref alias) = op.alias {
+                    wrap_row_with_alias(row, alias.as_str())
+                } else {
+                    row
+                };
+                Ok(QueryResult::from_rows(vec![row]))
+            }
             None => Ok(QueryResult::empty()),
         }
     }
@@ -311,6 +325,13 @@ impl<S: QueryStorage> Executor<S> {
                 self.storage.scan(tx_id, &table, &config)?
             }
         };
+
+        if let Some(ref alias) = op.alias {
+            rows = rows
+                .into_iter()
+                .map(|row| wrap_row_with_alias(row, alias.as_str()))
+                .collect();
+        }
 
         // Apply residual filter (for any predicates not fully covered by index)
         if let Some(ref filter) = op.residual_filter {
@@ -942,6 +963,12 @@ impl<S: QueryStorage> Executor<S> {
     }
 }
 
+fn wrap_row_with_alias(row: Row, alias: &str) -> Row {
+    let mut wrapped = Row::new();
+    wrapped.insert(alias, row.into_value());
+    wrapped
+}
+
 // Operator Implementations
 
 fn eval_binary_op(left: &Value, op: BinaryOp, right: &Value) -> Result<Value> {
@@ -1205,5 +1232,115 @@ impl ValueExt for Value {
             Value::String(s) => s.parse().unwrap_or(0.0),
             _ => 0.0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query_engine::ast::TableType;
+    use crate::query_engine::parse;
+    use crate::query_engine::planner::{EmptyCatalog, QueryPlanner};
+    use crate::query_engine::storage::{MemoryStorage, Row};
+    use monodb_common::Value;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    fn setup_storage() -> Arc<MemoryStorage> {
+        let storage = Arc::new(MemoryStorage::new());
+        storage
+            .create_table("default.users", TableType::Relational)
+            .unwrap();
+        storage
+    }
+
+    #[test]
+    fn get_projection_returns_only_selected_fields() {
+        let storage = setup_storage();
+        let tx_id = storage.begin_transaction().unwrap();
+
+        let mut row = Row::new();
+        row.insert("id", Value::Int64(1));
+        row.insert("name", Value::String("Alice".to_string()));
+        row.insert("email", Value::String("alice@example.com".to_string()));
+        storage.insert(tx_id, "default.users", row).unwrap();
+
+        let stmt = parse("get name from users").unwrap().remove(0);
+        let planner = QueryPlanner::new(Arc::new(EmptyCatalog));
+        let plan = planner.plan(&stmt).unwrap();
+        let executor = Executor::new(storage);
+        let ctx = ExecutionContext::new().with_tx(tx_id);
+        let result = executor.execute(&plan, &ctx).unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        let row = &result.rows[0];
+        assert_eq!(row.len(), 1);
+        assert!(matches!(row.get("name"), Some(Value::String(s)) if s == "Alice"));
+        assert!(row.get("email").is_none());
+    }
+
+    #[test]
+    fn get_projection_supports_dotted_paths() {
+        let storage = setup_storage();
+        let tx_id = storage.begin_transaction().unwrap();
+
+        let mut profile = BTreeMap::new();
+        profile.insert("name".to_string(), Value::String("Alice".to_string()));
+
+        let mut row = Row::new();
+        row.insert("id", Value::Int64(1));
+        row.insert("profile", Value::Object(profile));
+        storage.insert(tx_id, "default.users", row).unwrap();
+
+        let stmt = parse("get profile.name from users").unwrap().remove(0);
+        let planner = QueryPlanner::new(Arc::new(EmptyCatalog));
+        let plan = planner.plan(&stmt).unwrap();
+        let executor = Executor::new(storage);
+        let ctx = ExecutionContext::new().with_tx(tx_id);
+        let result = executor.execute(&plan, &ctx).unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        let row = &result.rows[0];
+        assert_eq!(row.len(), 1);
+        assert!(matches!(row.get("profile.name"), Some(Value::String(s)) if s == "Alice"));
+    }
+
+    #[test]
+    fn get_join_with_qualified_projection() {
+        let storage = Arc::new(MemoryStorage::new());
+        storage
+            .create_table("default.users", TableType::Relational)
+            .unwrap();
+        storage
+            .create_table("default.posts", TableType::Relational)
+            .unwrap();
+
+        let tx_id = storage.begin_transaction().unwrap();
+
+        let mut user = Row::new();
+        user.insert("id", Value::Int64(1));
+        user.insert("name", Value::String("Alice".to_string()));
+        storage.insert(tx_id, "default.users", user).unwrap();
+
+        let mut post = Row::new();
+        post.insert("id", Value::Int64(10));
+        post.insert("user_id", Value::Int64(1));
+        post.insert("title", Value::String("Hello".to_string()));
+        storage.insert(tx_id, "default.posts", post).unwrap();
+
+        let stmt =
+            parse("get users.name, posts.title from users join posts on users.id = posts.user_id")
+                .unwrap()
+                .remove(0);
+        let planner = QueryPlanner::new(Arc::new(EmptyCatalog));
+        let plan = planner.plan(&stmt).unwrap();
+        let executor = Executor::new(storage);
+        let ctx = ExecutionContext::new().with_tx(tx_id);
+        let result = executor.execute(&plan, &ctx).unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        let row = &result.rows[0];
+        assert!(matches!(row.get("users.name"), Some(Value::String(s)) if s == "Alice"));
+        assert!(matches!(row.get("posts.title"), Some(Value::String(s)) if s == "Hello"));
     }
 }

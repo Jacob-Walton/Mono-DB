@@ -1898,3 +1898,614 @@ impl std::fmt::Display for ObjectId {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+
+    use super::*;
+    use std::collections::{BTreeMap, HashSet};
+
+    fn roundtrip(value: Value) {
+        let bytes = value.to_bytes();
+        let (decoded, used) = Value::from_bytes(&bytes).unwrap();
+        assert_eq!(used, bytes.len());
+        assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn value_type_helpers() {
+        assert_eq!(
+            ValueType::Int32.common_type(&ValueType::Int64),
+            Some(ValueType::Int64)
+        );
+        assert_eq!(
+            ValueType::Int32.common_type(&ValueType::Float64),
+            Some(ValueType::Float64)
+        );
+        assert_eq!(
+            ValueType::Null.common_type(&ValueType::String),
+            Some(ValueType::String)
+        );
+        assert_eq!(ValueType::String.common_type(&ValueType::Int32), None);
+        assert!(ValueType::Int32.can_coerce_to(&ValueType::Int64));
+        assert!(!ValueType::String.can_coerce_to(&ValueType::Int32));
+
+        assert!(ValueType::Int64.is_numeric());
+        assert!(ValueType::Int64.is_integer());
+        assert!(ValueType::Float64.is_float());
+        assert!(ValueType::Date.is_temporal());
+        assert!(ValueType::String.is_comparable());
+        assert!(!ValueType::Bool.is_comparable());
+        assert!(ValueType::Row.is_collection());
+        assert!(!ValueType::Extension.is_equatable());
+        assert_eq!(ValueType::GeoPoint.display_name(), "GeoPoint");
+    }
+
+    #[test]
+    fn value_accessors_and_type_names() {
+        let value = Value::String("hi".to_string());
+        assert_eq!(value.type_name(), "string");
+        assert_eq!(value.data_type(), ValueType::String);
+        assert_eq!(value.as_string(), Some(&"hi".to_string()));
+        assert_eq!(value.clone().into_string(), Some("hi".to_string()));
+        assert!(Value::Null.as_string().is_none());
+
+        let value = Value::Array(vec![Value::Int32(1)]);
+        assert!(value.as_array().is_some());
+        assert_eq!(value.into_array().unwrap().len(), 1);
+
+        let value = Value::Binary(vec![1, 2, 3]);
+        assert_eq!(value.as_binary(), Some(&vec![1, 2, 3]));
+        assert_eq!(value.into_binary(), Some(vec![1, 2, 3]));
+
+        let value = Value::Bool(true);
+        assert_eq!(value.as_bool(), Some(true));
+        assert!(Value::Int32(1).as_bool().is_none());
+
+        let value = Value::Int32(7);
+        assert_eq!(value.as_i32(), Some(7));
+        assert!(value.as_i64().is_none());
+        assert!(Value::String("x".into()).as_i32().is_none());
+
+        let value = Value::Int64(9);
+        assert_eq!(value.as_i64(), Some(9));
+
+        let value = Value::Float32(1.25);
+        assert_eq!(value.as_f32(), Some(1.25));
+        assert!(Value::Int32(1).as_f32().is_none());
+
+        let value = Value::Float64(2.5);
+        assert_eq!(value.as_f64(), Some(2.5));
+        assert!(Value::Int32(1).as_f64().is_none());
+
+        let value = Value::Extension {
+            type_name: "custom".into(),
+            plugin_id: "plug".into(),
+            data: vec![1],
+        };
+        assert_eq!(value.type_name(), "custom");
+        assert_eq!(value.data_type(), ValueType::Extension);
+
+        assert!(Value::Null.is_null());
+
+        let mut obj = BTreeMap::new();
+        obj.insert("k".to_string(), Value::Bool(false));
+        let value = Value::Object(obj.clone());
+        assert!(value.as_object().is_some());
+        assert_eq!(value.into_object(), Some(obj));
+        assert!(Value::Int32(1).as_object().is_none());
+    }
+
+    #[test]
+    fn value_coerce_to() {
+        assert_eq!(
+            Value::Int32(42).coerce_to(&ValueType::Int64).unwrap(),
+            Value::Int64(42)
+        );
+        assert_eq!(
+            Value::Int64(42).coerce_to(&ValueType::Float32).unwrap(),
+            Value::Float32(42.0)
+        );
+        assert_eq!(
+            Value::Float64(3.5).coerce_to(&ValueType::Int32).unwrap(),
+            Value::Int32(3)
+        );
+        assert_eq!(
+            Value::Null.coerce_to(&ValueType::Int32).unwrap(),
+            Value::Null
+        );
+        let err = Value::Int64(i64::from(i32::MAX) + 1)
+            .coerce_to(&ValueType::Int32)
+            .unwrap_err();
+        assert!(matches!(err, MonoError::TypeError { .. }));
+        let err = Value::String("nope".into())
+            .coerce_to(&ValueType::Int32)
+            .unwrap_err();
+        assert!(matches!(err, MonoError::TypeError { .. }));
+    }
+
+    #[test]
+    fn value_to_json_variants() {
+        let dt = chrono::FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2024, 1, 2, 3, 4, 5)
+            .unwrap();
+        let oid = ObjectId::from_bytes([1u8; 12]);
+        let uuid = Uuid::parse_str("e086130f-a1af-42b3-acd9-45884fc4c06f").unwrap();
+
+        let mut obj = BTreeMap::new();
+        obj.insert("a".to_string(), Value::Int32(1));
+
+        let mut set = HashSet::new();
+        set.insert("x".to_string());
+
+        let mut row = IndexMap::new();
+        row.insert("r".to_string(), Value::Bool(true));
+
+        let values = vec![
+            Value::Null,
+            Value::Bool(true),
+            Value::Int32(1),
+            Value::Int64(2),
+            Value::Float32(1.25),
+            Value::Float64(2.5),
+            Value::String("s".into()),
+            Value::Binary(vec![1, 2, 3]),
+            Value::DateTime(dt),
+            Value::Date(chrono::NaiveDate::from_ymd_opt(2024, 1, 2).unwrap()),
+            Value::Time(chrono::NaiveTime::from_hms_micro_opt(3, 4, 5, 0).unwrap()),
+            Value::Uuid(uuid),
+            Value::ObjectId(oid),
+            Value::Array(vec![Value::Int32(1), Value::String("a".into())]),
+            Value::Object(obj),
+            Value::Set(set),
+            Value::Row(row),
+            Value::SortedSet(vec![(1.5, "a".into())]),
+            Value::GeoPoint { lat: 1.0, lng: 2.0 },
+            Value::Reference {
+                collection: "users".into(),
+                id: Box::new(Value::Int32(1)),
+            },
+            Value::Extension {
+                type_name: "ext".into(),
+                plugin_id: "plugin".into(),
+                data: vec![9, 8, 7],
+            },
+        ];
+
+        for value in values {
+            let json = value.to_json();
+            match json {
+                serde_json::Value::Null
+                | serde_json::Value::Bool(_)
+                | serde_json::Value::Number(_)
+                | serde_json::Value::String(_)
+                | serde_json::Value::Array(_)
+                | serde_json::Value::Object(_) => {}
+            }
+        }
+    }
+
+    #[test]
+    fn value_from_json_basic() {
+        assert_eq!(Value::from_json(serde_json::Value::Null), Value::Null);
+        assert_eq!(
+            Value::from_json(serde_json::Value::Bool(true)),
+            Value::Bool(true)
+        );
+        assert_eq!(Value::from_json(serde_json::json!(5)), Value::Int32(5));
+        let big = i64::from(i32::MAX) + 10;
+        assert_eq!(Value::from_json(serde_json::json!(big)), Value::Int64(big));
+        assert_eq!(
+            Value::from_json(serde_json::json!(1.5)),
+            Value::Float64(1.5)
+        );
+        assert_eq!(
+            Value::from_json(serde_json::json!("hi")),
+            Value::String("hi".into())
+        );
+        assert_eq!(
+            Value::from_json(serde_json::json!([1, 2])),
+            Value::Array(vec![Value::Int32(1), Value::Int32(2)])
+        );
+        let mut obj = BTreeMap::new();
+        obj.insert("k".to_string(), Value::String("v".into()));
+        assert_eq!(
+            Value::from_json(serde_json::json!({"k": "v"})),
+            Value::Object(obj)
+        );
+    }
+
+    #[test]
+    fn value_from_conversions() {
+        assert_eq!(Value::from(1i32), Value::Int32(1));
+        assert_eq!(Value::from(1i64), Value::Int32(1));
+        assert_eq!(
+            Value::from(i64::from(i32::MAX) + 1),
+            Value::Int64(i64::from(i32::MAX) + 1)
+        );
+        assert_eq!(Value::from(1u32), Value::Int32(1));
+        let u32_over = (i32::MAX as u32) + 1;
+        assert_eq!(Value::from(u32_over), Value::Int64((i32::MAX as i64) + 1));
+        assert_eq!(Value::from(1u64), Value::Int32(1));
+        let u64_over = (i64::MAX as u64) + 1;
+        assert!(matches!(Value::from(u64_over), Value::Float64(_)));
+        assert_eq!(Value::from(1f32), Value::Float32(1.0));
+        assert_eq!(Value::from(1f64), Value::Float64(1.0));
+        assert_eq!(Value::from(true), Value::Bool(true));
+        assert_eq!(Value::from("hi"), Value::String("hi".into()));
+    }
+
+    #[test]
+    fn value_bytes_roundtrip() {
+        let dt = chrono::FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2024, 1, 2, 3, 4, 5)
+            .unwrap();
+        let date = chrono::NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let time = chrono::NaiveTime::from_hms_micro_opt(3, 4, 5, 700_000).unwrap();
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let oid = ObjectId::from_bytes([7u8; 12]);
+
+        let mut obj = BTreeMap::new();
+        obj.insert("k".to_string(), Value::String("v".to_string()));
+
+        let mut set = HashSet::new();
+        set.insert("a".to_string());
+
+        let mut row = IndexMap::new();
+        row.insert("id".to_string(), Value::Int32(1));
+
+        roundtrip(Value::Null);
+        roundtrip(Value::Bool(true));
+        roundtrip(Value::Int32(-7));
+        roundtrip(Value::Int64(9_000_000_000));
+        roundtrip(Value::Float32(1.25));
+        roundtrip(Value::Float64(2.5));
+        roundtrip(Value::String("hello".into()));
+        roundtrip(Value::Binary(vec![1, 2, 3]));
+        roundtrip(Value::DateTime(dt));
+        roundtrip(Value::Date(date));
+        roundtrip(Value::Time(time));
+        roundtrip(Value::Uuid(uuid));
+        roundtrip(Value::ObjectId(oid));
+        roundtrip(Value::Array(vec![
+            Value::Int32(1),
+            Value::String("a".into()),
+        ]));
+        roundtrip(Value::Object(obj));
+        roundtrip(Value::Set(set));
+        roundtrip(Value::Row(row));
+        roundtrip(Value::SortedSet(vec![(1.5, "x".into())]));
+        roundtrip(Value::GeoPoint { lat: 3.0, lng: 4.0 });
+        roundtrip(Value::Reference {
+            collection: "users".into(),
+            id: Box::new(Value::Int32(42)),
+        });
+        roundtrip(Value::Extension {
+            type_name: "ext".into(),
+            plugin_id: "plug".into(),
+            data: vec![9, 8, 7],
+        });
+    }
+
+    #[test]
+    fn value_from_bytes_errors() {
+        let err = Value::from_bytes(&[]).unwrap_err();
+        assert!(matches!(err, MonoError::Parse(_)));
+
+        let err = Value::from_bytes(&[99]).unwrap_err();
+        assert!(matches!(err, MonoError::Parse(_)));
+
+        let err = Value::from_bytes(&[6, 2, 0, 0, 0, 0xff]).unwrap_err();
+        assert!(matches!(err, MonoError::Parse(_)));
+
+        let err = Value::from_bytes(&[9, 0, 0, 0, 0, 13, 1]).unwrap_err();
+        assert!(matches!(err, MonoError::Parse(_)));
+
+        let err = Value::from_bytes(&[6, 2, 0, 0, 0, 0xff, 0xff]).unwrap_err();
+        assert!(matches!(err, MonoError::Parse(_)));
+
+        let mut buf = vec![8];
+        buf.extend_from_slice(&1i64.to_le_bytes());
+        buf.extend_from_slice(&2000i32.to_le_bytes());
+        let err = Value::from_bytes(&buf).unwrap_err();
+        assert!(matches!(err, MonoError::Parse(_)));
+
+        let mut buf = vec![8];
+        buf.extend_from_slice(&i64::MAX.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        let err = Value::from_bytes(&buf).unwrap_err();
+        assert!(matches!(err, MonoError::Parse(_)));
+
+        let mut buf = vec![10];
+        buf.push(25);
+        buf.push(0);
+        buf.push(0);
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        let err = Value::from_bytes(&buf).unwrap_err();
+        assert!(matches!(err, MonoError::Parse(_)));
+
+        let mut buf = vec![13];
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        let err = Value::from_bytes(&buf).unwrap_err();
+        assert!(matches!(err, MonoError::Parse(_)));
+    }
+
+    #[test]
+    fn value_from_str_parsing() {
+        assert_eq!(
+            "\"hello\"".parse::<Value>().unwrap(),
+            Value::String("hello".into())
+        );
+        assert_eq!(
+            "'hello'".parse::<Value>().unwrap(),
+            Value::String("hello".into())
+        );
+        assert_eq!("null".parse::<Value>().unwrap(), Value::Null);
+        assert_eq!("none".parse::<Value>().unwrap(), Value::Null);
+        assert_eq!("".parse::<Value>().unwrap(), Value::Null);
+        assert_eq!("true".parse::<Value>().unwrap(), Value::Bool(true));
+        assert_eq!("123".parse::<Value>().unwrap(), Value::Int32(123));
+        assert_eq!(
+            "1234567890123".parse::<Value>().unwrap(),
+            Value::Int64(1234567890123)
+        );
+        assert_eq!("1.5".parse::<Value>().unwrap(), Value::Float64(1.5));
+        assert_eq!(
+            "0x0a0b".parse::<Value>().unwrap(),
+            Value::Binary(vec![0x0a, 0x0b])
+        );
+        assert_eq!(
+            "GeoPoint(1.5, 2.5)".parse::<Value>().unwrap(),
+            Value::GeoPoint { lat: 1.5, lng: 2.5 }
+        );
+        assert_eq!(
+            "Set{a,b}".parse::<Value>().unwrap(),
+            Value::Set(HashSet::from(["a".to_string(), "b".to_string()]))
+        );
+        let row = "Row(1, 2)".parse::<Value>().unwrap();
+        if let Value::Row(map) = row {
+            assert_eq!(map.len(), 2);
+        } else {
+            panic!("expected row");
+        }
+        let sorted = "SortedSet{(1.0, \"a\"),(2.0, \"b\")}"
+            .parse::<Value>()
+            .unwrap();
+        if let Value::SortedSet(items) = sorted {
+            assert_eq!(items.len(), 2);
+        } else {
+            panic!("expected sorted set");
+        }
+        let reference = "Reference(users, 123)".parse::<Value>().unwrap();
+        assert_eq!(
+            reference,
+            Value::Reference {
+                collection: "users".into(),
+                id: Box::new(Value::String("123".into()))
+            }
+        );
+        let json_obj = "{\"a\":1}".parse::<Value>().unwrap();
+        assert!(matches!(json_obj, Value::Object(_)));
+        let json_arr = "[1,2]".parse::<Value>().unwrap();
+        assert!(matches!(json_arr, Value::Array(_)));
+
+        let uuid = "550e8400-e29b-41d4-a716-446655440000"
+            .parse::<Value>()
+            .unwrap();
+        assert!(matches!(uuid, Value::Uuid(_)));
+        let oid = "0123456789abcdef01234567".parse::<Value>().unwrap();
+        assert!(matches!(oid, Value::ObjectId(_)));
+        let dt = "2024-01-02T03:04:05+00:00".parse::<Value>().unwrap();
+        assert!(matches!(dt, Value::DateTime(_)));
+        let date = "2024-01-02".parse::<Value>().unwrap();
+        assert!(matches!(date, Value::Date(_)));
+        let time = "03:04:05".parse::<Value>().unwrap();
+        assert!(matches!(time, Value::Time(_)));
+
+        let err = "0xzz".parse::<Value>().unwrap_err();
+        assert!(matches!(err, MonoError::Parse(_)));
+        let err = "GeoPoint(1,)".parse::<Value>().unwrap_err();
+        assert!(matches!(err, MonoError::Parse(_)));
+        let err = "SortedSet{(a, \"b\")}".parse::<Value>().unwrap_err();
+        assert!(matches!(err, MonoError::Parse(_)));
+        let err = "Reference(users)".parse::<Value>().unwrap_err();
+        assert!(matches!(err, MonoError::Parse(_)));
+        let err = "Row(1, ???)".parse::<Value>().unwrap_err();
+        assert!(matches!(err, MonoError::TypeError { .. }));
+        let err = "???".parse::<Value>().unwrap_err();
+        assert!(matches!(err, MonoError::TypeError { .. }));
+    }
+
+    #[test]
+    fn value_indexing() {
+        let mut obj = BTreeMap::new();
+        obj.insert("a".to_string(), Value::Int32(1));
+        let value = Value::Object(obj);
+        assert_eq!(value["a"], Value::Int32(1));
+        assert_eq!(value["missing"], Value::Null);
+
+        let value = Value::Array(vec![Value::Int32(1)]);
+        assert_eq!(value[0], Value::Int32(1));
+        assert_eq!(value[10], Value::Null);
+    }
+
+    #[test]
+    #[should_panic]
+    fn value_index_string_panics_for_non_object() {
+        let value = Value::Int32(1);
+        let _ = value["bad"];
+    }
+
+    #[test]
+    #[should_panic]
+    fn value_index_usize_panics_for_non_array() {
+        let value = Value::Int32(1);
+        let _ = value[0];
+    }
+
+    #[test]
+    fn value_arithmetic() {
+        assert_eq!(
+            (Value::Int32(1) + Value::Int32(2)).unwrap(),
+            Value::Int32(3)
+        );
+        assert_eq!(
+            (Value::Int32(1) + Value::Int64(2)).unwrap(),
+            Value::Int64(3)
+        );
+        assert_eq!(
+            (Value::Int64(1) + Value::Int32(2)).unwrap(),
+            Value::Int64(3)
+        );
+        assert_eq!(
+            (Value::Float32(1.0) + Value::Float64(2.5)).unwrap(),
+            Value::Float64(3.5)
+        );
+        assert_eq!(
+            (Value::Float64(2.5) + Value::Float32(1.0)).unwrap(),
+            Value::Float64(3.5)
+        );
+        assert_eq!(
+            (Value::String("a".into()) + Value::String("b".into())).unwrap(),
+            Value::String("ab".into())
+        );
+        assert_eq!(
+            (Value::Array(vec![Value::Int32(1)]) + Value::Array(vec![Value::Int32(2)])).unwrap(),
+            Value::Array(vec![Value::Int32(1), Value::Int32(2)])
+        );
+
+        assert_eq!(
+            (Value::Int32(5) - Value::Int32(3)).unwrap(),
+            Value::Int32(2)
+        );
+        assert_eq!(
+            (Value::Int32(2) * Value::Int32(3)).unwrap(),
+            Value::Int32(6)
+        );
+        assert_eq!(
+            (Value::String("a".into()) * Value::Int32(3)).unwrap(),
+            Value::String("aaa".into())
+        );
+        assert_eq!(
+            (Value::Int64(2) * Value::String("b".into())).unwrap(),
+            Value::String("bb".into())
+        );
+        assert_eq!(
+            (Value::Float32(1.0) * Value::Float64(2.5)).unwrap(),
+            Value::Float64(2.5)
+        );
+        assert_eq!(
+            (Value::Float64(2.5) * Value::Float32(2.0)).unwrap(),
+            Value::Float64(5.0)
+        );
+        assert_eq!(
+            (Value::Int32(8) / Value::Int32(2)).unwrap(),
+            Value::Int32(4)
+        );
+        assert_eq!(
+            (Value::Int32(8) / Value::Int64(2)).unwrap(),
+            Value::Int64(4)
+        );
+        assert_eq!(
+            (Value::Int64(8) / Value::Int32(2)).unwrap(),
+            Value::Int64(4)
+        );
+        assert_eq!(
+            (Value::Float32(2.0) / Value::Float64(2.0)).unwrap(),
+            Value::Float64(1.0)
+        );
+        assert_eq!(
+            (Value::Float64(2.0) / Value::Float32(2.0)).unwrap(),
+            Value::Float64(1.0)
+        );
+        assert_eq!(
+            (Value::Float64(2.5) + Value::Int32(1)).unwrap(),
+            Value::Float64(3.5)
+        );
+        assert!(matches!(
+            (Value::Float32(1.0) / Value::Float32(0.0)).unwrap_err(),
+            MonoError::TypeError { .. }
+        ));
+
+        let err = (Value::Int32(1) + Value::Bool(true)).unwrap_err();
+        assert!(matches!(err, MonoError::TypeError { .. }));
+        let err = (Value::Int32(1) - Value::Bool(true)).unwrap_err();
+        assert!(matches!(err, MonoError::TypeError { .. }));
+        let err = (Value::String("a".into()) * Value::Int32(-1)).unwrap_err();
+        assert!(matches!(err, MonoError::TypeError { .. }));
+        let err = (Value::Float64(2.0) / Value::Float64(0.0)).unwrap_err();
+        assert!(matches!(err, MonoError::TypeError { .. }));
+        let err = (Value::Int32(1) / Value::Int32(0)).unwrap_err();
+        assert!(matches!(err, MonoError::TypeError { .. }));
+    }
+
+    #[test]
+    fn value_display_variants() {
+        let values = vec![
+            Value::Null,
+            Value::Bool(true),
+            Value::Int32(1),
+            Value::Int64(2),
+            Value::Float32(1.5),
+            Value::Float64(2.5),
+            Value::String("hi".into()),
+            Value::Binary(vec![0x0a, 0x0b]),
+            Value::DateTime(
+                chrono::FixedOffset::east_opt(0)
+                    .unwrap()
+                    .with_ymd_and_hms(2024, 1, 2, 3, 4, 5)
+                    .unwrap(),
+            ),
+            Value::Date(chrono::NaiveDate::from_ymd_opt(2024, 1, 2).unwrap()),
+            Value::Time(chrono::NaiveTime::from_hms_micro_opt(3, 4, 5, 0).unwrap()),
+            Value::Uuid(Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap()),
+            Value::ObjectId(ObjectId::from_bytes([1u8; 12])),
+            Value::Array(vec![Value::Int32(1)]),
+            Value::Object(BTreeMap::from([("k".to_string(), Value::Int32(1))])),
+            Value::Set(HashSet::from(["a".to_string()])),
+            Value::Row(IndexMap::from([("k".to_string(), Value::Int32(1))])),
+            Value::SortedSet(vec![(1.0, "m".into())]),
+            Value::GeoPoint { lat: 1.0, lng: 2.0 },
+            Value::Reference {
+                collection: "users".into(),
+                id: Box::new(Value::Int32(1)),
+            },
+            Value::Extension {
+                type_name: "ext".into(),
+                plugin_id: "plug".into(),
+                data: vec![1, 2],
+            },
+        ];
+
+        for value in values {
+            assert!(!value.to_string().is_empty());
+        }
+    }
+
+    #[test]
+    fn value_to_json_float_nan() {
+        let json = Value::Float64(f64::NAN).to_json();
+        assert!(matches!(json, serde_json::Value::Null));
+    }
+
+    #[test]
+    fn object_id_helpers() {
+        let oid = ObjectId::new().unwrap();
+        let hex = oid.to_hex();
+        assert_eq!(hex.len(), 24);
+        let parsed = ObjectId::from_hex(&hex).unwrap();
+        assert_eq!(parsed.to_hex(), hex);
+
+        let bytes = [1u8; 12];
+        let oid = ObjectId::from_bytes(bytes);
+        assert_eq!(oid.bytes(), bytes);
+
+        let err = ObjectId::from_hex("bad").unwrap_err();
+        assert!(matches!(err, MonoError::Parse(_)));
+        let err = ObjectId::from_hex("zzzzzzzzzzzzzzzzzzzzzzzz").unwrap_err();
+        assert!(matches!(err, MonoError::Parse(_)));
+    }
+}

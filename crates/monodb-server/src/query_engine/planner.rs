@@ -9,18 +9,20 @@
 //! and cost-based optimization for join ordering and access method selection.
 
 use crate::query_engine::ast::{
-    self, BinaryOp, Expr, GetQuery, Ident, LiteralValue, QueryStatement, Statement, UnaryOp,
+    self, BinaryOp, Expr, GetQuery, Ident, JoinType as AstJoinType, LiteralValue, QueryStatement,
+    Statement, UnaryOp,
 };
 use crate::query_engine::logical_plan::{
-    AggregateFunction, AggregateNode, DeleteNode, FilterNode, InsertNode, JoinNode, LimitNode,
-    LogicalPlan, OffsetNode, ProjectNode, ScalarExpr, ScanNode, SortKey, SortNode, UpdateNode,
-    ValuesNode,
+    AggregateFunction, AggregateNode, DeleteNode, FilterNode, InsertNode, JoinNode, JoinType,
+    LimitNode, LogicalPlan, OffsetNode, ProjectNode, ScalarExpr, ScanNode, SortKey, SortNode,
+    UpdateNode, ValuesNode,
 };
 use crate::query_engine::physical_plan::{
     DeleteOp, FilterOp, HashAggregateOp, IndexScanOp, IndexScanType, InsertOp, LimitOp,
     NestedLoopJoinOp, OffsetOp, PhysicalPlan, PlanCost, ProjectOp, SeqScanOp, SortOp, UpdateOp,
 };
 use monodb_common::{MonoError, Result, Value};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 // Catalog Trait
@@ -206,12 +208,65 @@ impl<C: Catalog> QueryPlanner<C> {
     }
 
     fn get_to_logical(&self, get: &GetQuery) -> Result<LogicalPlan> {
-        // Start with table scan
-        let mut plan = LogicalPlan::Scan(ScanNode::new(get.source.node.clone()));
+        let base_alias = get
+            .source_alias
+            .as_ref()
+            .map(|a| a.node.clone())
+            .unwrap_or_else(|| Self::default_alias_for_table(&get.source.node));
+        let use_aliases = !get.joins.is_empty() || get.source_alias.is_some();
 
-        // Add filter (WHERE clause)
+        let mut aliases = HashSet::new();
+        if use_aliases {
+            aliases.insert(base_alias.clone());
+        }
+
+        let base_scan = if use_aliases {
+            ScanNode::new(get.source.node.clone()).with_alias(base_alias.clone())
+        } else {
+            ScanNode::new(get.source.node.clone())
+        };
+        let mut plan = LogicalPlan::Scan(base_scan);
+
+        for join in &get.joins {
+            let join_alias = join
+                .alias
+                .as_ref()
+                .map(|a| a.node.clone())
+                .unwrap_or_else(|| Self::default_alias_for_table(&join.table.node));
+
+            if use_aliases {
+                aliases.insert(join_alias.clone());
+            }
+
+            let right_scan = if use_aliases {
+                ScanNode::new(join.table.node.clone()).with_alias(join_alias.clone())
+            } else {
+                ScanNode::new(join.table.node.clone())
+            };
+
+            let condition = if let Some(ref cond) = join.condition {
+                let expr = self.expr_to_scalar(&cond.node)?;
+                Some(self.qualify_scalar_expr(expr, &aliases, &base_alias))
+            } else {
+                None
+            };
+
+            plan = LogicalPlan::Join(JoinNode {
+                left: Box::new(plan),
+                right: Box::new(LogicalPlan::Scan(right_scan)),
+                join_type: Self::map_join_type(join.join_type),
+                condition,
+            });
+        }
+
+        // Add filter (WHERE clause) after joins
         if let Some(ref filter) = get.filter {
             let predicate = self.expr_to_scalar(&filter.node)?;
+            let predicate = if use_aliases {
+                self.qualify_scalar_expr(predicate, &aliases, &base_alias)
+            } else {
+                predicate
+            };
             plan = plan.filter(predicate);
         }
 
@@ -219,7 +274,16 @@ impl<C: Catalog> QueryPlanner<C> {
         if let Some(ref cols) = get.projection {
             let expressions: Vec<_> = cols
                 .iter()
-                .map(|c| (c.node.clone(), ScalarExpr::column(c.node.clone())))
+                .map(|c| {
+                    let output = Ident::new(c.node.full_path());
+                    let expr = ScalarExpr::Column(c.node.clone());
+                    let expr = if use_aliases {
+                        self.qualify_scalar_expr(expr, &aliases, &base_alias)
+                    } else {
+                        expr
+                    };
+                    (output, expr)
+                })
                 .collect();
             plan = plan.project(expressions);
         }
@@ -228,10 +292,18 @@ impl<C: Catalog> QueryPlanner<C> {
         if let Some(ref order_by) = get.order_by {
             let keys: Vec<_> = order_by
                 .iter()
-                .map(|o| SortKey {
-                    expr: ScalarExpr::column(o.field.node.clone()),
-                    direction: o.direction,
-                    nulls_first: o.direction == ast::SortDirection::Desc,
+                .map(|o| {
+                    let expr = ScalarExpr::column(o.field.node.clone());
+                    let expr = if use_aliases {
+                        self.qualify_scalar_expr(expr, &aliases, &base_alias)
+                    } else {
+                        expr
+                    };
+                    SortKey {
+                        expr,
+                        direction: o.direction,
+                        nulls_first: o.direction == ast::SortDirection::Desc,
+                    }
                 })
                 .collect();
             plan = plan.sort(keys);
@@ -256,6 +328,91 @@ impl<C: Catalog> QueryPlanner<C> {
         }
 
         Ok(plan)
+    }
+
+    fn default_alias_for_table(table: &Ident) -> Ident {
+        let name = table.as_str();
+        let alias = name.rsplit('.').next().unwrap_or(name);
+        Ident::new(alias)
+    }
+
+    fn map_join_type(join_type: AstJoinType) -> JoinType {
+        match join_type {
+            AstJoinType::Inner => JoinType::Inner,
+            AstJoinType::Left => JoinType::Left,
+            AstJoinType::Right => JoinType::Right,
+            AstJoinType::Full => JoinType::Full,
+            AstJoinType::Cross => JoinType::Cross,
+        }
+    }
+
+    fn qualify_scalar_expr(
+        &self,
+        expr: ScalarExpr,
+        aliases: &HashSet<Ident>,
+        base_alias: &Ident,
+    ) -> ScalarExpr {
+        match expr {
+            ScalarExpr::Column(col) => {
+                if col.table.is_some() || aliases.contains(&col.column) {
+                    ScalarExpr::Column(col)
+                } else {
+                    let mut new_col =
+                        crate::query_engine::ast::ColumnRef::simple(base_alias.clone());
+                    new_col.path.push(col.column);
+                    new_col.path.extend(col.path);
+                    ScalarExpr::Column(new_col)
+                }
+            }
+            ScalarExpr::BinaryOp { left, op, right } => ScalarExpr::BinaryOp {
+                left: Box::new(self.qualify_scalar_expr(*left, aliases, base_alias)),
+                op,
+                right: Box::new(self.qualify_scalar_expr(*right, aliases, base_alias)),
+            },
+            ScalarExpr::UnaryOp { op, operand } => ScalarExpr::UnaryOp {
+                op,
+                operand: Box::new(self.qualify_scalar_expr(*operand, aliases, base_alias)),
+            },
+            ScalarExpr::FunctionCall { name, args } => ScalarExpr::FunctionCall {
+                name,
+                args: args
+                    .into_iter()
+                    .map(|a| self.qualify_scalar_expr(a, aliases, base_alias))
+                    .collect(),
+            },
+            ScalarExpr::Case {
+                operand,
+                when_clauses,
+                else_result,
+            } => ScalarExpr::Case {
+                operand: operand
+                    .map(|o| Box::new(self.qualify_scalar_expr(*o, aliases, base_alias))),
+                when_clauses: when_clauses
+                    .into_iter()
+                    .map(|(c, r)| {
+                        (
+                            self.qualify_scalar_expr(c, aliases, base_alias),
+                            self.qualify_scalar_expr(r, aliases, base_alias),
+                        )
+                    })
+                    .collect(),
+                else_result: else_result
+                    .map(|e| Box::new(self.qualify_scalar_expr(*e, aliases, base_alias))),
+            },
+            ScalarExpr::Array(items) => ScalarExpr::Array(
+                items
+                    .into_iter()
+                    .map(|i| self.qualify_scalar_expr(i, aliases, base_alias))
+                    .collect(),
+            ),
+            ScalarExpr::Object(fields) => ScalarExpr::Object(
+                fields
+                    .into_iter()
+                    .map(|(k, v)| (k, self.qualify_scalar_expr(v, aliases, base_alias)))
+                    .collect(),
+            ),
+            other => other,
+        }
     }
 
     fn mutation_to_logical(&self, mutation: &ast::MutationStatement) -> Result<LogicalPlan> {
@@ -432,6 +589,7 @@ impl<C: Catalog> QueryPlanner<C> {
         // Default to sequential scan
         Ok(PhysicalPlan::SeqScan(SeqScanOp {
             table: scan.table.clone(),
+            alias: scan.alias.clone(),
             filter: scan.pushdown_predicates.first().cloned(),
             columns: scan.required_columns.clone(),
             cost: PlanCost {
@@ -460,6 +618,7 @@ impl<C: Catalog> QueryPlanner<C> {
                         if index.columns.first().map(|c| c.as_str()) == Some(col.column.as_str()) {
                             return Some(PhysicalPlan::IndexScan(Box::new(IndexScanOp {
                                 table: scan.table.clone(),
+                                alias: scan.alias.clone(),
                                 index_name: Ident::new(&index.name),
                                 scan_type: IndexScanType::ExactMatch,
                                 lookup_key: Some(*right.clone()),
@@ -1465,6 +1624,8 @@ mod tests {
         // Create a simple GET query AST
         let get = GetQuery {
             source: Spanned::dummy(Ident::new("users")),
+            source_alias: None,
+            joins: Vec::new(),
             filter: None,
             projection: None,
             order_by: None,

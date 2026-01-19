@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use colored::*;
-use monodb_client::Client;
+use monodb_client::{Client, ClientBuilder};
 use rustyline::completion::Completer;
 use rustyline::error::ReadlineError;
 use rustyline::highlight::Highlighter;
@@ -25,6 +25,9 @@ const HISTORY_FILE: &str = ".mdb_history";
 struct Args {
     addr: String,
     cert_path: Option<PathBuf>,
+    username: Option<String>,
+    password: Option<String>,
+    token: Option<String>,
 }
 
 impl Args {
@@ -32,11 +35,27 @@ impl Args {
         let mut args = std::env::args().skip(1);
         let mut addr = "127.0.0.1:6432".to_string();
         let mut cert_path = None;
+        let mut username = None;
+        let mut password = None;
+        let mut token = None;
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
-                "--cert-path" => {
+                "--cert" | "--cert-path" => {
                     cert_path = args.next().map(PathBuf::from);
+                }
+                "-u" | "--user" | "--username" => {
+                    username = args.next();
+                }
+                "-p" | "--password" => {
+                    password = args.next();
+                }
+                "--token" => {
+                    token = args.next();
+                }
+                "-h" | "--help" => {
+                    Self::print_help();
+                    std::process::exit(0);
                 }
                 _ => {
                     // Assume it's the address
@@ -45,7 +64,38 @@ impl Args {
             }
         }
 
-        Self { addr, cert_path }
+        Self {
+            addr,
+            cert_path,
+            username,
+            password,
+            token,
+        }
+    }
+
+    fn print_help() {
+        println!("MonoDB Interactive Shell");
+        println!();
+        println!("USAGE:");
+        println!("    mdb [OPTIONS] [ADDRESS]");
+        println!();
+        println!("OPTIONS:");
+        println!("    --cert, --cert-path <PATH>    Path to TLS certificate file");
+        println!("    -u, --user, --username <USER> Username for authentication");
+        println!("    -p, --password <PASS>         Password for authentication");
+        println!("    --token <TOKEN>               Session token for authentication");
+        println!("    -h, --help                    Print this help message");
+        println!();
+        println!("ARGS:");
+        println!("    <ADDRESS>                     Server address (default: 127.0.0.1:6432)");
+        println!();
+        println!("EXAMPLES:");
+        println!("    mdb");
+        println!("    mdb 127.0.0.1:6432");
+        println!("    mdb --cert certs/cert.pem");
+        println!("    mdb -u root -p mypassword");
+        println!("    mdb --cert certs/cert.pem -u root -p mypassword");
+        println!("    mdb --token abc123xyz");
     }
 }
 
@@ -88,18 +138,36 @@ async fn run() -> anyhow::Result<()> {
 
     print_banner();
 
-    let tls_info = if args.cert_path.is_some() {
-        " (TLS)"
+    // Build connection info string
+    let mut info_parts = vec![];
+    if args.cert_path.is_some() {
+        info_parts.push("TLS");
+    }
+    if args.username.is_some() || args.token.is_some() {
+        info_parts.push("auth");
+    }
+    let info = if info_parts.is_empty() {
+        String::new()
     } else {
-        ""
+        format!(" ({})", info_parts.join(", "))
     };
-    println!("Connecting to {}{}...", args.addr, tls_info);
 
-    let client = if let Some(ref cert_path) = args.cert_path {
-        Client::connect_with_cert(&args.addr, cert_path).await?
-    } else {
-        Client::connect(&args.addr).await?
-    };
+    println!("Connecting to {}{}...", args.addr, info);
+
+    // Build client with all options
+    let mut builder = ClientBuilder::new(&args.addr);
+
+    if let Some(cert_path) = args.cert_path {
+        builder = builder.with_tls(cert_path);
+    }
+
+    if let Some(token) = args.token {
+        builder = builder.with_token(&token);
+    } else if let (Some(username), Some(password)) = (args.username, args.password) {
+        builder = builder.with_credentials(&username, &password);
+    }
+
+    let client = builder.build().await?;
     println!("{}\n", "Connected".green());
 
     let mut repl = Repl::new(client)?;

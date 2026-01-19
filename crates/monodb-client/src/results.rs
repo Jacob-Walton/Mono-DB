@@ -2,6 +2,7 @@
 
 use monodb_common::{
     MonoError, Result, Value,
+    permissions::PermissionSet,
     protocol::{QueryOutcome, Response, TableInfo},
 };
 
@@ -281,4 +282,58 @@ pub struct TableListResult {
     pub tables: Vec<TableInfo>,
     /// All namespaces (including empty ones)
     pub namespaces: Vec<String>,
+}
+
+/// Result of an authentication request.
+#[derive(Debug, Clone)]
+pub struct AuthResult {
+    /// Session ID assigned by the server
+    pub session_id: u64,
+    /// User ID of the authenticated user
+    pub user_id: String,
+    /// Permissions granted to this session
+    pub permissions: PermissionSet,
+    /// When the session/token expires (Unix timestamp)
+    pub expires_at: Option<u64>,
+    /// Session token for resumption (only present on password auth)
+    pub token: Option<String>,
+}
+
+impl AuthResult {
+    /// Create an AuthResult from a protocol Response.
+    pub(crate) fn from_response(response: Response) -> Result<Self> {
+        match response {
+            Response::AuthSuccess {
+                session_id,
+                user_id,
+                permissions,
+                expires_at,
+                token,
+            } => Ok(Self {
+                session_id,
+                user_id,
+                permissions,
+                expires_at,
+                token,
+            }),
+            Response::AuthFailed { reason, .. } => {
+                Err(MonoError::AuthenticationFailed(reason))
+            }
+            Response::Error { message, .. } => Err(MonoError::Execution(message)),
+            other => Err(MonoError::Execution(format!(
+                "Unexpected response: {:?}",
+                other
+            ))),
+        }
+    }
+
+    /// Check if authentication was successful.
+    pub fn is_authenticated(&self) -> bool {
+        true // If we have an AuthResult, we're authenticated
+    }
+
+    /// Get the session token for later resumption.
+    pub fn token(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
 }

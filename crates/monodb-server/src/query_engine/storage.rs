@@ -1596,12 +1596,12 @@ impl monodb_plugin::PluginStorage for StorageAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use tempfile::TempDir;
     use crate::query_engine::ast::{
         ColumnConstraint, ColumnDef, DataType, Ident, Span, Spanned, TableType,
     };
     use crate::storage::engine::StorageConfig;
+    use std::sync::Arc;
+    use tempfile::TempDir;
 
     fn spanned_ident(name: &str) -> Spanned<Ident> {
         Spanned::new(Ident::new(name), Span::DUMMY)
@@ -1638,9 +1638,11 @@ mod tests {
             .unwrap();
 
         let indexes = engine.get_indexes("default.users");
-        assert!(indexes
-            .iter()
-            .any(|idx| idx.unique && idx.columns == vec!["email".to_string()]));
+        assert!(
+            indexes
+                .iter()
+                .any(|idx| idx.unique && idx.columns == vec!["email".to_string()])
+        );
 
         let description = storage.describe_table("default.users").unwrap();
         let columns_val = match description {

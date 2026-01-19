@@ -11,6 +11,15 @@ use monodb_common::{MonoError, Result};
 
 use crate::connection::Connection;
 
+/// Authentication credentials.
+#[derive(Clone)]
+pub enum Credentials {
+    /// Username and password authentication.
+    Password { username: String, password: String },
+    /// Token-based session resumption.
+    Token(String),
+}
+
 /// Connection pool configuration.
 #[derive(Clone)]
 pub struct PoolConfig {
@@ -20,6 +29,8 @@ pub struct PoolConfig {
     pub connection_timeout: Duration,
     /// Path to CA certificate for TLS. If None, use plain TCP.
     pub cert_path: Option<PathBuf>,
+    /// Authentication credentials. If None, no authentication is performed.
+    pub credentials: Option<Credentials>,
 }
 
 impl Default for PoolConfig {
@@ -28,6 +39,7 @@ impl Default for PoolConfig {
             max_connections: 16,
             connection_timeout: Duration::from_secs(5),
             cert_path: None,
+            credentials: None,
         }
     }
 }
@@ -74,6 +86,19 @@ impl ConnectionPool {
         } else {
             Connection::connect(&self.addr).await?
         };
+
+        // Authenticate if credentials are configured
+        if let Some(ref creds) = self.config.credentials {
+            match creds {
+                Credentials::Password { username, password } => {
+                    conn.authenticate_password(username, password).await?;
+                }
+                Credentials::Token(token) => {
+                    conn.authenticate_token(token).await?;
+                }
+            }
+        }
+
         conn.permit = Some(permit);
         Ok(conn)
     }

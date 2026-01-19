@@ -16,7 +16,8 @@ use tokio::{net::TcpListener, sync::broadcast};
 use tokio_rustls::TlsAcceptor;
 
 use crate::{
-    config::{CheckpointConfig, PluginConfig, ServerConfig, StorageConfig},
+    auth::{AuthManager, bootstrap},
+    config::{AuthConfig, CheckpointConfig, PluginConfig, ServerConfig, StorageConfig},
     daemon::tls::load_tls_acceptor,
     network::session,
     query_engine::storage::StorageAdapter,
@@ -34,6 +35,7 @@ pub struct Server {
     sessions: Arc<DashMap<u64, session::Session>>,
     shutdown_tx: broadcast::Sender<()>,
     tls_acceptor: Option<TlsAcceptor>,
+    auth_manager: Arc<AuthManager>,
 }
 
 impl Server {
@@ -41,6 +43,7 @@ impl Server {
         server_config: ServerConfig,
         storage_config: StorageConfig,
         #[cfg_attr(not(feature = "plugins"), allow(unused_variables))] plugin_config: PluginConfig,
+        auth_config: AuthConfig,
     ) -> Result<Self> {
         let (shutdown_tx, _) = broadcast::channel(1);
 
@@ -58,6 +61,36 @@ impl Server {
         };
         let engine = Arc::new(StorageEngine::new(engine_config)?);
         let storage = Arc::new(StorageAdapter::new(engine));
+
+        // Bootstrap authentication system (creates system tables, root user if auth enabled)
+        let bootstrap_result = bootstrap(&storage, auth_config.enabled)?;
+        if let Some(ref password) = bootstrap_result.root_password {
+            tracing::warn!(
+                "=========================================================================="
+            );
+            tracing::warn!(
+                "  Root user created with generated password"
+            );
+            tracing::warn!("  Username: root");
+            tracing::warn!("  Password: {}", password);
+            tracing::warn!("  SAVE THIS PASSWORD! It will not be shown again.");
+            tracing::warn!(
+                "=========================================================================="
+            );
+        }
+
+        // Create AuthManager
+        let auth_manager = Arc::new(AuthManager::new(
+            Arc::clone(&storage),
+            auth_config.enabled,
+            auth_config.token_expiry_secs,
+        ));
+
+        if auth_config.enabled {
+            tracing::info!("Authentication is ENABLED");
+        } else {
+            tracing::info!("Authentication is DISABLED");
+        }
 
         // Set up plugin host if enabled
         #[cfg(feature = "plugins")]
@@ -149,6 +182,7 @@ impl Server {
             sessions: Arc::new(DashMap::new()),
             shutdown_tx,
             tls_acceptor,
+            auth_manager,
         })
     }
 
@@ -225,6 +259,7 @@ impl Server {
                     let decoder = Arc::new(ProtocolDecoder::new());
                     let storage = Arc::clone(&self.storage);
                     let sessions = Arc::clone(&self.sessions);
+                    let auth_manager = Arc::clone(&self.auth_manager);
                     let connection_shutdown = self.shutdown_tx.subscribe();
 
                     if let Some(tls) = self.tls_acceptor.clone() {
@@ -233,7 +268,7 @@ impl Server {
                             match tls.accept(stream).await {
                                 Ok(tls_stream) => {
                                     if let Err(e) = crate::network::handle_connection(
-                                        tls_stream, sessions, storage, connection_shutdown, encoder, decoder
+                                        tls_stream, sessions, storage, auth_manager, connection_shutdown, encoder, decoder
                                     ).await {
                                         tracing::error!("TLS connection error: {e}");
                                     }
@@ -245,7 +280,7 @@ impl Server {
                         // Handle plain TCP connection
                         tokio::spawn(async move {
                             if let Err(e) = crate::network::handle_connection(
-                                stream, sessions, storage, connection_shutdown, encoder, decoder
+                                stream, sessions, storage, auth_manager, connection_shutdown, encoder, decoder
                             ).await {
                                 tracing::error!("Connection error: {e}");
                             }
@@ -302,5 +337,10 @@ impl Server {
     /// Get the storage adapter
     pub fn storage(&self) -> &Arc<StorageAdapter> {
         &self.storage
+    }
+
+    /// Get the authentication manager
+    pub fn auth_manager(&self) -> &Arc<AuthManager> {
+        &self.auth_manager
     }
 }

@@ -24,6 +24,12 @@ fn generate_keywords() {
     map.entry(b"change", "TokenKind::Keyword");
     map.entry(b"remove", "TokenKind::Keyword");
     map.entry(b"make", "TokenKind::Keyword");
+    map.entry(b"join", "TokenKind::Keyword");
+    map.entry(b"inner", "TokenKind::Keyword");
+    map.entry(b"left", "TokenKind::Keyword");
+    map.entry(b"right", "TokenKind::Keyword");
+    map.entry(b"full", "TokenKind::Keyword");
+    map.entry(b"cross", "TokenKind::Keyword");
 
     // Prepositions
     map.entry(b"from", "TokenKind::Keyword");

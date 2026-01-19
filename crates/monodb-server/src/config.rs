@@ -131,6 +131,30 @@ pub struct PluginConfig {
     pub max_deadline: u64,
 }
 
+/// Authentication configuration.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AuthConfig {
+    /// Whether authentication is enabled (default: false)
+    #[serde(default)]
+    pub enabled: bool,
+    /// Session token expiry time in seconds (default: 86400 = 24 hours)
+    #[serde(default = "default_token_expiry")]
+    pub token_expiry_secs: u64,
+}
+
+fn default_token_expiry() -> u64 {
+    86400 // 24 hours
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            token_expiry_secs: default_token_expiry(),
+        }
+    }
+}
+
 impl Default for PluginConfig {
     fn default() -> Self {
         Self {
@@ -154,6 +178,8 @@ pub struct Config {
     pub storage: StorageConfig,
     #[serde(default)]
     pub plugins: PluginConfig,
+    #[serde(default)]
+    pub auth: AuthConfig,
 }
 
 impl Config {
