@@ -14,7 +14,7 @@ pub mod token;
 pub mod user;
 
 pub use bootstrap::bootstrap;
-pub use token::{SessionToken, TokenStore, DEFAULT_TOKEN_EXPIRY_SECS};
+pub use token::{DEFAULT_TOKEN_EXPIRY_SECS, SessionToken, TokenStore};
 pub use user::{User, UserStore, generate_dummy_hash, verify_password};
 
 use crate::query_engine::storage::StorageAdapter;
@@ -193,7 +193,7 @@ pub struct AuthConfig {
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
-            enabled: false, // Disabled by default for backwards compatibility
+            enabled: false, // Disabled by default
             token_expiry_secs: DEFAULT_TOKEN_EXPIRY_SECS,
         }
     }
@@ -308,7 +308,9 @@ mod tests {
         let auth_manager = AuthManager::new(Arc::clone(&storage), true, 86400);
 
         // First authenticate with password to get a token
-        let password_result = auth_manager.authenticate_password("root", &root_password).unwrap();
+        let password_result = auth_manager
+            .authenticate_password("root", &root_password)
+            .unwrap();
         let token = password_result.token.unwrap();
 
         // Now authenticate with the token

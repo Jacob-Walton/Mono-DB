@@ -1,7 +1,7 @@
 //! B+Tree implementation for ordered key-value storage.
 //!
 //! Persistent B+Tree supporting concurrent reads and serialized writes,
-//! with pages managed by the [LruBufferPool](super::buffer::LruBufferPool).
+//! with pages managed by the [LruBufferPool].
 //!
 //! Also provides [`ShardedBTree`] for improved write concurrency via sharding.
 
@@ -103,7 +103,7 @@ struct TreeNode<K, V> {
     values: Vec<V>,
     /// Child page IDs (only for interior nodes).
     children: Vec<PageId>,
-    /// Next leaf page (only for leaf nodes, for range scans).
+    /// Next leaf page (only for leaf nodes).
     next_leaf: PageId,
 }
 
@@ -341,7 +341,7 @@ impl TreeMeta {
 /// Persistent B+Tree with concurrent read access.
 ///
 /// Each BTree instance manages its own metadata page, allowing multiple
-/// BTrees to coexist in the same buffer pool (namespacing support).
+/// BTrees to coexist in the same buffer pool.
 pub struct BTree<K, V> {
     /// Buffer pool for page access.
     pool: Arc<LruBufferPool>,
@@ -361,9 +361,6 @@ where
     V: Clone + Serializable + Send + Sync,
 {
     /// Create a new B+Tree with its own namespace (metadata page).
-    ///
-    /// Each call creates a fresh tree with a newly allocated metadata page.
-    /// Multiple BTrees can safely coexist in the same buffer pool.
     pub fn new(pool: Arc<LruBufferPool>) -> Result<Self> {
         let (meta, meta_page_id) = Self::initialize(&pool)?;
         let len = meta.len as usize;
@@ -455,6 +452,7 @@ where
             let mut page = frame.page.write();
             page.data = buf;
             page.header.page_type = PageType::Meta;
+            page.header.free_space = PAGE_DATA_SIZE.saturating_sub(page.data.len()) as u16;
         }
         frame.mark_dirty();
 
@@ -1023,10 +1021,10 @@ where
 
 /// Sharded B+Tree for high-concurrency workloads.
 ///
-/// Uses hash-based sharding with 8 independent B+Trees to reduce lock contention.
+/// Uses hash-based sharding with independent B+Trees to reduce lock contention.
 /// Each shard has its own buffer pool and can be accessed independently.
 ///
-/// For write-heavy workloads, this provides 4-8x throughput improvement
+/// For write-heavy workloads, this provides around nx throughput improvement
 /// compared to a single B+Tree.
 pub struct ShardedBTree<K, V>
 where

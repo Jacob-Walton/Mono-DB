@@ -1,6 +1,6 @@
 //! MonoDB Client Library
 //!
-//! A simple, ergonomic client for interacting with MonoDB.
+//! A simple client for interacting with MonoDB.
 //! Supports both plain TCP and TLS connections.
 //!
 //! # Example
@@ -68,7 +68,11 @@ impl ClientBuilder {
     }
 
     /// Set username and password credentials.
-    pub fn with_credentials(mut self, username: impl Into<String>, password: impl Into<String>) -> Self {
+    pub fn with_credentials(
+        mut self,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
         self.config.credentials = Some(Credentials::Password {
             username: username.into(),
             password: password.into(),
@@ -113,12 +117,13 @@ impl Client {
     ///
     /// # Example
     /// ```no_run
-    /// # use monodb_client::Client;
-    /// # #[tokio::main]
-    /// # async fn main() -> monodb_common::Result<()> {
-    /// let client = Client::connect("localhost:6432").await?;
-    /// # Ok(())
-    /// # }
+    /// use monodb_client::Client;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> monodb_common::Result<()> {
+    ///     let client = Client::connect("localhost:6432").await?;
+    ///     Ok(())
+    /// }
     /// ```
     pub async fn connect(addr: &str) -> Result<Self> {
         let pool = ConnectionPool::new(addr.to_string(), PoolConfig::default());
@@ -130,13 +135,13 @@ impl Client {
     ///
     /// # Example
     /// ```no_run
-    /// # use monodb_client::Client;
-    /// # use std::path::Path;
-    /// # #[tokio::main]
-    /// # async fn main() -> monodb_common::Result<()> {
-    /// let client = Client::connect_with_cert("localhost:6432", Path::new("ca.pem")).await?;
-    /// # Ok(())
-    /// # }
+    /// use monodb_client::Client;
+    /// use std::path::Path;
+    /// #[tokio::main]
+    /// async fn main() -> monodb_common::Result<()> {
+    ///     let client = Client::connect_with_cert("localhost:6432", Path::new("ca.pem")).await?;
+    ///     Ok(())
+    /// }
     /// ```
     pub async fn connect_with_cert(addr: &str, cert_path: &Path) -> Result<Self> {
         let config = PoolConfig {
@@ -240,25 +245,25 @@ impl Client {
         description: Option<String>,
     ) -> Result<()> {
         let mut conn = self.pool.get().await?;
-        let result = conn.create_namespace(name, description).await?;
+        conn.create_namespace(name, description).await?;
         self.pool.return_connection(conn);
-        Ok(result)
+        Ok(())
     }
 
     /// Drop a namespace.
     pub async fn drop_namespace(&self, name: impl Into<String>, force: bool) -> Result<()> {
         let mut conn = self.pool.get().await?;
-        let result = conn.drop_namespace(name, force).await?;
+        conn.drop_namespace(name, force).await?;
         self.pool.return_connection(conn);
-        Ok(result)
+        Ok(())
     }
 
     /// Switch the default namespace for queries.
     pub async fn use_namespace(&self, namespace: impl Into<String>) -> Result<()> {
         let mut conn = self.pool.get().await?;
-        let result = conn.use_namespace(namespace).await?;
+        conn.use_namespace(namespace).await?;
         self.pool.return_connection(conn);
-        Ok(result)
+        Ok(())
     }
 
     /// Execute a batch of queries.

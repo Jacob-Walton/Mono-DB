@@ -1,4 +1,4 @@
-//! Component cache with mmap support
+//! Component cache
 
 use anyhow::{Context, Result};
 use memmap2::Mmap;
@@ -12,7 +12,7 @@ use tracing::{debug, info, warn};
 use wasmtime::Engine;
 use wasmtime::component::Component;
 
-/// Cached component with its source file modification time
+/// Cached component
 struct CachedComponent {
     component: Component,
     modified: SystemTime,
@@ -53,7 +53,7 @@ impl ComponentCache {
     ///
     /// Loading strategy:
     /// 1. Check in-memory cache (verify not stale)
-    /// 2. Check disk cache (.cwasm) - mmap if exists and valid
+    /// 2. Check disk cache (.cwasm), mmap if exists and valid
     /// 3. Load raw .wasm via mmap, compile, cache result
     pub fn load(&self, engine: &Engine, wasm_path: &Path) -> Result<Component> {
         let canonical = wasm_path

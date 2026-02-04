@@ -115,27 +115,93 @@ impl Formatter {
         }
     }
 
-    /// Format results as a relational table with box-drawing characters
+    /// Flatten a row with nested objects into dot-notation columns (for joins)
+    fn flatten_row(&self, row: &monodb_client::Row) -> IndexMap<String, Value> {
+        let mut result = IndexMap::new();
+        for field in row.fields() {
+            if let Some(val) = row.get(field) {
+                match val {
+                    Value::Row(nested) => {
+                        // Flatten nested row with prefix
+                        for (k, v) in nested {
+                            result.insert(format!("{}.{}", field, k), v.clone());
+                        }
+                    }
+                    Value::Object(nested) => {
+                        // Flatten nested object with prefix
+                        for (k, v) in nested {
+                            result.insert(format!("{}.{}", field, k), v.clone());
+                        }
+                    }
+                    _ => {
+                        result.insert(field.to_string(), val.clone());
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Check if any row has nested objects (indicating a join result)
+    fn has_nested_rows(&self, rows: &[monodb_client::Row]) -> bool {
+        rows.iter().any(|row| {
+            row.fields()
+                .iter()
+                .any(|field| matches!(row.get(field), Some(Value::Row(_) | Value::Object(_))))
+        })
+    }
+
+    /// Format results as a relational table
     fn format_relational(&self, rows: &[monodb_client::Row]) {
         if rows.is_empty() {
             return;
         }
 
-        let columns = rows[0]
-            .fields()
-            .into_iter()
-            .map(String::from)
-            .collect::<Vec<_>>();
+        // Check if we have nested rows (join results) and flatten them
+        let flattened: Vec<IndexMap<String, Value>>;
+        let use_flattened = self.has_nested_rows(rows);
+
+        if use_flattened {
+            flattened = rows.iter().map(|r| self.flatten_row(r)).collect();
+        } else {
+            flattened = Vec::new();
+        }
+
+        // Collect columns from all rows
+        let mut column_set = indexmap::IndexSet::new();
+        if use_flattened {
+            for flat in &flattened {
+                for key in flat.keys() {
+                    column_set.insert(key.clone());
+                }
+            }
+        } else {
+            for row in rows {
+                for field in row.fields() {
+                    column_set.insert(field.to_string());
+                }
+            }
+        }
+        let columns: Vec<_> = column_set.into_iter().collect();
         if columns.is_empty() {
             return;
         }
 
         // Calculate column widths
         let mut widths: Vec<usize> = columns.iter().map(|c| c.len()).collect();
-        for row in rows {
-            for (i, col) in columns.iter().enumerate() {
-                let val_str = self.get_cell_string(row.get(col));
-                widths[i] = widths[i].max(val_str.len()).min(self.max_col_width);
+        if use_flattened {
+            for flat in &flattened {
+                for (i, col) in columns.iter().enumerate() {
+                    let val_str = self.get_cell_string(flat.get(col));
+                    widths[i] = widths[i].max(val_str.len()).min(self.max_col_width);
+                }
+            }
+        } else {
+            for row in rows {
+                for (i, col) in columns.iter().enumerate() {
+                    let val_str = self.get_cell_string(row.get(col));
+                    widths[i] = widths[i].max(val_str.len()).min(self.max_col_width);
+                }
             }
         }
 
@@ -154,16 +220,30 @@ impl Formatter {
         self.print_table_border(&widths, '├', '┼', '┤');
 
         // Print rows
-        for row in rows {
-            print!("│");
-            for (i, col) in columns.iter().enumerate() {
-                let val = row.get(col);
-                let val_str = self.get_cell_string(val);
-                let display = self.truncate(&val_str, widths[i]);
-                let colored = self.colorize_cell(&display, val);
-                print!(" {:<width$} │", colored, width = widths[i]);
+        if use_flattened {
+            for flat in &flattened {
+                print!("│");
+                for (i, col) in columns.iter().enumerate() {
+                    let val = flat.get(col);
+                    let val_str = self.get_cell_string(val);
+                    let display = self.truncate(&val_str, widths[i]);
+                    let colored = self.colorize_cell(&display, val);
+                    print!(" {:<width$} │", colored, width = widths[i]);
+                }
+                println!();
             }
-            println!();
+        } else {
+            for row in rows {
+                print!("│");
+                for (i, col) in columns.iter().enumerate() {
+                    let val = row.get(col);
+                    let val_str = self.get_cell_string(val);
+                    let display = self.truncate(&val_str, widths[i]);
+                    let colored = self.colorize_cell(&display, val);
+                    print!(" {:<width$} │", colored, width = widths[i]);
+                }
+                println!();
+            }
         }
 
         // Print bottom border
@@ -375,7 +455,7 @@ impl Formatter {
         }
     }
 
-    /// Format a single value with proper indentation (legacy)
+    /// Format a single value with proper indentation
     pub fn format_value(&self, value: &Value, indent: usize) {
         match value {
             Value::Array(arr) => self.format_array(arr, indent),

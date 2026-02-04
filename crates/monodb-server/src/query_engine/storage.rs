@@ -12,7 +12,7 @@ use monodb_common::{MonoError, Result, Value};
 
 #[cfg(feature = "plugins")]
 use crate::query_engine::ast::{Expr, Spanned};
-use crate::storage::engine::{StorageEngine, TableInfo};
+use crate::storage::{StorageType, engine::{StorageEngine, TableInfo}};
 
 // Row Types
 
@@ -215,17 +215,17 @@ impl StorageAdapter {
         self.engine.checkpoint()
     }
 
-    /// Encode a key value to bytes using the native binary format.
+    /// Encode a key value to bytes.
     fn encode_key(value: &Value) -> Vec<u8> {
         value.to_bytes()
     }
 
-    /// Encode a row to bytes using the native binary format.
+    /// Encode a row to bytes.
     fn encode_row(row: &Row) -> Vec<u8> {
         row.clone().into_value().to_bytes()
     }
 
-    /// Decode bytes to a row using the native binary format.
+    /// Decode bytes to a row.
     fn decode_row(bytes: &[u8]) -> Result<Row> {
         let (value, _) = Value::from_bytes(bytes)?;
         match value {
@@ -826,7 +826,7 @@ impl StorageAdapter {
         self.wal_log_schema_upsert(table)
     }
 
-    /// Evaluate a default expression to a Value (public wrapper for network layer)
+    /// Evaluate a default expression to a Value
     #[cfg(feature = "plugins")]
     pub fn eval_default_expr(&self, expr: &Spanned<Expr>) -> Result<Value> {
         if let Some(value) = Self::eval_constant_expr(&expr.node) {
@@ -852,7 +852,7 @@ impl StorageAdapter {
         }
     }
 
-    /// Evaluate a default expression to a Value (public wrapper for network layer)
+    /// Evaluate a default expression to a Value
     #[cfg(not(feature = "plugins"))]
     pub fn eval_default_expr(
         &self,
@@ -1094,8 +1094,6 @@ impl QueryStorage for StorageAdapter {
     }
 
     fn scan(&self, tx_id: u64, table: &str, config: &ScanConfig) -> Result<Vec<Row>> {
-        use crate::storage::engine::StorageType;
-
         let storage_type = self
             .engine
             .get_storage_type(table)
@@ -1113,7 +1111,16 @@ impl QueryStorage for StorageAdapter {
         raw.into_iter()
             .skip(offset)
             .take(limit)
-            .map(|(_, bytes)| Self::decode_row(&bytes))
+            .map(|(key_bytes, value_bytes)| {
+                let mut row = Self::decode_row(&value_bytes)?;
+                // Inject the key as _id if not already present
+                if !row.columns.contains_key("_id") && !row.columns.contains_key("id") {
+                    if let Ok((key_value, _)) = Value::from_bytes(&key_bytes) {
+                        row.insert("_id".to_string(), key_value);
+                    }
+                }
+                Ok(row)
+            })
             .collect()
     }
 
@@ -1210,6 +1217,20 @@ impl QueryStorage for StorageAdapter {
                 }
             }
 
+            // Validate that non-nullable columns don't have NULL values
+            for col in &schema.columns {
+                if !col.nullable {
+                    if let Some(value) = row.columns.get(&col.name) {
+                        if matches!(value, Value::Null) {
+                            return Err(MonoError::InvalidOperation(format!(
+                                "Column '{}' cannot be NULL",
+                                col.name
+                            )));
+                        }
+                    }
+                }
+            }
+
             // Ensure all defined columns are included (even if null)
             for col in &schema.columns {
                 if !row.columns.contains_key(&col.name) && col.nullable {
@@ -1225,6 +1246,15 @@ impl QueryStorage for StorageAdapter {
                 }
             }
             row = ordered_row;
+        }
+
+        // For document and keyspace stores, auto-generate _id if not present
+        if matches!(storage_type, StorageType::Document | StorageType::Keyspace)
+            && !row.columns.contains_key("_id")
+            && !row.columns.contains_key("id")
+        {
+            let oid = monodb_common::ObjectId::new()?;
+            row.insert("_id".to_string(), Value::ObjectId(oid));
         }
 
         let key = Self::extract_key(&row)?;
@@ -1286,7 +1316,6 @@ impl QueryStorage for StorageAdapter {
                 self.engine.mvcc_write(tx_id, table, key_bytes, new_bytes)?;
             }
             StorageType::Document => {
-                // For documents, use upsert to update
                 self.engine.doc_upsert(table, key_bytes, new_bytes)?;
             }
             StorageType::Keyspace => {
@@ -1309,12 +1338,12 @@ impl QueryStorage for StorageAdapter {
         match storage_type {
             StorageType::Relational => self.engine.mvcc_delete(tx_id, table, &key_bytes),
             StorageType::Document => {
-                // Documents need revision for deletion, just delete with revision 0
-                // FIXME: revision handling
-                Ok(self
-                    .engine
-                    .doc_delete(table, &key_bytes, 0)
-                    .unwrap_or(false))
+                // Get current revision for optimistic concurrency check
+                if let Some((_, revision)) = self.engine.doc_get(table, &key_bytes)? {
+                    self.engine.doc_delete(table, &key_bytes, revision)
+                } else {
+                    Ok(false) // Document doesn't exist
+                }
             }
             StorageType::Keyspace => self.engine.ks_delete(table, &key_bytes),
         }

@@ -6,18 +6,18 @@
 
 use std::sync::Arc;
 
-use monodb_common::{permissions::PermissionSet, Result, Value};
+use monodb_common::{Result, Value, permissions::PermissionSet};
 use rand::Rng;
 
 use crate::query_engine::{
+    QueryStorage,
     ast::{ColumnConstraint, ColumnDef, DataType, Ident, Span, Spanned, TableType},
     storage::StorageAdapter,
-    QueryStorage,
 };
 
 use super::{
     token::TOKENS_TABLE,
-    user::{User, UserStore, USERS_TABLE},
+    user::{USERS_TABLE, User, UserStore},
 };
 
 /// System table name for roles
@@ -33,11 +33,6 @@ pub struct BootstrapResult {
 }
 
 /// Bootstrap the authentication system.
-///
-/// This function:
-/// 1. Ensures the system namespace and tables exist
-/// 2. Creates the root user if auth is enabled and no users exist
-/// 3. Creates builtin roles
 pub fn bootstrap(storage: &Arc<StorageAdapter>, auth_enabled: bool) -> Result<BootstrapResult> {
     // Create system namespace if it doesn't exist
     ensure_system_namespace(storage)?;
@@ -64,7 +59,7 @@ pub fn bootstrap(storage: &Arc<StorageAdapter>, auth_enabled: bool) -> Result<Bo
 
         Some(password)
     } else if !has_users {
-        // Auth disabled, no users - just create builtin roles for when auth is enabled later
+        // Auth disabled, no users, just create builtins
         create_builtin_roles(storage)?;
         None
     } else {
@@ -216,8 +211,8 @@ fn ensure_roles_table(storage: &Arc<StorageAdapter>) -> Result<()> {
 
 /// Create the builtin roles in the system.roles table.
 fn create_builtin_roles(storage: &Arc<StorageAdapter>) -> Result<()> {
-    use monodb_common::permissions::BuiltinRole;
     use crate::query_engine::storage::{QueryStorage, Row};
+    use monodb_common::permissions::BuiltinRole;
 
     let builtin_roles = [
         ("root", BuiltinRole::Root),
@@ -263,9 +258,10 @@ fn serialize_permissions(permissions: &PermissionSet) -> String {
     permissions.to_string_array().join(",")
 }
 
-/// Generate a cryptographically secure random password.
+/// Generate a secure random password.
 fn generate_secure_password(length: usize) -> String {
-    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
+    const CHARSET: &[u8] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
     let mut rng = rand::rng();
 
     (0..length)
@@ -276,7 +272,7 @@ fn generate_secure_password(length: usize) -> String {
         .collect()
 }
 
-/// Check if system tables exist (for quick auth availability check).
+/// Check if system tables exist.
 pub fn system_tables_exist(storage: &Arc<StorageAdapter>) -> bool {
     storage.table_exists(USERS_TABLE) && storage.table_exists(TOKENS_TABLE)
 }

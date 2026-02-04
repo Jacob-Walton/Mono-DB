@@ -154,7 +154,8 @@ impl Lexer {
                 b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.scan_identifier_or_keyword(),
                 b'$' => self.scan_variable(),
                 b'0'..=b'9' => self.scan_number(),
-                b'"' => self.scan_string(),
+                b'"' => self.scan_string(b'"'),
+                b'\'' => self.scan_string(b'\''),
                 b'\n' => self.handle_newline(),
                 b' ' | b'\t' | b'\r' => self.skip_whitespace(),
                 b'/' => {
@@ -458,14 +459,14 @@ impl Lexer {
         });
     }
 
-    fn scan_string(&mut self) {
+    fn scan_string(&mut self, quote: u8) {
         let start = self.pos;
         let start_column = self.column;
         self.pos += 1; // Skip opening quote
         self.column += 1;
 
         while self.pos < self.source.len() {
-            if let Some(len) = memchr(b'"', &self.source[self.pos..]) {
+            if let Some(len) = memchr(quote, &self.source[self.pos..]) {
                 let mut i = self.pos + len;
                 let mut backslashes = 0;
                 while i > self.pos && self.source[i - 1] == b'\\' {

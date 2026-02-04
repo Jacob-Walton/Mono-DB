@@ -5,7 +5,9 @@
 use bytes::BytesMut;
 use monodb_common::{
     MonoError, Result, Value,
-    protocol::{AuthMethod, ErrorCode, ProtocolDecoder, ProtocolEncoder, QueryOutcome, Request, Response},
+    protocol::{
+        AuthMethod, ErrorCode, ProtocolDecoder, ProtocolEncoder, QueryOutcome, Request, Response,
+    },
 };
 
 use std::sync::Arc;
@@ -17,11 +19,11 @@ use tokio::{
     sync::broadcast,
 };
 
-use crate::auth::AuthManager;
 use crate::query_engine::ast::{ControlStatement, DdlStatement, MutationStatement, QueryStatement};
 use crate::query_engine::planner::{EmptyCatalog, QueryPlanner};
 use crate::query_engine::storage::StorageAdapter;
 use crate::query_engine::{ExecutionContext, Executor, Statement, parse};
+use crate::{auth::AuthManager, query_engine::ast::TransactionStatement};
 use crate::{network::session::Session, query_engine::QueryStorage};
 
 pub mod session;
@@ -150,7 +152,10 @@ async fn handle_request(
         }
 
         Request::Authenticate { method } => {
-            tracing::debug!("Authenticate with method: {:?}", std::mem::discriminant(&method));
+            tracing::debug!(
+                "Authenticate with method: {:?}",
+                std::mem::discriminant(&method)
+            );
 
             match method {
                 AuthMethod::Password { username, password } => {
@@ -163,7 +168,8 @@ async fn handle_request(
                                 sess.permissions = auth_result.permissions.clone();
                             }
 
-                            let expires_at = auth_result.token.as_ref().map(|t| t.expires_at as u64);
+                            let expires_at =
+                                auth_result.token.as_ref().map(|t| t.expires_at as u64);
                             let token = auth_result.token.as_ref().map(|t| t.token.clone());
 
                             Ok(Response::AuthSuccess {
@@ -333,8 +339,7 @@ async fn handle_query(
         });
     }
 
-    // Execute statements one by one, handling transaction statements specially
-    use crate::query_engine::ast::{Statement, TransactionStatement};
+    // Execute statements one by one
 
     let executor = Executor::new(storage.clone());
     let mut last_result = QueryOutcome::Executed;
@@ -452,7 +457,7 @@ async fn execute_statement(
 
     match &stmt {
         Statement::Query(query) => {
-            // Handle DESCRIBE, it doesn't go through the planner
+            // Handle DESCRIBE, it shouldn't go through the planner
             if let QueryStatement::Describe(describe) = query {
                 let qualified_name = ctx.qualify_table(describe.table.node.as_str());
                 let description = storage.describe_table(&qualified_name)?;

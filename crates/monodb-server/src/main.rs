@@ -1,3 +1,5 @@
+//! MonoDB Server Main Entry Point
+
 use tracing_subscriber::{EnvFilter, Registry, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::{config::Config, daemon::Server};
@@ -29,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
         .read(false)
         .open("server.log")?;
 
-    // Non-blocking log appenders for async runtime compatibility
+    // Non-blocking log appenders
     let (file_non_blocking, file_guard) = tracing_appender::non_blocking(log_file);
     let (console_non_blocking, console_guard) = tracing_appender::non_blocking(std::io::stderr());
     // Maintain guard references to keep log threads alive
@@ -100,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
         {
             use tokio::signal;
 
-            // Attempt to register Windows console signals with fallback strategy
+            // Attempt to register Windows console signals
             let ctrl_c_result = signal::windows::ctrl_c();
             let ctrl_break_result = signal::windows::ctrl_break();
             let ctrl_close_result = signal::windows::ctrl_close();

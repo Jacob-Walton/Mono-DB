@@ -1,7 +1,4 @@
 //! Write-Ahead Logging (WAL) for durability.
-//!
-//! Provides crash recovery through sequential logging of all mutations.
-//! Supports group commit for better throughput and MVCC-aware replay.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -11,6 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use ahash::{HashSet, HashSetExt};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use monodb_common::{MonoError, Result};
 use parking_lot::{Mutex, RwLock};
@@ -19,11 +17,11 @@ use super::traits::Serializable;
 
 // WAL format constants
 
-/// WAL file magic number: "MWAL"
+/// WAL file magic number
 const WAL_MAGIC: u32 = u32::from_be_bytes(*b"MWAL");
 
 /// WAL version.
-const WAL_VERSION: u8 = 1;
+const WAL_VERSION: u8 = 3;
 
 /// Default sync interval in milliseconds.
 const DEFAULT_SYNC_INTERVAL_MS: u64 = 100;
@@ -331,8 +329,8 @@ pub struct Wal {
     path: PathBuf,
     /// Configuration.
     config: WalConfig,
-    /// Committed transaction IDs (for replay filtering).
-    committed_txs: RwLock<std::collections::HashSet<u64>>,
+    /// Committed transaction IDs.
+    committed_txs: RwLock<HashSet<u64>>,
 }
 
 impl Wal {
@@ -356,7 +354,7 @@ impl Wal {
             shutdown: AtomicBool::new(false),
             path: config.path.clone(),
             config: config.clone(),
-            committed_txs: RwLock::new(std::collections::HashSet::new()),
+            committed_txs: RwLock::new(HashSet::new()),
         });
 
         // Start writer thread
@@ -799,7 +797,7 @@ impl Wal {
         }
 
         for entry in entries {
-            // Skip uncommitted transactions (MVCC-aware)
+            // Skip uncommitted transactions
             let tx_id = entry.header.tx_id;
             if tx_id != 0 && !committed_txs.contains(&tx_id) {
                 continue;
@@ -974,7 +972,7 @@ mod tests {
             wal.log_tx_begin(2, 2).unwrap();
             wal.log_insert(2, "users", &"k2".to_string(), &"v2".to_string())
                 .unwrap();
-            // No commit!
+            // No commit
 
             wal.shutdown().unwrap();
         }
@@ -990,7 +988,7 @@ mod tests {
             })
             .unwrap();
 
-            // Only 1 entry (committed insert), uncommitted is skipped
+            // Only 1 entry, uncommitted is skipped
             assert_eq!(count, 1);
 
             wal.shutdown().unwrap();

@@ -9,13 +9,9 @@
 //! * `permissions`: Defines permission and access control types.
 //! * `value`: Defines data value types used in database operations.
 
-// #[cfg(test)]
-// pub mod tests;
-
 pub mod error;
 pub mod permissions;
 pub mod protocol;
-// pub mod schema;
 pub mod value;
 
 // Re-export commonly used types at the base
@@ -24,6 +20,3 @@ pub use value::{ObjectId, Value, ValueType};
 
 /// Version information
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-// #[cfg(test)]
-// pub mod tests;

@@ -316,9 +316,7 @@ impl AuthResult {
                 expires_at,
                 token,
             }),
-            Response::AuthFailed { reason, .. } => {
-                Err(MonoError::AuthenticationFailed(reason))
-            }
+            Response::AuthFailed { reason, .. } => Err(MonoError::AuthenticationFailed(reason)),
             Response::Error { message, .. } => Err(MonoError::Execution(message)),
             other => Err(MonoError::Execution(format!(
                 "Unexpected response: {:?}",

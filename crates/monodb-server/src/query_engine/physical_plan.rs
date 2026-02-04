@@ -2,7 +2,7 @@
 
 //! Physical Query Plan
 //!
-//! Specifies HOW to execute a query with concrete algorithms and access methods.
+//! Specifies how to execute a query with concrete algorithms and access methods.
 //! Uses Volcano-style execution with iterator interface for each operator.
 //! Includes cost estimates (I/O, CPU, memory) for choosing optimal execution strategies.
 
@@ -14,7 +14,7 @@ use crate::query_engine::logical_plan::{AggregateFunction, JoinType, ScalarExpr,
 pub enum PhysicalPlan {
     /// Sequential scan of all rows in a table
     SeqScan(SeqScanOp),
-    /// Index scan using a B-tree index (boxed due to size)
+    /// Index scan using a B-tree index
     IndexScan(Box<IndexScanOp>),
     /// Primary key point lookup
     PrimaryKeyLookup(PkLookupOp),
@@ -230,7 +230,7 @@ pub struct SortOp {
 #[derive(Debug, Clone)]
 pub struct LimitOp {
     pub input: Box<PhysicalPlan>,
-    /// The limit count (resolved to concrete value)
+    /// The limit count
     pub count: usize,
     pub cost: PlanCost,
 }
@@ -239,7 +239,7 @@ pub struct LimitOp {
 #[derive(Debug, Clone)]
 pub struct OffsetOp {
     pub input: Box<PhysicalPlan>,
-    /// The offset count (resolved to concrete value)
+    /// The offset count
     pub count: usize,
     pub cost: PlanCost,
 }

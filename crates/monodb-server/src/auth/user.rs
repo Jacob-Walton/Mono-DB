@@ -90,7 +90,11 @@ impl User {
 
         let username = match row.get("username") {
             Some(Value::String(s)) => s.clone(),
-            _ => return Err(MonoError::Parse("Missing or invalid 'username' field".into())),
+            _ => {
+                return Err(MonoError::Parse(
+                    "Missing or invalid 'username' field".into(),
+                ));
+            }
         };
 
         let password_hash = match row.get("password_hash") {
@@ -98,7 +102,7 @@ impl User {
             _ => {
                 return Err(MonoError::Parse(
                     "Missing or invalid 'password_hash' field".into(),
-                ))
+                ));
             }
         };
 
@@ -189,7 +193,9 @@ impl UserStore {
     /// Get a user by their unique ID.
     pub fn get_by_id(&self, user_id: &str) -> Result<Option<User>> {
         let tx_id = self.storage.begin_read_only()?;
-        let result = self.storage.read(tx_id, USERS_TABLE, &Value::String(user_id.to_string()))?;
+        let result = self
+            .storage
+            .read(tx_id, USERS_TABLE, &Value::String(user_id.to_string()))?;
         self.storage.commit(tx_id)?;
 
         match result {
@@ -205,10 +211,10 @@ impl UserStore {
         self.storage.commit(tx_id)?;
 
         for row in rows {
-            if let Some(Value::String(stored_username)) = row.get("username") {
-                if stored_username == username {
-                    return Ok(Some(User::from_row(&row)?));
-                }
+            if let Some(Value::String(stored_username)) = row.get("username")
+                && stored_username == username
+            {
+                return Ok(Some(User::from_row(&row)?));
             }
         }
 

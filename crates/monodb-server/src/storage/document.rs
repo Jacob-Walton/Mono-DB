@@ -1,8 +1,4 @@
 //! Document store with optimistic concurrency control.
-//!
-//! Implements a simple versioned document store using revision numbers
-//! for conflict detection. Simpler than full MVCC but suitable for
-//! document.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -244,7 +240,7 @@ where
     fn history_key(key: &K, revision: Revision) -> Vec<u8> {
         let mut buf = Vec::new();
         key.serialize(&mut buf);
-        // Use descending revision order for efficient recent history retrieval
+        // Use descending revision order for better recent retrievals
         (u64::MAX - revision).serialize(&mut buf);
         buf
     }

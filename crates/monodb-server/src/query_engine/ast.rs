@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 // Source location tracking
 
-/// Source location span for error reporting and IDE features.
+/// Source location span.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Span {
     /// Byte offset of the start of this span
@@ -302,7 +302,7 @@ pub enum SortDirection {
     Desc,
 }
 
-/// Limit or offset value - can be a literal or parameterized.
+/// Limit or offset value, can be a literal or parameterized.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LimitValue {
     Literal(u64),
@@ -314,7 +314,7 @@ impl std::hash::Hash for LimitValue {
         // Hash the discriminant (Literal vs Param)
         std::mem::discriminant(self).hash(state);
 
-        // For Literal, don't hash the value (this enables fingerprint caching)
+        // For Literal, don't hash the value
         // For Param, hash the reference so different params produce different fingerprints
         match self {
             LimitValue::Literal(_) => {

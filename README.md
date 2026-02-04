@@ -75,7 +75,7 @@ inv help
 
 ## Known Issues (Windows)
 
-On Windows, building `aws-lc-sys` may required using the **GNU Nightly Toolchain**, selecting Ninja as the CMake generator,
+On Windows, building `aws-lc-sys` may require using the **GNU Nightly Toolchain**, selecting Ninja as the CMake generator,
 and explicitly specifying the C and C++ compilers
 
 Other CMake generators (such as `MinGW Makefiles`) *may* work if their respective toolchains are installed correctly, but

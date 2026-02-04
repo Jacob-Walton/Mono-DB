@@ -113,7 +113,7 @@ impl Completer for ReplHelper {
         _pos: usize,
         _ctx: &rustyline::Context<'_>,
     ) -> RlResult<(usize, Vec<Self::Candidate>)> {
-        // Return empty completions, this allows literal tab to be inserted
+        // Return empty completions
         Ok((0, vec![]))
     }
 }
@@ -199,7 +199,7 @@ impl Repl {
         let mut editor = Editor::with_config(config)?;
         editor.set_helper(Some(ReplHelper));
 
-        // Rebind Tab to insert 4 spaces (visible indentation) instead of triggering completion
+        // Rebind Tab to insert 4 spaces instead of triggering completion
         editor.bind_sequence(
             KeyEvent(KeyCode::Tab, rustyline::Modifiers::NONE),
             Cmd::Insert(1, "    ".to_string()),
@@ -383,7 +383,7 @@ impl Repl {
         let trimmed = query.trim().to_lowercase();
         let is_use = trimmed.starts_with("use ");
 
-        // Always send the query to the server
+        // Send the query to the server
         match self.client.query(query).await {
             Ok(result) => {
                 let elapsed = start.elapsed();

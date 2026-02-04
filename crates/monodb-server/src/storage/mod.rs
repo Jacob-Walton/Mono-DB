@@ -4,28 +4,16 @@
 //! Storage engine for MonoDB.
 
 mod models;
-
-// Core infrastructure
 mod buffer;
 mod disk;
 mod page;
 mod traits;
-
-// Data structures
 mod btree;
-
-// Storage backends
 mod document;
 mod keyspace;
 mod mvcc;
-
-// Durability
 mod wal;
-
-// Schema persistence
 pub mod schema;
-
-// Unified interface
 pub mod engine;
 
 // Re-exports

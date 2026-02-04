@@ -535,7 +535,7 @@ mod tests {
         // Allocate second page
         let _frame2 = pool.alloc_leaf().unwrap();
 
-        // Try to allocate third - should evict frame2, not frame1
+        // Try to allocate third, should evict frame2, not frame1
         let frame3 = pool.alloc_leaf().unwrap();
 
         // Frame1 should still be in cache

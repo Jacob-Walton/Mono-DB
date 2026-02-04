@@ -1,8 +1,4 @@
 //! Multi-Version Concurrency Control (MVCC) for relational tables.
-//!
-//! Implements snapshot isolation and serializable transactions using
-//! multi-versioning. Each row can have multiple versions, each visible
-//! to different transactions based on their start timestamp.
 
 use std::collections::HashSet;
 use std::marker::PhantomData;
@@ -92,8 +88,7 @@ impl<V> MvccRecord<V> {
             }
         } else {
             // Transaction not in manager, assume it's an old committed transaction
-            // whose entry was cleaned up. The xmin IS the commit_ts in this case.
-            // For old data, cmin stores the commit timestamp.
+            // whose entry was cleaned up. The xmin is the commit_ts in this case.
             if self.cmin > 0 {
                 self.cmin <= snapshot.start_ts
             } else {
@@ -214,7 +209,7 @@ impl Snapshot {
     }
 }
 
-// Transaction State (matching P2's TxStatus)
+// Transaction State
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TxState {
     /// Transaction is active.
@@ -225,7 +220,7 @@ pub enum TxState {
     Aborted,
 }
 
-/// Transaction metadata (matching P2's Transaction struct).
+/// Transaction metadata.
 #[derive(Debug, Clone)]
 pub struct TxInfo {
     /// Transaction ID.
@@ -258,13 +253,13 @@ impl TxInfo {
     }
 }
 
-// Transaction Manager (simplified like P2)
+// Transaction Manager
 pub struct TransactionManager {
     /// Monotonically increasing timestamp generator.
     next_ts: AtomicU64,
     /// All transactions (active, committed, and recently aborted).
     transactions: DashMap<TxId, TxInfo>,
-    /// Oldest active transaction timestamp (for GC).
+    /// Oldest active transaction timestamp.
     oldest_active_ts: AtomicU64,
     /// Garbage collection channel.
     gc_sender: Option<Sender<GcTask>>,
@@ -272,7 +267,7 @@ pub struct TransactionManager {
     gc_handle: Mutex<Option<thread::JoinHandle<()>>>,
     /// Shutdown flag.
     shutdown_flag: AtomicBool,
-    /// Written versioned keys per transaction (for finalize_commit).
+    /// Written versioned keys per transaction.
     tx_written_keys: DashMap<TxId, Vec<Vec<u8>>>,
 }
 
@@ -283,7 +278,7 @@ impl TransactionManager {
     fn initial_timestamp() -> u64 {
         use std::time::{SystemTime, UNIX_EPOCH};
         // Use milliseconds since epoch as base timestamp
-        // This gives us ~300 years of headroom and survives restarts
+        // This gives us lots ofheadroom and survives restarts
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -331,7 +326,7 @@ impl TransactionManager {
     /// Begin a new transaction.
     pub fn begin(&self, isolation: IsolationLevel, read_only: bool) -> Result<Snapshot> {
         let ts = self.next_ts.fetch_add(1, Ordering::SeqCst);
-        let tx_id = ts; // tx_id == start_ts for simplicity
+        let tx_id = ts; // tx_id == start_ts
 
         // Update oldest active timestamp
         self.oldest_active_ts.fetch_min(ts, Ordering::SeqCst);
@@ -439,7 +434,7 @@ impl TransactionManager {
         Ok(())
     }
 
-    /// Check for write-write conflicts (for serializable isolation).
+    /// Check for write-write conflicts.
     pub fn check_conflicts(&self, tx_id: TxId, key: &[u8]) -> Result<()> {
         for entry in self.transactions.iter() {
             if *entry.key() != tx_id
@@ -466,12 +461,12 @@ impl TransactionManager {
         self.oldest_active_ts.store(oldest, Ordering::SeqCst);
     }
 
-    /// Get the oldest active transaction timestamp (for GC).
+    /// Get the oldest active transaction timestamp.
     pub fn oldest_active(&self) -> Timestamp {
         self.oldest_active_ts.load(Ordering::SeqCst)
     }
 
-    /// Get the minimum active transaction ID (for GC), alias for oldest_active.
+    /// Get the minimum active transaction ID.
     pub fn min_active(&self) -> TxId {
         self.oldest_active()
     }
@@ -484,7 +479,7 @@ impl TransactionManager {
             .count()
     }
 
-    /// Restore timestamp counter (for WAL replay).
+    /// Restore timestamp counter.
     /// Sets the counter to at least the given value.
     pub fn restore_timestamp(&self, min_ts: Timestamp) {
         self.next_ts.fetch_max(min_ts, Ordering::SeqCst);
@@ -531,12 +526,12 @@ impl TransactionManager {
             .unwrap_or_default()
     }
 
-    /// Clear written keys for a transaction (on rollback).
+    /// Clear written keys for a transaction.
     pub fn clear_written_keys(&self, tx_id: TxId) {
         self.tx_written_keys.remove(&tx_id);
     }
 
-    /// Clean up old committed/aborted transactions (call periodically).
+    /// Clean up old committed/aborted transaction.
     pub fn cleanup(&self, older_than: Timestamp) {
         self.transactions
             .retain(|_, tx| tx.status == TxState::Active || tx.start_ts >= older_than);
@@ -603,7 +598,7 @@ fn gc_worker(manager: Arc<TransactionManager>, receiver: Receiver<GcTask>, inter
 /// Stores multiple versions of each row, with visibility determined by
 /// transaction snapshots.
 ///
-/// Uses a [`ShardedBTree`] for high-concurrency write performance.
+/// Uses a [`ShardedBTree`].
 pub struct MvccTable<K, V>
 where
     K: Ord + Clone + Serializable + Send + Sync,
@@ -624,7 +619,7 @@ where
     K: Ord + Clone + Serializable + Send + Sync,
     V: Clone + Serializable + Send + Sync,
 {
-    /// Create a new MVCC table with sharded storage.
+    /// Create a new MVCC table.
     ///
     /// Creates NUM_SHARDS separate B+Tree files at `base_path.shard0`, etc.
     pub fn new(
@@ -652,13 +647,13 @@ where
         })
     }
 
-    /// Get the first shard's metadata page ID (for backwards compatibility).
+    /// Get the first shard's metadata page ID.
     pub fn meta_page_id(&self) -> PageId {
         self.tree.meta_page_id()
     }
 
     /// Get the approximate number of entries in the table.
-    /// Note: This counts all versions, not just visible ones.
+    /// This counts all versions, not just visible ones.
     pub fn len(&self) -> usize {
         self.tree.len()
     }
@@ -667,7 +662,7 @@ where
     fn versioned_key(key: &K, version_ts: Timestamp) -> Vec<u8> {
         let mut buf = Vec::new();
         key.serialize(&mut buf);
-        // Append version in descending order (newer versions first)
+        // Append version in descending order
         (u64::MAX - version_ts).serialize(&mut buf);
         buf
     }
@@ -716,7 +711,7 @@ where
 
     /// Write a value in a transaction.
     pub fn write(&self, snapshot: &Snapshot, key: K, value: V) -> Result<()> {
-        // Check for conflicts (for serializable)
+        // Check for conflicts
         if snapshot.isolation == IsolationLevel::Serializable {
             let key_bytes = {
                 let mut buf = Vec::new();
@@ -950,14 +945,14 @@ mod tests {
         // Start tx1
         let snapshot1 = tm.begin(IsolationLevel::ReadCommitted, false).unwrap();
 
-        // Start tx2 - tx1 should be in its active set
+        // Start tx2, tx1 should be in its active set
         let snapshot2 = tm.begin(IsolationLevel::ReadCommitted, false).unwrap();
         assert!(snapshot2.active_txs.contains(&snapshot1.tx_id));
 
         // Commit tx1
         tm.commit(snapshot1.tx_id).unwrap();
 
-        // Start tx3 - tx1 should NOT be in its active set
+        // Start tx3, tx1 should not be in its active set
         let snapshot3 = tm.begin(IsolationLevel::ReadCommitted, false).unwrap();
         assert!(!snapshot3.active_txs.contains(&snapshot1.tx_id));
         assert!(snapshot3.active_txs.contains(&snapshot2.tx_id));
@@ -974,7 +969,7 @@ mod tests {
         // Should be visible to its own transaction
         assert!(record.is_visible(&snapshot1, &tm));
 
-        // Should NOT be visible to other transactions before commit
+        // Should not be visible to other transactions before commit
         let snapshot2 = tm.begin(IsolationLevel::ReadCommitted, false).unwrap();
         assert!(!record.is_visible(&snapshot2, &tm));
 
@@ -1004,7 +999,7 @@ mod tests {
         // Rollback tx1
         tm.rollback(snapshot1.tx_id).unwrap();
 
-        // Record should NOT be visible to any transaction after rollback
+        // Record should not be visible to any transaction after rollback
         let snapshot2 = tm.begin(IsolationLevel::ReadCommitted, false).unwrap();
         assert!(
             !record.is_visible(&snapshot2, &tm),

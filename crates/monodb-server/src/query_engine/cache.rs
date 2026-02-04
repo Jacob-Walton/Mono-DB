@@ -42,7 +42,7 @@ impl QueryFingerprint {
     }
 }
 
-/// Hash a statement for fingerprinting (delegates to Statement's Hash impl).
+/// Hash a statement for fingerprinting.
 fn hash_statement<H: Hasher>(stmt: &Statement, hasher: &mut H) {
     // Use the variant discriminant
     std::mem::discriminant(stmt).hash(hasher);
@@ -410,8 +410,8 @@ impl QueryCacheManager {
     /// Call this after DDL operations.
     pub fn invalidate_table(&self, table: &str) {
         self.plan_cache.invalidate_table(table);
-        // Parse cache doesn't need invalidation (AST is still valid)
-        // Prepared statements might need invalidation at some point, but skipping for now
+        // Parse cache doesn't need invalidation
+        // Prepared statements might need invalidation at some point, but we'll leave that for now
     }
 
     /// Clear all caches.

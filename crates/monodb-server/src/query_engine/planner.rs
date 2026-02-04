@@ -26,6 +26,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 // Catalog Trait
+
 /// Catalog interface for accessing table metadata and statistics.
 pub trait Catalog: Send + Sync {
     /// Get the schema for a table
@@ -110,13 +111,13 @@ impl<C: Catalog> QueryPlanner<C> {
 
     /// Full planning pipeline: AST -> optimized physical plan.
     pub fn plan(&self, stmt: &Statement) -> Result<PhysicalPlan> {
-        // Phase 1: AST -> Logical Plan
+        // Step 1: AST -> Logical Plan
         let logical = self.ast_to_logical(stmt)?;
 
-        // Phase 2: Optimize logical plan
+        // Step 2: Optimize logical plan
         let optimized = self.optimize_logical(logical);
 
-        // Phase 3: Logical -> Physical Plan
+        // Step 3: Logical -> Physical Plan
         self.logical_to_physical(&optimized)
     }
 
@@ -509,8 +510,8 @@ impl<C: Catalog> QueryPlanner<C> {
                         .check_arity(converted_args.len())
                         .map_err(MonoError::InvalidOperation)?;
 
-                    // Note: Full type checking would require a TypeContext with column types.
-                    // For now, we defer detailed type checking to execution time for columns.
+                    // Note: Full type checking requires a TypeContext with column types.
+                    // For now, we'll defer detailed type checking to execution time for columns.
                     // We can still validate constant arguments here.
                     for (i, arg) in converted_args.iter().enumerate() {
                         if let ScalarExpr::Constant(val) = arg {
@@ -521,7 +522,7 @@ impl<C: Catalog> QueryPlanner<C> {
                         }
                     }
                 }
-                // If not a builtin, it might be a plugin function - validated at execution time
+                // If not a builtin, it might be a plugin function (validated at execution time)
 
                 Ok(ScalarExpr::FunctionCall {
                     name: name.node.clone(),

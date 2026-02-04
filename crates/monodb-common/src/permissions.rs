@@ -477,7 +477,7 @@ impl PermissionSet {
         Ok(Self { permissions })
     }
 
-    /// Convert to string array for protocol backward compatibility
+    /// Convert to string array
     pub fn to_string_array(&self) -> Vec<String> {
         self.permissions.iter().map(|p| p.to_string()).collect()
     }

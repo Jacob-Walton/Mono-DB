@@ -100,7 +100,7 @@ impl Connection {
         addr: &str,
         cert_path: &Path,
     ) -> Result<TlsStream<TcpStream>> {
-        // Extract hostname for SNI (strip port if present)
+        // Extract hostname (strip port if present)
         let hostname = addr.split(':').next().unwrap_or("localhost");
 
         let server_name = ServerName::try_from(hostname.to_string())

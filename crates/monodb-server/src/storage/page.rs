@@ -1,6 +1,6 @@
 //! Page structures for disk-based storage.
 //!
-//! Pages are 16KB units containing a header and data section. Used for B+Tree nodes and data.
+//! Pages are 16KB units containing a header and data section.
 
 use monodb_common::{MonoError, Result};
 
@@ -15,11 +15,11 @@ pub const PAGE_HEADER_SIZE: usize = 64;
 /// Usable data area in a page.
 pub const PAGE_DATA_SIZE: usize = PAGE_SIZE - PAGE_HEADER_SIZE;
 
-/// Magic number for page validation: "MONO" in ASCII.
+/// Magic number for page validation.
 pub const PAGE_MAGIC: u32 = u32::from_be_bytes(*b"MONO");
 
 /// Current page format version.
-pub const PAGE_VERSION: u8 = 1;
+pub const PAGE_VERSION: u8 = 3;
 
 // Page identifiers
 
@@ -111,23 +111,6 @@ impl TryFrom<u8> for PageType {
 // Page Header
 
 /// Page header layout (64 bytes):
-///
-/// | Offset | Size | Field         | Description                        |
-/// |--------|------|---------------|------------------------------------|
-/// | 0      | 4    | magic         | Magic number (0x4D4F4E4F = "MONO") |
-/// | 4      | 1    | version       | Page format version                |
-/// | 5      | 1    | page_type     | Type of page                       |
-/// | 6      | 2    | flags         | Page flags (reserved)              |
-/// | 8      | 8    | page_id       | This page's ID                     |
-/// | 16     | 2    | key_count     | Number of keys in this page        |
-/// | 18     | 2    | free_space    | Bytes of free space remaining      |
-/// | 20     | 4    | data_offset   | Offset to start of data area       |
-/// | 24     | 8    | next_page     | Next page ID (for leaf chaining)   |
-/// | 32     | 8    | prev_page     | Previous page ID (for leaf chain)  |
-/// | 40     | 8    | parent        | Parent page ID                     |
-/// | 48     | 8    | lsn           | Log sequence number (for WAL)      |
-/// | 56     | 4    | checksum      | CRC32 checksum of the page         |
-/// | 60     | 4    | reserved      | Reserved for future use            |
 #[derive(Debug, Clone, Copy)]
 pub struct PageHeader {
     pub magic: u32,
@@ -374,8 +357,9 @@ impl DiskPage {
             .map_err(|_| MonoError::Storage("header size mismatch".into()))?;
         let header = PageHeader::from_bytes(&header_bytes)?;
 
-        // Copy data section
-        let data = buf[PAGE_HEADER_SIZE..].to_vec();
+        // Copy data
+        let data_len = PAGE_DATA_SIZE.saturating_sub(header.free_space as usize);
+        let data = buf[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + data_len].to_vec();
 
         Ok(Self { header, data })
     }

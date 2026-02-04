@@ -59,7 +59,7 @@ impl PluginRegistry {
     }
 
     /// Remove plugins whose paths no longer exist on disk
-    /// Returns the removed plugin infos (so caller can clean up caches)
+    /// Returns the removed plugin infos
     pub fn prune_missing(&self) -> Vec<PluginInfo> {
         let mut plugins = self.plugins.write();
         let to_remove: Vec<String> = plugins

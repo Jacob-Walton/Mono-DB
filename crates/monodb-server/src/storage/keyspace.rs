@@ -1,8 +1,4 @@
 //! Simple key-value keyspace storage.
-//!
-//! Provides a lightweight key-value store without versioning overhead.
-//! Supports optional TTL (time-to-live) for ephemeral data and can be
-//! backed by either disk or memory.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -131,7 +127,7 @@ pub trait KeyspaceBackend<K, V>: Send + Sync {
 
 // Memory Keyspace
 
-/// In-memory keyspace using DashMap for concurrent access.
+/// In-memory keyspace.
 pub struct MemoryKeyspace<K, V>
 where
     K: Eq + std::hash::Hash + Clone + Send + Sync,
@@ -295,7 +291,7 @@ where
 
 // Disk Keyspace
 
-/// Disk-backed keyspace using B+Tree storage.
+/// Disk-backed keyspace using B+Tree.
 pub struct DiskKeyspace<K, V>
 where
     K: Ord + Clone + Serializable + Send + Sync,

@@ -1,6 +1,4 @@
 //! Schema persistence and catalog
-//!
-//! Provides versioned schema storage that follows MVCC semantics.
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -34,11 +32,11 @@ pub struct StoredTableSchema {
     pub primary_key: Vec<String>,
     /// Secondary indexes
     pub indexes: Vec<StoredIndex>,
-    /// Schema version (incremented on ALTER)
+    /// Schema version
     pub version: SchemaVersion,
     /// Timestamp when this version was created
     pub created_at: i64,
-    /// Metadata page ID for B+Tree storage (used on reload)
+    /// Metadata page ID for B+Tree storage
     pub meta_page_id: u64,
 }
 
@@ -767,7 +765,7 @@ impl SchemaCatalog {
         self.schemas.read().get(table).cloned()
     }
 
-    /// Get a specific version of a schema (for MVCC reads)
+    /// Get a specific version of a schema
     pub fn get_version(
         &self,
         table: &str,
@@ -1088,8 +1086,8 @@ impl SchemaCatalog {
         Ok(())
     }
 
-    /// Remove a table schema (DROP TABLE)
-    /// Returns Ok(()) if schema doesn't exist (idempotent removal).
+    /// Remove a table schema
+    /// Returns Ok(()) if schema doesn't exist.
     pub fn remove(&self, name: &str) -> Result<()> {
         let mut schemas = self.schemas.write();
         let mut history = self.history.write();

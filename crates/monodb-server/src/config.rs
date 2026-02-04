@@ -81,7 +81,7 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             data_dir: "./data".into(),
-            buffer_pool_size: 1000, // 1000 pages = ~16MB (depending on page_size)
+            buffer_pool_size: 1000, // 1000 pages = 16MB
             page_size: 16384,       // 16KB pages
             wal: WalConfig::default(),
             checkpoint: CheckpointConfig::default(),

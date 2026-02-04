@@ -1,6 +1,4 @@
 //! Disk manager for page-level I/O.
-//!
-//! Manages page I/O with memory-mapped file support and fallback to standard I/O.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};

@@ -28,7 +28,7 @@ pub struct ExecutionContext {
     pub named_params: HashMap<String, Value>,
     /// Current transaction ID (if any)
     pub tx_id: Option<u64>,
-    /// Row limit for safety
+    /// Row limit
     pub max_rows: usize,
     /// Optional plugin host for user-defined functions
     #[cfg(feature = "plugins")]
@@ -811,11 +811,7 @@ impl<S: QueryStorage> Executor<S> {
 
         for row in scan.rows {
             // Extract key
-            let key = row
-                .get("_id")
-                .or_else(|| row.get("id"))
-                .cloned()
-                .ok_or_else(|| MonoError::InvalidOperation("no key for update".into()))?;
+            let key = Self::extract_row_key(&row)?;
 
             // Compute updates
             let mut updates = HashMap::new();
@@ -843,11 +839,7 @@ impl<S: QueryStorage> Executor<S> {
         let table = ctx.qualify_table(op.table.as_str());
 
         for row in scan.rows {
-            let key = row
-                .get("_id")
-                .or_else(|| row.get("id"))
-                .cloned()
-                .ok_or_else(|| MonoError::InvalidOperation("no key for delete".into()))?;
+            let key = Self::extract_row_key(&row)?;
 
             if self.storage.delete(tx_id, &table, &key)? {
                 count += 1;
@@ -855,6 +847,16 @@ impl<S: QueryStorage> Executor<S> {
         }
 
         Ok(QueryResult::affected(count))
+    }
+
+    /// Extract the key from a row for delete/update operations.
+    /// Tries _id, id, then falls back to first column value.
+    fn extract_row_key(row: &Row) -> Result<Value> {
+        row.get("_id")
+            .or_else(|| row.get("id"))
+            .or_else(|| row.columns.values().next())
+            .cloned()
+            .ok_or_else(|| MonoError::InvalidOperation("row has no columns to use as key".into()))
     }
 
     fn eval_expr(&self, expr: &ScalarExpr, row: &Row, ctx: &ExecutionContext) -> Result<Value> {
@@ -973,8 +975,8 @@ fn wrap_row_with_alias(row: Row, alias: &str) -> Row {
 
 fn eval_binary_op(left: &Value, op: BinaryOp, right: &Value) -> Result<Value> {
     match op {
-        BinaryOp::Eq => Ok(Value::Bool(left == right)),
-        BinaryOp::NotEq => Ok(Value::Bool(left != right)),
+        BinaryOp::Eq => Ok(Value::Bool(values_equal(left, right))),
+        BinaryOp::NotEq => Ok(Value::Bool(!values_equal(left, right))),
         BinaryOp::Lt => Ok(Value::Bool(compare_values(left, right) == Ordering::Less)),
         BinaryOp::Gt => Ok(Value::Bool(
             compare_values(left, right) == Ordering::Greater,
@@ -1046,6 +1048,29 @@ fn eval_binary_op(left: &Value, op: BinaryOp, right: &Value) -> Result<Value> {
                 "assignment in expression".into(),
             ))
         }
+    }
+}
+
+/// Compare two values for equality with type coercion for numerics
+fn values_equal(left: &Value, right: &Value) -> bool {
+    // Direct equality first
+    if left == right {
+        return true;
+    }
+
+    // Numeric coercion: compare as f64 if both are numeric
+    match (left, right) {
+        (
+            Value::Int32(_) | Value::Int64(_) | Value::Float32(_) | Value::Float64(_),
+            Value::Int32(_) | Value::Int64(_) | Value::Float32(_) | Value::Float64(_),
+        ) => {
+            let l = left.to_f64();
+            let r = right.to_f64();
+            (l - r).abs() < f64::EPSILON || l == r
+        }
+        // Null comparisons
+        (Value::Null, Value::Null) => true,
+        _ => false,
     }
 }
 

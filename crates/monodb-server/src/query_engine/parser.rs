@@ -690,6 +690,16 @@ impl<'a> Parser<'a> {
         self.expect_keyword("into")?;
         let target = self.parse_table_name()?;
 
+        let assignments = self.parse_assignments_block()?;
+
+        Ok(MutationStatement::Put(PutMutation {
+            target,
+            assignments,
+        }))
+    }
+
+    /// Parse a block of assignments, supporting nested objects
+    fn parse_assignments_block(&mut self) -> ParseResult<Vec<Assignment>> {
         let mut assignments = Vec::new();
 
         if self.check(TokenKind::Newline) {
@@ -704,9 +714,27 @@ impl<'a> Parser<'a> {
                     }
 
                     let field = self.expect_identifier()?;
-                    self.expect(TokenKind::Equals)?;
-                    let value = self.parse_expr()?;
-                    assignments.push(Assignment { field, value });
+
+                    // Check if this is a nested object (no = sign, followed by newline+indent)
+                    if self.check(TokenKind::Newline) {
+                        // Peek ahead to see if there's an indent
+                        self.skip_newlines();
+                        if self.check(TokenKind::Indent) {
+                            // Nested object, recursively parse assignments
+                            let nested = self.parse_nested_object()?;
+                            assignments.push(Assignment {
+                                field,
+                                value: nested,
+                            });
+                        } else {
+                            return Err(self.error("expected '=' or nested block after field name"));
+                        }
+                    } else {
+                        // Normal assignment
+                        self.expect(TokenKind::Equals)?;
+                        let value = self.parse_expr()?;
+                        assignments.push(Assignment { field, value });
+                    }
                     self.skip_newlines();
                 }
 
@@ -726,10 +754,48 @@ impl<'a> Parser<'a> {
             }
         }
 
-        Ok(MutationStatement::Put(PutMutation {
-            target,
-            assignments,
-        }))
+        Ok(assignments)
+    }
+
+    /// Parse a nested object from indented assignments
+    fn parse_nested_object(&mut self) -> ParseResult<Spanned<Expr>> {
+        let start_span = self.current_span();
+        self.advance(); // consume indent
+
+        let mut fields: Vec<(Spanned<Ident>, Spanned<Expr>)> = Vec::new();
+
+        while !self.check(TokenKind::Dedent) && !self.is_at_end() {
+            self.skip_newlines();
+            if self.check(TokenKind::Dedent) {
+                break;
+            }
+
+            let field = self.expect_identifier()?;
+
+            // Check for nested object
+            if self.check(TokenKind::Newline) {
+                self.skip_newlines();
+                if self.check(TokenKind::Indent) {
+                    let nested = self.parse_nested_object()?;
+                    fields.push((field, nested));
+                } else {
+                    return Err(self.error("expected '=' or nested block after field name"));
+                }
+            } else {
+                self.expect(TokenKind::Equals)?;
+                let value = self.parse_expr()?;
+                fields.push((field, value));
+            }
+            self.skip_newlines();
+        }
+
+        self.expect(TokenKind::Dedent)?;
+
+        let end_span = self.current_span();
+        Ok(Spanned::new(
+            Expr::Object(fields),
+            start_span.merge(end_span),
+        ))
     }
 
     /// Dispatch change statement, either mutation or table alteration.

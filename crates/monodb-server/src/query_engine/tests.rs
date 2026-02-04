@@ -269,7 +269,7 @@ mod lexer_tests {
     }
 }
 
-// Parser Tests - Queries
+// Parser Tests: Queries
 
 mod parser_query_tests {
     use super::*;
@@ -418,7 +418,7 @@ mod parser_query_tests {
     }
 }
 
-// Parser Tests - Mutations
+// Parser Tests: Mutations
 
 mod parser_mutation_tests {
     use super::*;
@@ -465,7 +465,7 @@ mod parser_mutation_tests {
     }
 }
 
-// Parser Tests - DDL
+// Parser Tests: DDL
 
 mod parser_ddl_tests {
     use super::*;
@@ -573,7 +573,7 @@ mod parser_ddl_tests {
     }
 }
 
-// Parser Tests - Transactions
+// Parser Tests: Transactions
 
 mod parser_transaction_tests {
     use super::*;
@@ -603,7 +603,7 @@ mod parser_transaction_tests {
     }
 }
 
-// Parser Tests - Control Statements (use, etc.)
+// Parser Tests: Control Statements (use, etc.)
 
 mod parser_control_tests {
     use super::*;

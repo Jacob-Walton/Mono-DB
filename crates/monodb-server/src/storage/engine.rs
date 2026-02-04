@@ -73,7 +73,7 @@ pub enum StorageType {
     Relational,
     /// Versioned document storage.
     Document,
-    /// Simple key-value keyspace.
+    /// Simple key-value storage.
     Keyspace,
 }
 
@@ -116,7 +116,7 @@ pub struct TableInfo {
     pub path: PathBuf,
 }
 
-// Type aliases for complex generic types
+// Type aliases
 type MvccTableMap = DashMap<String, Arc<MvccTable<Vec<u8>, Vec<u8>>>>;
 type DocumentStoreMap = DashMap<String, Arc<DocumentStore<Vec<u8>, Vec<u8>>>>;
 type KeyspaceMap = DashMap<String, Arc<Keyspace<Vec<u8>, Vec<u8>>>>;
@@ -129,7 +129,7 @@ pub struct StorageEngine {
     config: StorageConfig,
     /// Namespace manager.
     namespace_manager: Arc<NamespaceManager>,
-    /// Transaction manager (shared across all MVCC tables).
+    /// Transaction manager.
     tx_manager: Arc<TransactionManager>,
     /// Write-ahead log.
     wal: Option<Arc<Wal>>,
@@ -137,7 +137,7 @@ pub struct StorageEngine {
     disk_managers: DashMap<PathBuf, Arc<DiskManager>>,
     /// Buffer pools for each file.
     buffer_pools: DashMap<PathBuf, Arc<LruBufferPool>>,
-    /// MVCC tables (relational).
+    /// MVCC tables.
     mvcc_tables: MvccTableMap,
     /// Document stores.
     document_stores: DocumentStoreMap,
@@ -552,7 +552,7 @@ impl StorageEngine {
         let mut key = Vec::new();
         for value in values {
             let bytes = value.to_bytes();
-            // Length-prefix each value for unambiguous parsing
+            // Length-prefix each value
             key.extend(&(bytes.len() as u32).to_le_bytes());
             key.extend(&bytes);
         }
@@ -604,7 +604,7 @@ impl StorageEngine {
         Ok(())
     }
 
-    /// Remove entries from secondary indexes (called before delete).
+    /// Remove entries from secondary indexes.
     pub fn remove_from_secondary_indexes(
         &self,
         table: &str,
@@ -678,7 +678,7 @@ impl StorageEngine {
                 let index_key = Self::encode_index_key(&index_values);
 
                 if let Some(existing_pks) = secondary_index.get(&index_key) {
-                    // Check if any existing PK is not the one we're excluding (for updates)
+                    // Check if any existing PK is not the one we're excluding
                     let has_conflict = match exclude_pk {
                         Some(pk) => existing_pks.iter().any(|existing| existing != pk),
                         None => !existing_pks.is_empty(),
@@ -730,7 +730,7 @@ impl StorageEngine {
         Ok(primary_keys)
     }
 
-    /// Get all indexes for a table (for query planner).
+    /// Get all indexes for a table
     pub fn get_indexes(&self, table: &str) -> Vec<super::schema::StoredIndex> {
         self.schema_catalog
             .get(table)
@@ -747,7 +747,7 @@ impl StorageEngine {
 
     /// Begin a transaction with specific isolation level.
     pub fn begin_transaction_with_isolation(&self, isolation: IsolationLevel) -> Result<u64> {
-        // Create snapshot via transaction manager (it generates tx_id internally)
+        // Create snapshot via transaction manager
         let snapshot = self.tx_manager.begin(isolation, false)?;
         let tx_id = snapshot.tx_id;
 
@@ -790,7 +790,7 @@ impl StorageEngine {
         // Commit in transaction manager
         let commit_ts = self.tx_manager.commit(tx_id)?;
 
-        // Finalize MVCC records (persist commit timestamps)
+        // Finalize MVCC records
         for table in self.mvcc_tables.iter() {
             if let Err(e) = table.finalize_commit(tx_id, commit_ts) {
                 tracing::warn!("Failed to finalize commit for table {}: {}", table.key(), e);
@@ -827,7 +827,7 @@ impl StorageEngine {
             }
         }
 
-        // Rollback in transaction manager (marks tx as aborted for visibility)
+        // Rollback in transaction manager
         self.tx_manager.rollback(tx_id)?;
 
         // Log to WAL
@@ -1017,7 +1017,7 @@ impl StorageEngine {
         let pool = self.get_or_create_pool(&path)?;
 
         let keyspace = Arc::new(Keyspace::disk(pool)?);
-        // Disk keyspaces use BTree internally, get meta_page_id
+        // Get meta_page_id
         let meta_page_id = keyspace.meta_page_id().map(|p| p.0).unwrap_or(0);
         self.keyspaces.insert(qualified_name.clone(), keyspace);
 
@@ -1147,7 +1147,6 @@ impl StorageEngine {
 
         // Drop all tables in the namespace
         for table_info in tables_in_ns {
-            // Drop table cleans up: schema catalog, in-memory stores, files
             if let Err(e) = self.drop_table(&table_info.name) {
                 tracing::warn!(
                     "Failed to drop table {} during namespace drop: {}",
@@ -1308,7 +1307,7 @@ impl StorageEngine {
 
     // Relational (MVCC) Operations
 
-    /// Write a key-value pair in an MVCC table (insert or update).
+    /// Write a key-value pair in an MVCC table.
     pub fn mvcc_write(&self, tx_id: u64, table: &str, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
         if self.is_read_only(tx_id)? {
             return Err(MonoError::InvalidOperation(
@@ -1751,6 +1750,7 @@ impl StorageEngine {
         );
         Ok(())
     }
+
     // Document Operations
 
     /// Insert a document. Returns the revision number.
@@ -1799,7 +1799,7 @@ impl StorageEngine {
         doc_store.get(&key.to_vec())
     }
 
-    /// Update a document with optimistic concurrency.
+    /// Update a document.
     /// The expected_revision must match the current revision.
     pub fn doc_update(
         &self,
@@ -1826,7 +1826,7 @@ impl StorageEngine {
         Ok(revision)
     }
 
-    /// Delete a document with optimistic concurrency.
+    /// Delete a document.
     pub fn doc_delete(&self, store: &str, key: &[u8], expected_revision: u64) -> Result<bool> {
         let qualified = self.qualify_table_name(store);
         let doc_store = self
@@ -1879,7 +1879,7 @@ impl StorageEngine {
         }
     }
 
-    /// Get document history (most recent first, including current version).
+    /// Get document history (most recent first).
     pub fn doc_history(
         &self,
         store: &str,
@@ -1894,7 +1894,7 @@ impl StorageEngine {
         let key_vec = key.to_vec();
         let mut history = Vec::new();
 
-        // Include current document as the first (most recent) entry
+        // Include current document as the first entry
         if let Some(current) = doc_store.get(&key_vec)?
             && !current.deleted
         {

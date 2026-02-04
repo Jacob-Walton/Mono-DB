@@ -3,7 +3,7 @@
 //! Logical Query Plan
 //!
 //! Database-agnostic representation of a query describing what operations to perform,
-//! but not how. Sits between AST and physical plan, enabling optimization without
+//! but not how. Sits between AST and physical plan, enabling us to optimize without
 //! storage implementation details.
 
 use crate::query_engine::ast::{BinaryOp, ColumnRef, Ident, ParamRef, SortDirection, UnaryOp};
@@ -89,7 +89,7 @@ pub struct ScanNode {
     pub alias: Option<Ident>,
     /// Predicates that can be pushed down to storage layer
     pub pushdown_predicates: Vec<ScalarExpr>,
-    /// Columns required (for column pruning optimization)
+    /// Columns required
     pub required_columns: Option<Vec<Ident>>,
 }
 

@@ -1101,7 +1101,7 @@ impl ProtocolDecoder {
                 let user_id = get_string(&mut cursor)?;
                 let permissions = PermissionSet::decode(&mut cursor)?;
                 let expires_at = get_opt_u64(&mut cursor)?;
-                // Token is optional for backwards compatibility
+                // Token is optional
                 let token = if cursor.has_remaining() {
                     get_opt_string(&mut cursor)?
                 } else {

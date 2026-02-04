@@ -62,15 +62,13 @@ impl Server {
         let engine = Arc::new(StorageEngine::new(engine_config)?);
         let storage = Arc::new(StorageAdapter::new(engine));
 
-        // Bootstrap authentication system (creates system tables, root user if auth enabled)
+        // Bootstrap authentication system
         let bootstrap_result = bootstrap(&storage, auth_config.enabled)?;
         if let Some(ref password) = bootstrap_result.root_password {
             tracing::warn!(
                 "=========================================================================="
             );
-            tracing::warn!(
-                "  Root user created with generated password"
-            );
+            tracing::warn!("  Root user created with generated password");
             tracing::warn!("  Username: root");
             tracing::warn!("  Password: {}", password);
             tracing::warn!("  SAVE THIS PASSWORD! It will not be shown again.");

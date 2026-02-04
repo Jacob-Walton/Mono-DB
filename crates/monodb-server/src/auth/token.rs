@@ -73,7 +73,11 @@ impl SessionToken {
 
         let user_id = match row.get("user_id") {
             Some(Value::String(s)) => s.clone(),
-            _ => return Err(MonoError::Parse("Missing or invalid 'user_id' field".into())),
+            _ => {
+                return Err(MonoError::Parse(
+                    "Missing or invalid 'user_id' field".into(),
+                ));
+            }
         };
 
         let created_at = match row.get("created_at") {
@@ -158,10 +162,12 @@ impl TokenStore {
                 .into_iter()
                 .collect();
 
-        match self
-            .storage
-            .update(tx_id, TOKENS_TABLE, &Value::String(token.to_string()), updates)
-        {
+        match self.storage.update(
+            tx_id,
+            TOKENS_TABLE,
+            &Value::String(token.to_string()),
+            updates,
+        ) {
             Ok(_) => {
                 self.storage.commit(tx_id)?;
                 Ok(())
@@ -205,18 +211,15 @@ impl TokenStore {
 
         let mut deleted = 0u64;
         for row in rows {
-            if let Some(Value::String(stored_user_id)) = row.get("user_id") {
-                if stored_user_id == user_id {
-                    if let Some(Value::String(token)) = row.get("token") {
-                        if self
-                            .storage
-                            .delete(tx_id, TOKENS_TABLE, &Value::String(token.clone()))
-                            .is_ok()
-                        {
-                            deleted += 1;
-                        }
-                    }
-                }
+            if let Some(Value::String(stored_user_id)) = row.get("user_id")
+                && stored_user_id == user_id
+                && let Some(Value::String(token)) = row.get("token")
+                && self
+                    .storage
+                    .delete(tx_id, TOKENS_TABLE, &Value::String(token.clone()))
+                    .is_ok()
+            {
+                deleted += 1;
             }
         }
 
@@ -243,16 +246,14 @@ impl TokenStore {
                 _ => false,
             };
 
-            if expired {
-                if let Some(Value::String(token)) = row.get("token") {
-                    if self
-                        .storage
-                        .delete(tx_id, TOKENS_TABLE, &Value::String(token.clone()))
-                        .is_ok()
-                    {
-                        deleted += 1;
-                    }
-                }
+            if expired
+                && let Some(Value::String(token)) = row.get("token")
+                && self
+                    .storage
+                    .delete(tx_id, TOKENS_TABLE, &Value::String(token.clone()))
+                    .is_ok()
+            {
+                deleted += 1;
             }
         }
 

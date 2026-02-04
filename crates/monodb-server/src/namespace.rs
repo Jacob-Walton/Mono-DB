@@ -1,10 +1,6 @@
 #![allow(dead_code)]
 
 //! Namespace management for MonoDB.
-//!
-//! Namespaces provide logical isolation between different databases/tenants.
-//! Each namespace has its own set of tables, indexes, and configurations.
-//! Each namespace gets its own subdirectory under the data directory.
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -23,7 +19,7 @@ pub struct Namespace {
     pub name: String,
     /// Optional description
     pub description: Option<String>,
-    /// When the namespace was created (Unix timestamp)
+    /// When the namespace was created
     pub created_at: i64,
     /// Storage quota in bytes (None = unlimited)
     pub quota_bytes: Option<u64>,
@@ -73,7 +69,7 @@ impl Namespace {
     }
 }
 
-/// Binary format constants for persistence
+/// Binary format constants
 const NAMESPACE_MAGIC: u32 = u32::from_be_bytes(*b"NMSP");
 const NAMESPACE_VERSION: u16 = 1;
 

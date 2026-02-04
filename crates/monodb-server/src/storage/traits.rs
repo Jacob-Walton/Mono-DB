@@ -1,9 +1,4 @@
 //! Core storage traits for extensibility.
-//!
-//! These traits define the interfaces for the storage engine components,
-//! allowing different implementations (e.g., B+Tree vs LSM-Tree, different
-//! buffer pool strategies, etc.) to be swapped in without changing the
-//! higher-level code.
 
 use std::ops::RangeBounds;
 
@@ -16,7 +11,6 @@ use super::page::PageId;
 /// Trait for types that can be serialized to/from bytes.
 ///
 /// Used for keys and values in B+Trees and other structures.
-/// Implementations should support efficient, variable-length encoding.
 pub trait Serializable: Sized + Clone {
     /// Serialize this value, appending bytes to the buffer.
     fn serialize(&self, buf: &mut Vec<u8>);
@@ -227,9 +221,6 @@ pub fn varint_size(value: u64) -> usize {
 // Page Store Trait
 
 /// Low-level page I/O abstraction.
-///
-/// Implementations can use memory-mapped files, standard file I/O, or
-/// in-memory storage for testing.
 pub trait PageStore: Send + Sync {
     /// Read a page from storage.
     fn read(&self, page_id: PageId) -> Result<Vec<u8>>;
@@ -319,7 +310,7 @@ where
     }
 }
 
-// MVCC Store Trait (for relational tables)
+// MVCC Store Trait
 
 /// Transaction ID type.
 pub type TxId = u64;
@@ -383,7 +374,7 @@ where
     fn rollback(&self, tx_id: TxId) -> Result<()>;
 }
 
-// Versioned Store Trait (for documents)
+// Versioned Store Trait
 
 /// Revision identifier for document versioning.
 pub type Revision = u64;
@@ -399,9 +390,7 @@ pub struct VersionedDocument<V> {
     pub deleted: bool,
 }
 
-/// Simple versioned storage for documents (not full MVCC).
-///
-/// Uses optimistic concurrency with revision checking.
+/// Simple versioned storage for documents.
 pub trait VersionedStore<K, V>: Send + Sync
 where
     K: Ord + Serializable,
@@ -419,16 +408,13 @@ where
     /// Delete a document. Fails if the revision doesn't match.
     fn delete(&self, key: &K, expected_rev: Revision) -> Result<bool>;
 
-    /// Get all versions of a document (for conflict resolution).
+    /// Get all versions of a document.
     fn get_history(&self, key: &K, limit: usize) -> Result<Vec<VersionedDocument<V>>>;
 }
 
 // Storage Backend Trait
 
 /// High-level storage backend interface.
-///
-/// Query engine interface providing unified API over storage types
-/// (relational, document, keyspace).
 pub trait StorageBackend: Send + Sync {
     /// Get the name of this backend (for logging/debugging).
     fn name(&self) -> &str;
@@ -454,11 +440,11 @@ pub struct StorageStats {
     pub pages_dirty: u64,
     /// Total bytes on disk.
     pub disk_bytes: u64,
-    /// Number of active transactions (for MVCC).
+    /// Number of active transactions.
     pub active_transactions: u64,
     /// Number of documents/rows stored.
     pub record_count: u64,
 }
 
-// Re-export IsolationLevel at module level for convenience
+// Re-export IsolationLevel
 pub use monodb_common::protocol::IsolationLevel;

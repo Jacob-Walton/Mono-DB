@@ -1542,7 +1542,7 @@ impl std::str::FromStr for Value {
             return Ok(Value::Int64(i));
         }
 
-        // Float - always use Float64 for precision
+        // Float will always parse to Float64 for best precision
         if s.contains('.')
             && let Ok(f) = s.parse::<f64>()
         {

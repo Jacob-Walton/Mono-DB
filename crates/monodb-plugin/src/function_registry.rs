@@ -79,7 +79,7 @@ fn value_type_to_string(vt: &ValueType) -> String {
 
 /// Registry of all available functions from all plugins
 pub struct FunctionRegistry {
-    /// Functions indexed by name (lowercase for case-insensitive lookup)
+    /// Functions indexed by name
     functions: RwLock<HashMap<String, RegisteredFunction>>,
 }
 
@@ -131,7 +131,7 @@ impl FunctionRegistry {
         registry.retain(|_, v| v.plugin_name != plugin_name);
     }
 
-    /// Look up a function by name (case-insensitive)
+    /// Look up a function by name
     pub fn get(&self, name: &str) -> Option<RegisteredFunction> {
         self.functions.read().get(&name.to_lowercase()).cloned()
     }
