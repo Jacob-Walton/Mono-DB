@@ -3,18 +3,18 @@
 
 //! Storage engine for MonoDB.
 
-mod models;
+mod btree;
 mod buffer;
 mod disk;
-mod page;
-mod traits;
-mod btree;
 mod document;
-mod keyspace;
-mod mvcc;
-mod wal;
-pub mod schema;
 pub mod engine;
+mod keyspace;
+mod models;
+mod mvcc;
+mod page;
+pub mod schema;
+mod traits;
+mod wal;
 
 // Re-exports
 pub use btree::BTree;

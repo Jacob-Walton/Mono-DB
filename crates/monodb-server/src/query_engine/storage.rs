@@ -12,7 +12,10 @@ use monodb_common::{MonoError, Result, Value};
 
 #[cfg(feature = "plugins")]
 use crate::query_engine::ast::{Expr, Spanned};
-use crate::storage::{StorageType, engine::{StorageEngine, TableInfo}};
+use crate::storage::{
+    StorageType,
+    engine::{StorageEngine, TableInfo},
+};
 
 // Row Types
 
@@ -1114,11 +1117,13 @@ impl QueryStorage for StorageAdapter {
             .map(|(key_bytes, value_bytes)| {
                 let mut row = Self::decode_row(&value_bytes)?;
                 // Inject the key as _id if not already present
-                if !row.columns.contains_key("_id") && !row.columns.contains_key("id") {
-                    if let Ok((key_value, _)) = Value::from_bytes(&key_bytes) {
-                        row.insert("_id".to_string(), key_value);
-                    }
+                if !row.columns.contains_key("_id")
+                    && !row.columns.contains_key("id")
+                    && let Ok((key_value, _)) = Value::from_bytes(&key_bytes)
+                {
+                    row.insert("_id".to_string(), key_value);
                 }
+
                 Ok(row)
             })
             .collect()
@@ -1219,15 +1224,14 @@ impl QueryStorage for StorageAdapter {
 
             // Validate that non-nullable columns don't have NULL values
             for col in &schema.columns {
-                if !col.nullable {
-                    if let Some(value) = row.columns.get(&col.name) {
-                        if matches!(value, Value::Null) {
-                            return Err(MonoError::InvalidOperation(format!(
-                                "Column '{}' cannot be NULL",
-                                col.name
-                            )));
-                        }
-                    }
+                if !col.nullable
+                    && let Some(value) = row.columns.get(&col.name)
+                    && matches!(value, Value::Null)
+                {
+                    return Err(MonoError::InvalidOperation(format!(
+                        "Column '{}' cannot be NULL",
+                        col.name
+                    )));
                 }
             }
 

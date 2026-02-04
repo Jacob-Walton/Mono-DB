@@ -158,14 +158,13 @@ impl Formatter {
         }
 
         // Check if we have nested rows (join results) and flatten them
-        let flattened: Vec<IndexMap<String, Value>>;
         let use_flattened = self.has_nested_rows(rows);
 
-        if use_flattened {
-            flattened = rows.iter().map(|r| self.flatten_row(r)).collect();
+        let flattened: Vec<IndexMap<String, Value>> = if use_flattened {
+            rows.iter().map(|r| self.flatten_row(r)).collect()
         } else {
-            flattened = Vec::new();
-        }
+            Vec::new()
+        };
 
         // Collect columns from all rows
         let mut column_set = indexmap::IndexSet::new();
